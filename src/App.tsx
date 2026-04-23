@@ -114,6 +114,13 @@ const DEFAULT_SETTINGS = {
   closingDay: '末',
   paymentDay: '翌月15',
   editableYear: 'R08',
+  allowanceDefinitions: [
+    { id: 'extra', name: '役付手当', isTaxable: true, isSocialIns: true, isEmploymentIns: true },
+    { id: 'commute', name: '通勤交通費', isTaxable: false, isSocialIns: true, isEmploymentIns: true }
+  ],
+  deductionDefinitions: [
+    { id: 'union', name: '組合費' }
+  ],
   rateSchedules: DEFAULT_RATE_SCHEDULES,
   standardRewardTable: DEFAULT_STD_REWARD_TABLE
 };
@@ -426,14 +433,7 @@ const createInitialEmployee = (name = '新規社員', code = '', settings = null
     master: {
       name, employeeCode: code, gender: '', joinDate: '', retireDate: '', status: 'active',
       dob: '1990-01-01', closingDay: '末', paymentDay: '翌月15',
-      dependents: 0, taxType: 0, socialIns: 1, employmentIns: 1,
-      allowanceDefinitions: [
-        { id: 'extra', name: '役付手当', isTaxable: true },
-        { id: 'commute', name: '通勤交通費', isTaxable: false }
-      ],
-      deductionDefinitions: [
-        { id: 'union', name: '組合費' }
-      ]
+      dependents: 0, taxType: 0, socialIns: 1, employmentIns: 1
     },
     data: {
       years: {}
@@ -1069,11 +1069,11 @@ const App = () => {
       sums.basePay += Number(row.basePay) || 0; 
       sums.grossPay += monthlyResult.grossPay || 0;
       
-      (master.allowanceDefinitions || []).forEach(def => {
+      (settings?.allowanceDefinitions || []).forEach(def => {
         const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
         sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
       });
-      (master.deductionDefinitions || []).forEach(def => {
+      (settings?.deductionDefinitions || []).forEach(def => {
         const amt = Number(row.deductionAmounts?.[def.id]) || 0;
         sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
       });
@@ -1090,8 +1090,19 @@ const App = () => {
 
     const b = currentYearData.bonus || {};
     let bTotalAllowances = 0;
-    (master.allowanceDefinitions || []).forEach(def => { bTotalAllowances += Number(b.allowanceAmounts?.[def.id]) || 0; });
+    let bTotalSocialInsAllowances = 0;
+    let bTotalEmploymentInsAllowances = 0;
+    
+    (settings?.allowanceDefinitions || []).forEach(def => { 
+      const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+      bTotalAllowances += amt; 
+      if (def.isSocialIns !== false) bTotalSocialInsAllowances += amt;
+      if (def.isEmploymentIns !== false) bTotalEmploymentInsAllowances += amt;
+    });
+    
     const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+    const bSocialInsGross = (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+    const bEmploymentInsGross = (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
     
     const lastMonth = MONTHS[MONTHS.length-1];
     const lastMonthRow = currentYearData.monthly[lastMonth] || {};
@@ -1103,19 +1114,19 @@ const App = () => {
     const beRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, lastMonth) : (lastMonthRow.employmentRate || 6.0);
 
     const bEstStdAmount = settings?.standardRewardTable?.length > 0
-      ? getStandardRewardAmount(settings.standardRewardTable, bGross)
-      : bGross;
+      ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
+      : bSocialInsGross;
 
     const bIns = calculateSocialIns(bEstStdAmount, master.socialIns, bhRate, bpRate, bnRate, bcRate, lastMonthRow.hasNursingIns === 1);
     
-    const bEmp = master.employmentIns ? Math.floor(bGross * (beRate / 1000)) : 0;
+    const bEmp = master.employmentIns ? Math.floor(bEmploymentInsGross * (beRate / 1000)) : 0;
     
     const bSocialTotal = bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
     const bIncomeTax = Number(b.incomeTax) || 0;
     const bResidentTax = Number(b.residentTax) || 0;
 
     let bTotalCustomDeds = 0;
-    (master.deductionDefinitions || []).forEach(def => {
+    (settings?.deductionDefinitions || []).forEach(def => {
       bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
     });
 
@@ -1130,20 +1141,12 @@ const App = () => {
   }, [data, master, selectedYear, currentYearData, settings]);
 
   const allAllowances = useMemo(() => {
-    const defs = {};
-    Object.values(employees).forEach(emp => {
-      (emp.master?.allowanceDefinitions || []).forEach(def => { defs[def.id] = def; });
-    });
-    return Object.values(defs);
-  }, [employees]);
+    return settings?.allowanceDefinitions || [];
+  }, [settings?.allowanceDefinitions]);
 
   const allDeductions = useMemo(() => {
-    const defs = {};
-    Object.values(employees).forEach(emp => {
-      (emp.master?.deductionDefinitions || []).forEach(def => { defs[def.id] = def; });
-    });
-    return Object.values(defs);
-  }, [employees]);
+    return settings?.deductionDefinitions || [];
+  }, [settings?.deductionDefinitions]);
 
   const renderPayslip = (empId, emp, monthKey) => {
     const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
@@ -1187,7 +1190,7 @@ const App = () => {
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                 <span>基本給</span><span>{formatCurrency(rowData.basePay)}</span>
               </div>
-              {(emp.master.allowanceDefinitions || []).map(def => (
+              {(settings?.allowanceDefinitions || []).map(def => (
                 <div key={def.id} className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                   <span>{def.name}</span><span>{formatCurrency(rowData.allowanceAmounts?.[def.id])}</span>
                 </div>
@@ -1208,7 +1211,7 @@ const App = () => {
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>雇用保険料</span><span>{formatCurrency(calcResult.employment)}</span></div>
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>所得税</span><span>{formatCurrency(calcResult.incomeTax)}</span></div>
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>住民税</span><span>{formatCurrency(rowData.residentTax)}</span></div>
-              {(emp.master.deductionDefinitions || []).map(def => (
+              {(settings?.deductionDefinitions || []).map(def => (
                 <div key={def.id} className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                   <span>{def.name}</span><span>{formatCurrency(rowData.deductionAmounts?.[def.id])}</span>
                 </div>
@@ -1232,7 +1235,6 @@ const App = () => {
       </div>
     );
   };
-
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-400 font-bold">同期中...</div>;
 
@@ -1575,9 +1577,16 @@ const App = () => {
                           <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 sticky right-0 text-[11px]">{formatCurrency(results.sums.basePay + results.bonusResults.basePay)}</td>
                         </tr>
 
-                        {(master.allowanceDefinitions || []).map(def => (
+                        {(settings?.allowanceDefinitions || []).map(def => (
                           <tr key={def.id}>
-                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">{def.name} <span className={`text-[8px] px-1 border rounded ${def.isTaxable ? 'bg-orange-50 text-orange-500' : 'bg-emerald-50 text-emerald-600'}`}>{def.isTaxable ? '課税' : '非課'}</span></td>
+                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
+                              {def.name} 
+                              <div className="flex gap-0.5">
+                                <span className={`text-[8px] px-1 border rounded ${def.isTaxable !== false ? 'bg-orange-50 text-orange-500' : 'bg-slate-50 text-slate-400'}`} title="所得税対象">{def.isTaxable !== false ? '税' : '非'}</span>
+                                <span className={`text-[8px] px-1 border rounded ${def.isSocialIns !== false ? 'bg-indigo-50 text-indigo-500' : 'bg-slate-50 text-slate-400'}`} title="社会保険対象">{def.isSocialIns !== false ? '社' : '非'}</span>
+                                <span className={`text-[8px] px-1 border rounded ${def.isEmploymentIns !== false ? 'bg-teal-50 text-teal-500' : 'bg-slate-50 text-slate-400'}`} title="雇用保険対象">{def.isEmploymentIns !== false ? '雇' : '非'}</span>
+                              </div>
+                            </td>
                             {MONTHS.map(m => (<td key={m} className="border border-gray-300 p-0.5 text-right"><input type="number" disabled={isYearLocked} value={currentYearData.monthly[m]?.allowanceAmounts?.[def.id] || ''} onChange={e => { const newMD = {...(currentYearData.monthly[m]?.allowanceAmounts || {}), [def.id]: Number(e.target.value)}; updateMonthly(selectedYear, m, 'allowanceAmounts', newMD); }} className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} /></td>))}
                             <td className="border border-gray-300 p-1.5 text-right font-bold bg-gray-50 sticky right-[190px] text-[11px]">{formatCurrency(results.sums.allowances[def.id])}</td>
                             <td className="border border-gray-300 p-0.5 text-right bg-purple-50 sticky right-[100px]"><input type="number" disabled={isYearLocked} value={currentYearData.bonus?.allowanceAmounts?.[def.id] || ''} onChange={e => updateBonus(selectedYear, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-bold text-purple-700 text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed opacity-50' : ''}`} /></td>
@@ -1625,7 +1634,7 @@ const App = () => {
                           <td className="border border-gray-300 p-1.5 text-right font-black bg-orange-100 sticky right-0 text-[11px]">{formatCurrency(results.sums.residentTax + results.bonusResults.residentTax)}</td>
                         </tr>
                         
-                        {(master.deductionDefinitions || []).map(def => (
+                        {(settings?.deductionDefinitions || []).map(def => (
                           <tr key={def.id}>
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold text-red-700 flex justify-between items-center text-[11px]">{def.name} <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">手動</span></td>
                             {MONTHS.map(m => (<td key={m} className="border border-gray-300 p-0.5 text-right"><input type="number" disabled={isYearLocked} value={currentYearData.monthly[m]?.deductionAmounts?.[def.id] || ''} onChange={e => { const newMD = {...(currentYearData.monthly[m]?.deductionAmounts || {}), [def.id]: Number(e.target.value)}; updateMonthly(selectedYear, m, 'deductionAmounts', newMD); }} className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} /></td>))}
@@ -2046,18 +2055,95 @@ const App = () => {
                              {typeKey === 'employment' && (
                                <p className="text-[10px] text-slate-500 mt-2">※雇用保険料率は千分率(‰)です。例: 6.0‰ = 0.6%</p>
                              )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {/* 4. バックアップ管理 */}
-                  <section>
-                     <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">バックアップ管理</h3>
-                     
-                     <div className="space-y-6">
-                       <div className="bg-slate-50 p-4 rounded border border-slate-200">
+                             </div>
+                           );
+                         })}
+                       </div>
+                     </section>
+   
+                     {/* 4. 支給・控除項目設定 */}
+                     <section>
+                       <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">支給・控除項目設定 <span className="text-[10px] text-slate-400 font-normal ml-2">※全従業員の賃金台帳に反映されます</span></h3>
+                       
+                       <div className="space-y-6">
+                         {/* 支給項目 */}
+                         <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                           <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                             <h4 className="text-sm font-black text-indigo-700 flex items-center gap-2"><Tag size={16}/> 支給項目の追加</h4>
+                             <button onClick={() => { 
+                               // まだ全社設定用の項目がないため、とりあえず現在の master の項目を使うか、新しく定義するか。
+                               // ※今回は、現在開いている selectedEmployeeId の master に保存する形に一時的にしておきます。（後で完全な全社設定に分離します）
+                               if(!selectedEmployeeId) { alert("社員が選択されていません"); return; }
+                               const newId = `a_${Date.now()}`; 
+                               updateMasterObj({...master, allowanceDefinitions: [...(master.allowanceDefinitions || []), {id: newId, name: '新項目', isTaxable: true, isSocialIns: true, isEmploymentIns: true}]}); 
+                             }} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
+                           </div>
+                           
+                           <div className="space-y-3">
+                             {master && (master.allowanceDefinitions || []).map(def => (
+                               <div key={def.id} className="flex flex-wrap md:flex-nowrap items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-indigo-300 transition-colors">
+                                 <div className="flex-1">
+                                   <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
+                                   <input value={def.name} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-indigo-500 w-full" placeholder="手当名" />
+                                 </div>
+                                 <div className="flex items-center gap-4 bg-slate-50 px-4 py-2 rounded border border-slate-200">
+                                   <label className="flex items-center gap-2 cursor-pointer group">
+                                     <input type="checkbox" checked={def.isTaxable} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isTaxable: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-orange-500 border-gray-300 rounded focus:ring-orange-500 cursor-pointer" />
+                                     <span className="text-xs font-bold text-slate-700 group-hover:text-orange-600 transition-colors">所得税</span>
+                                   </label>
+                                   <label className="flex items-center gap-2 cursor-pointer group">
+                                     <input type="checkbox" checked={def.isSocialIns !== false} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isSocialIns: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
+                                     <span className="text-xs font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">社会保険</span>
+                                   </label>
+                                   <label className="flex items-center gap-2 cursor-pointer group">
+                                     <input type="checkbox" checked={def.isEmploymentIns !== false} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isEmploymentIns: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer" />
+                                     <span className="text-xs font-bold text-slate-700 group-hover:text-teal-600 transition-colors">雇用保険</span>
+                                   </label>
+                                 </div>
+                                 <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = master.allowanceDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, allowanceDefinitions: newDefs}); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
+                               </div>
+                             ))}
+                             {(!master || !master.allowanceDefinitions || master.allowanceDefinitions.length === 0) && (
+                               <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の支給項目はありません</p>
+                             )}
+                           </div>
+                         </div>
+   
+                         {/* 控除項目 */}
+                         <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                           <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                             <h4 className="text-sm font-black text-red-700 flex items-center gap-2"><MinusCircle size={16}/> 控除項目の追加</h4>
+                             <button onClick={() => { 
+                               if(!selectedEmployeeId) { alert("社員が選択されていません"); return; }
+                               const newId = `d_${Date.now()}`; 
+                               updateMasterObj({...master, deductionDefinitions: [...(master.deductionDefinitions || []), {id: newId, name: '新控除'}]}); 
+                             }} className="px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
+                           </div>
+                           
+                           <div className="space-y-3">
+                             {master && (master.deductionDefinitions || []).map(def => (
+                               <div key={def.id} className="flex items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-red-300 transition-colors">
+                                 <div className="flex-1">
+                                   <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
+                                   <input value={def.name} onChange={e => { const newDefs = master.deductionDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, deductionDefinitions: newDefs}); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-red-500 w-full max-w-md" placeholder="控除名" />
+                                 </div>
+                                 <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = master.deductionDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, deductionDefinitions: newDefs}); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
+                               </div>
+                             ))}
+                             {(!master || !master.deductionDefinitions || master.deductionDefinitions.length === 0) && (
+                               <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の控除項目はありません</p>
+                             )}
+                           </div>
+                         </div>
+                       </div>
+                     </section>
+   
+                     {/* 5. バックアップ管理 */}
+                     <section>
+                        <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">バックアップ管理</h3>
+                        
+                        <div className="space-y-6">
+                          <div className="bg-slate-50 p-4 rounded border border-slate-200">
                          <h4 className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Download size={14}/> バックアップ出力</h4>
                          <p className="text-[10px] text-slate-500 mb-3">現在システムに保存されているすべての設定と従業員データをJSON形式でダウンロードします。</p>
                          <button onClick={handleExportJson} className="px-5 py-2 text-sm font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded shadow-sm transition-colors flex items-center gap-2">

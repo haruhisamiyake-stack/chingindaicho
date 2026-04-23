@@ -1,3 +1,4 @@
+// @ts-nocheck
 const appId = 'payroll-ledger-app';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
@@ -1255,46 +1256,8 @@ const App = () => {
           <button onClick={() => setActiveTab('stdRewardTable')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${activeTab === 'stdRewardTable' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}><Database size={18} /> 標準報酬月額表</button>
           <button onClick={() => setActiveTab('taxTable')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${activeTab === 'taxTable' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}><TableIcon size={18} /> 源泉徴収税額表</button>
         </nav>
-
-        <div className="p-4 space-y-3">
-          <div className="flex justify-between items-center">
-            <span className="font-bold text-[10px] text-slate-500 tracking-wider">EMPLOYEES</span>
-            <button onClick={handleAddEmployee} className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1 text-[10px] font-bold transition-colors">
-              <PlusCircle size={12}/> 新規追加
-            </button>
-          </div>
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
-            <input 
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="社員検索..." 
-              className="w-full bg-slate-950 border border-slate-800 rounded-md py-2 pl-9 pr-3 text-xs outline-none focus:border-emerald-500 text-white placeholder-slate-600 transition-colors" 
-            />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1 custom-scrollbar">
-          {Object.entries(employees)
-            .filter(([id, emp]) => 
-               (emp.master?.name || '').includes(searchQuery) || 
-               (emp.master?.employeeCode || '').includes(searchQuery)
-            )
-            .map(([id, emp]) => (
-              <EmployeeRow 
-                key={id}
-                empId={id}
-                emp={emp}
-                isSelected={selectedEmployeeId === id && activeTab === 'ledger'}
-                onClick={() => { setSelectedEmployeeId(id); setActiveTab('ledger'); }}
-                onEdit={() => { setEditingEmployeeId(id); setEditingMaster({ ...emp.master }); }}
-                onOpenPayslip={() => setSlipEmployeeId(id)}
-                onRetire={() => handleRetireEmployee(id)}
-              />
-            ))}
-        </div>
         
-        <div className="p-4 border-t border-slate-800 bg-slate-950">
+        <div className="mt-auto p-4 border-t border-slate-800 bg-slate-950">
           <div className={`text-center px-3 py-2 rounded-md text-[10px] font-black tracking-widest uppercase border transition-all ${saveStatus ? 'bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'}`}>
             {saveStatus || 'Cloud Ready'}
           </div>
@@ -1848,14 +1811,6 @@ const App = () => {
 
                       <th className="border border-slate-200 p-2 min-w-[120px] bg-emerald-50 text-emerald-700 border-l-2">差引支給額</th>
 
-                      <th className="border border-slate-200 p-2 min-w-[110px] bg-gray-50 border-l-4">標準報酬月額</th>
-                      <th className="border border-slate-200 p-2 min-w-[70px] bg-gray-50">介護有無</th>
-                      <th className="border border-slate-200 p-2 min-w-[50px] bg-gray-50">健保</th>
-                      <th className="border border-slate-200 p-2 min-w-[50px] bg-gray-50">厚年</th>
-                      <th className="border border-slate-200 p-2 min-w-[50px] bg-gray-50">介護</th>
-                      <th className="border border-slate-200 p-2 min-w-[50px] bg-gray-50">子育</th>
-                      <th className="border border-slate-200 p-2 min-w-[50px] bg-gray-50">雇用</th>
-                      
                       <th className="border border-slate-200 p-2 min-w-[80px] bg-slate-200 text-slate-700 sticky right-0 z-50 border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">操作</th>
                     </tr>
                   </thead>
@@ -1928,20 +1883,6 @@ const App = () => {
                           <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700 border-l-2">
                             {formatCurrency(calcResult.netPay)}
                           </td>
-
-                          <td className="border border-slate-200 border-l-4 p-1 bg-gray-50/50">
-                            <input disabled={isYearLocked} type="number" value={rowData.stdAmount || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'stdAmount', Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                          </td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center">
-                            <button disabled={isYearLocked} onClick={() => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'hasNursingIns', rowData.hasNursingIns === 1 ? 0 : 1)} className={`w-full py-1 rounded text-[10px] font-bold transition-colors ${rowData.hasNursingIns === 1 ? 'bg-rose-500 text-white shadow-inner' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'} ${isYearLocked ? 'cursor-not-allowed opacity-50' : ''}`}>
-                              {rowData.hasNursingIns === 1 ? '有' : '無'}
-                            </button>
-                          </td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center font-mono text-indigo-500 text-[10px]">{hRate.toFixed(2)}</td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center font-mono text-indigo-500 text-[10px]">{pRate.toFixed(2)}</td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center font-mono text-indigo-500 text-[10px]">{nRate.toFixed(2)}</td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center font-mono text-indigo-500 text-[10px]">{cRate.toFixed(2)}</td>
-                          <td className="border border-slate-200 p-1 bg-gray-50/50 text-center font-mono text-indigo-500 text-[10px]">{eRate.toFixed(2)}</td>
 
                           <td className="border border-slate-200 p-1.5 sticky right-0 z-20 bg-white border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
                             <button 

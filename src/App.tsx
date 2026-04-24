@@ -989,52 +989,59 @@ const App = () => {
   };
 
   const updateMonthly = (year, m, field, val) => {
-    if (isLockedYear(year) || !year) return;
-    if (!selectedEmployeeId || !data) return;
-    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[m] || {};
+        if (isLockedYear(year) || !year) return;
+        if (!selectedEmployeeId || !data) return;
+        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+        const currentMonthData = currentYearDataObj.monthly[m] || {};
     
-    const newData = {
-      ...data,
-      years: {
-        ...data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [m]: { ...currentMonthData, [field]: val }
-          }
-        }
-      }
-    };
-    updateDataObj(year, newData);
-  };
-
-  const updateBonus = (year, field, id, val) => {
-    if (isLockedYear(year) || !year) return;
-    if (!selectedEmployeeId || !data) return;
-    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
-    const newBonus = { ...currentYearDataObj.bonus };
-    if (id) newBonus[field] = { ...(newBonus[field] || {}), [id]: val };
-    else newBonus[field] = val;
+        // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
+        if (field !== 'isLocked' && currentMonthData.isLocked) return;
+        
+        const newData = {
+          ...data,
+          years: {
+            ...data.years,
+            [year]: {
+              ...currentYearDataObj,
+              monthly: {
+                ...currentYearDataObj.monthly,
+                [m]: { ...currentMonthData, [field]: val }
+              }
+            }
+          }
+        };
+        updateDataObj(year, newData);
+      };
     
-    const newData = {
-      ...data,
-      years: {
-        ...data.years,
-        [year]: {
-          ...currentYearDataObj,
-          bonus: newBonus
-        }
-      }
-    };
-    updateDataObj(year, newData);
-  };
-
-  const toggleNursingIns = (year, targetMonth) => {
+      const updateBonus = (year, field, id, val) => {
+        if (isLockedYear(year) || !year) return;
+        if (!selectedEmployeeId || !data) return;
+        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+        const newBonus = { ...currentYearDataObj.bonus };
+        if (id) newBonus[field] = { ...(newBonus[field] || {}), [id]: val };
+        else newBonus[field] = val;
+        
+        const newData = {
+          ...data,
+          years: {
+            ...data.years,
+            [year]: {
+              ...currentYearDataObj,
+              bonus: newBonus
+            }
+          }
+        };
+        updateDataObj(year, newData);
+      };
+    
+      const toggleNursingIns = (year, targetMonth) => {
             if (isLockedYear(year) || !year) return;
             if (!selectedEmployeeId || !data) return;
             const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+    
+            // ★追加: 月がロックされていたら無効
+            if (currentYearDataObj.monthly[targetMonth]?.isLocked) return;
+    
             const newValue = currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
             
             const newMonthly = { ...currentYearDataObj.monthly };
@@ -1069,10 +1076,13 @@ const App = () => {
             if (isLockedYear(targetYear) || !targetYear || !empId) return;
             const emp = employees[empId];
             if (!emp) return;
-        
+    
+            // ★追加: 貼り付け先の月がロックされていたら無効
+            if (emp.data?.years?.[targetYear]?.monthly?.[targetMonth]?.isLocked) return;
+            
             let sourceYear = targetYear;
             let sourceMonth = '';
-        
+            
             if (targetMonth === '01') {
               const targetYearNum = getYearNumber(targetYear);
               sourceYear = targetYearNum > 0 ? `R${String(targetYearNum - 1).padStart(2, '0')}` : null;
@@ -1081,20 +1091,20 @@ const App = () => {
               const prevM = parseInt(targetMonth, 10) - 1;
               sourceMonth = String(prevM).padStart(2, '0');
             }
-        
+            
             if (!sourceYear || !emp.data?.years?.[sourceYear]?.monthly?.[sourceMonth]) {
               alert('コピー元の前月データが存在しません。');
               return;
             }
-        
+            
             const sourceData = emp.data.years[sourceYear].monthly[sourceMonth];
             const currentYearDataObj = emp.data?.years?.[targetYear] || createInitialYearData(targetYear, settings);
             const targetData = currentYearDataObj.monthly[targetMonth] || {};
-        
+            
             if (!window.confirm(`${parseInt(sourceMonth, 10)}月支給分の「金額・控除設定」を ${parseInt(targetMonth, 10)}月支給分にコピーしますか？\n（※日付や勤怠時間はコピーされません。既存の金額は上書きされます）`)) {
               return;
             }
-        
+            
             const newData = {
               ...targetData,
               basePay: sourceData.basePay || 0,
@@ -1104,7 +1114,7 @@ const App = () => {
               allowanceAmounts: sourceData.allowanceAmounts ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts)) : {},
               deductionAmounts: sourceData.deductionAmounts ? JSON.parse(JSON.stringify(sourceData.deductionAmounts)) : {},
             };
-        
+            
             const updatedEmpData = {
               ...emp.data,
               years: {
@@ -1118,72 +1128,78 @@ const App = () => {
                 }
               }
             };
-        
+            
             setEmployees(prev => ({
               ...prev,
               [empId]: { ...prev[empId], data: updatedEmpData }
             }));
             handleSave(empId, emp.master, updatedEmpData);
           };
-
-  const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
-    if (isLockedYear(year) || !year) return;
-    const emp = employees[empId];
-    if (!emp) return;
-    const currentYearDataObj = emp.data?.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
     
-    const newData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [monthKey]: { ...currentMonthData, [field]: val }
-          }
-        }
-      }
-    };
+      const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
+        if (isLockedYear(year) || !year) return;
+        const emp = employees[empId];
+        if (!emp) return;
+        const currentYearDataObj = emp.data?.years?.[year] || createInitialYearData(year, settings);
+        const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
     
-    setEmployees(prev => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: newData }
-    }));
-    handleSave(empId, emp.master, newData);
-  };
-
-  const updateEmployeeMonthlyObject = (empId, year, monthKey, objectField, innerField, val) => {
-    if (isLockedYear(year) || !year) return;
-    const emp = employees[empId];
-    if (!emp) return;
-    const currentYearDataObj = emp.data?.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
-    const currentObj = currentMonthData[objectField] || {};
+        // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
+        if (field !== 'isLocked' && currentMonthData.isLocked) return;
+        
+        const newData = {
+          ...emp.data,
+          years: {
+            ...emp.data.years,
+            [year]: {
+              ...currentYearDataObj,
+              monthly: {
+                ...currentYearDataObj.monthly,
+                [monthKey]: { ...currentMonthData, [field]: val }
+              }
+            }
+          }
+        };
+        
+        setEmployees(prev => ({
+          ...prev,
+          [empId]: { ...prev[empId], data: newData }
+        }));
+        handleSave(empId, emp.master, newData);
+      };
     
-    const newData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [monthKey]: {
-              ...currentMonthData,
-              [objectField]: { ...currentObj, [innerField]: val }
-            }
-          }
-        }
-      }
-    };
-    setEmployees(prev => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: newData }
-    }));
-    handleSave(empId, emp.master, newData);
-  };
+      const updateEmployeeMonthlyObject = (empId, year, monthKey, objectField, innerField, val) => {
+        if (isLockedYear(year) || !year) return;
+        const emp = employees[empId];
+        if (!emp) return;
+        const currentYearDataObj = emp.data?.years?.[year] || createInitialYearData(year, settings);
+        const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
+        const currentObj = currentMonthData[objectField] || {};
+    
+        // ★追加: 月がロックされていたら無効
+        if (currentMonthData.isLocked) return;
+        
+        const newData = {
+          ...emp.data,
+          years: {
+            ...emp.data.years,
+            [year]: {
+              ...currentYearDataObj,
+              monthly: {
+                ...currentYearDataObj.monthly,
+                [monthKey]: {
+                  ...currentMonthData,
+                  [objectField]: { ...currentObj, [innerField]: val }
+                }
+              }
+            }
+          }
+        };
+        setEmployees(prev => ({
+          ...prev,
+          [empId]: { ...prev[empId], data: newData }
+        }));
+        handleSave(empId, emp.master, newData);
+      };
 
   const results = useMemo(() => {
     const defaultSums = { 
@@ -1982,78 +1998,82 @@ const App = () => {
                       <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-800 text-white sticky right-0 z-30 font-black align-bottom text-[10px]">給与・賞与合計</th>
                     </tr>
                   </thead>
-                  <tbody className="text-xs whitespace-nowrap">
-                    {Object.entries(employees).map(([empId, emp]) => {
-                      const currentYearDataObj = selectedYear ? (emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings)) : createInitialYearData(null, settings);
-                      const rowData = currentYearDataObj.monthly[selectedListMonth] || {};
-                      const calcResult = calculateMonthlyResult(emp.master, rowData, settings, selectedListMonth);
+<tbody className="text-xs whitespace-nowrap">
+                    {Object.entries(employees).map(([empId, emp]) => {
+                      const currentYearDataObj = selectedYear ? (emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings)) : createInitialYearData(null, settings);
+                      const rowData = currentYearDataObj.monthly[selectedListMonth] || {};
+                      const calcResult = calculateMonthlyResult(emp.master, rowData, settings, selectedListMonth);
+                      
+                      // ★追加: この画面でも月のロック状態を判定する
+                      const isMonthLocked = rowData?.isLocked === true;
+                      const isDisabled = isYearLocked || isMonthLocked;
 
-                      return (
-                        <tr key={empId} className="hover:bg-slate-50 border-b border-gray-200 group transition-colors">
-                          <td className="border border-slate-200 p-2 sticky left-0 z-20 bg-white font-mono text-center w-[80px] min-w-[80px] group-hover:bg-slate-50 text-gray-500">
-                            {emp.master?.employeeCode || '-'}
-                          </td>
-                          <td className="border border-slate-200 p-2 sticky left-[80px] z-20 bg-white font-bold w-[120px] min-w-[120px] group-hover:bg-slate-50 text-slate-700">
-                            {emp.master?.name || '未設定'}
-                          </td>
-                          
-                          <td className="border border-slate-200 p-1 bg-white">
-                            <input disabled={isYearLocked} value={rowData.salaryMonthText || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'salaryMonthText', e.target.value)} className={`w-full bg-transparent outline-none text-center focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                          </td>
-                          <td className="border border-slate-200 p-1 bg-white">
-                            <input disabled={isYearLocked} type="date" value={rowData.payDate || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'payDate', e.target.value)} className={`w-full bg-transparent outline-none font-mono text-center focus:ring-1 ring-indigo-400 rounded py-1 text-[10px] ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                          </td>
-                          <td className="border border-slate-200 p-1 bg-white">
-                            <input disabled={isYearLocked} type="number" value={rowData.basePay || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'basePay', Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                          </td>
-                          
-                          {allAllowances.map(def => {
-                            return (
-                              <td key={def.id} className="border border-slate-200 p-1 bg-white">
-                                <input disabled={isYearLocked} type="number" value={rowData.allowanceAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                              </td>
-                            );
-                          })}
+                      return (
+                        <tr key={empId} className="hover:bg-slate-50 border-b border-gray-200 group transition-colors">
+                          <td className="border border-slate-200 p-2 sticky left-0 z-20 bg-white font-mono text-center w-[80px] min-w-[80px] group-hover:bg-slate-50 text-gray-500">
+                            {emp.master?.employeeCode || '-'}
+                          </td>
+                          <td className="border border-slate-200 p-2 sticky left-[80px] z-20 bg-white font-bold w-[120px] min-w-[120px] group-hover:bg-slate-50 text-slate-700">
+                            {emp.master?.name || '未設定'}
+                          </td>
+                          
+                          <td className="border border-slate-200 p-1 bg-white">
+                            <input disabled={isDisabled} value={rowData.salaryMonthText || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'salaryMonthText', e.target.value)} className={`w-full bg-transparent outline-none text-center focus:ring-1 ring-indigo-400 rounded py-1 ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                          </td>
+                          <td className="border border-slate-200 p-1 bg-white">
+                            <input disabled={isDisabled} type="date" value={rowData.payDate || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'payDate', e.target.value)} className={`w-full bg-transparent outline-none font-mono text-center focus:ring-1 ring-indigo-400 rounded py-1 text-[10px] ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                          </td>
+                          <td className="border border-slate-200 p-1 bg-white">
+                            <input disabled={isDisabled} type="number" value={rowData.basePay || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'basePay', Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                          </td>
+                          
+                          {allAllowances.map(def => {
+                            return (
+                              <td key={def.id} className="border border-slate-200 p-1 bg-white">
+                                <input disabled={isDisabled} type="number" value={rowData.allowanceAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                              </td>
+                            );
+                          })}
 
-                          <td className="border border-slate-200 p-2 text-right bg-blue-50/50 font-black text-blue-700 border-l-2">
-                            {formatCurrency(calcResult.grossPay)}
-                          </td>
-                          
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.health)}</td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.pension)}</td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.nursing)}</td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.childCare)}</td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.employment)}</td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">{formatCurrency(calcResult.incomeTax)}</td>
-                          
-                          <td className="border border-slate-200 p-1 bg-white">
-                            <input disabled={isYearLocked} type="number" value={rowData.residentTax || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'residentTax', Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                          </td>
+                          <td className="border border-slate-200 p-2 text-right bg-blue-50/50 font-black text-blue-700 border-l-2">
+                            {formatCurrency(calcResult.grossPay)}
+                          </td>
+                          
+                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.health)}</td>
+                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.pension)}</td>
+                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.nursing)}</td>
+                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.childCare)}</td>
+                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">{formatCurrency(calcResult.employment)}</td>
+                          <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">{formatCurrency(calcResult.incomeTax)}</td>
+                          
+                          <td className="border border-slate-200 p-1 bg-white">
+                            <input disabled={isDisabled} type="number" value={rowData.residentTax || ''} onChange={e => updateEmployeeMonthly(empId, selectedYear, selectedListMonth, 'residentTax', Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 focus:ring-1 ring-indigo-400 rounded py-1 ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                          </td>
 
-                          {allDeductions.map(def => {
-                            return (
-                              <td key={def.id} className="border border-slate-200 p-1 bg-white">
-                                <input disabled={isYearLocked} type="number" value={rowData.deductionAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'deductionAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono text-red-600 focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
-                              </td>
-                            );
-                          })}
+                          {allDeductions.map(def => {
+                            return (
+                              <td key={def.id} className="border border-slate-200 p-1 bg-white">
+                                <input disabled={isDisabled} type="number" value={rowData.deductionAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'deductionAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono text-red-600 focus:ring-1 ring-indigo-400 rounded py-1 ${isDisabled ? 'cursor-not-allowed text-slate-400' : ''}`} />
+                              </td>
+                            );
+                          })}
 
-                          <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700 border-l-2">
-                            {formatCurrency(calcResult.netPay)}
-                          </td>
+                          <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700 border-l-2">
+                            {formatCurrency(calcResult.netPay)}
+                          </td>
 
-                          <td className="border border-slate-200 p-1.5 sticky right-0 z-20 bg-white border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
-                            <button 
-                              onClick={() => setSlipEmployeeId(empId)}
-                              className="w-full flex items-center justify-center gap-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-1.5 rounded text-[10px] font-bold transition-colors"
-                            >
-                              <FileText size={12}/> 明細表示
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
+                          <td className="border border-slate-200 p-1.5 sticky right-0 z-20 bg-white border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
+                            <button 
+                              onClick={() => setSlipEmployeeId(empId)}
+                              className="w-full flex items-center justify-center gap-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-1.5 rounded text-[10px] font-bold transition-colors"
+                            >
+                              <FileText size={12}/> 明細表示
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
                 </table>
               </div>
             </div>

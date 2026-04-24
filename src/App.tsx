@@ -353,16 +353,24 @@ const formatCurrency = (val) => {
 const calculateMonthlyResult = (master, row, settings, monthKey) => {
   if (!master || !row) return {};
   const base = Number(row.basePay) || 0;
+  
   let totalAllowances = 0;
   let totalTaxableAllowances = 0;
-  (master.allowanceDefinitions || []).forEach(def => {
+  let totalSocialInsAllowances = 0;
+  let totalEmploymentInsAllowances = 0;
+
+  (settings?.allowanceDefinitions || []).forEach(def => {
     const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
     totalAllowances += amt;
-    if (def.isTaxable) totalTaxableAllowances += amt;
+    if (def.isTaxable !== false) totalTaxableAllowances += amt;
+    if (def.isSocialIns !== false) totalSocialInsAllowances += amt;
+    if (def.isEmploymentIns !== false) totalEmploymentInsAllowances += amt;
   });
 
   const grossPay = base + totalAllowances;
   const taxableGross = base + totalTaxableAllowances;
+  const socialInsGross = base + totalSocialInsAllowances; 
+  const employmentInsGross = base + totalEmploymentInsAllowances; 
 
   const hRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, monthKey) : (row.healthRate || 5.0);
   const pRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, monthKey) : (row.pensionRate || 9.15);
@@ -371,8 +379,8 @@ const calculateMonthlyResult = (master, row, settings, monthKey) => {
   const eRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, monthKey) : (row.employmentRate || 6.0);
 
   const estStdAmount = settings?.standardRewardTable?.length > 0
-    ? getStandardRewardAmount(settings.standardRewardTable, grossPay)
-    : grossPay;
+    ? getStandardRewardAmount(settings.standardRewardTable, socialInsGross)
+    : socialInsGross;
 
   const stdAmount = Number(row.stdAmount) > 0 
     ? Number(row.stdAmount) 
@@ -380,13 +388,13 @@ const calculateMonthlyResult = (master, row, settings, monthKey) => {
 
   const ins = calculateSocialIns(stdAmount, master.socialIns, hRate, pRate, nRate, cRate, row.hasNursingIns === 1);
   
-  const employment = master.employmentIns ? Math.floor(grossPay * (eRate / 1000)) : 0;
+  const employment = master.employmentIns ? Math.floor(employmentInsGross * (eRate / 1000)) : 0;
   const socialTotal = ins.health + ins.pension + ins.nursing + ins.childCare + employment;
   const incomeTax = calculateIncomeTax(Math.max(0, taxableGross - socialTotal), master.dependents, master.taxType === 1);
   const residentTax = Number(row.residentTax) || 0;
 
   let totalCustomDeds = 0;
-  (master.deductionDefinitions || []).forEach(def => {
+  (settings?.deductionDefinitions || []).forEach(def => {
     const amt = Number(row.deductionAmounts?.[def.id]) || 0;
     totalCustomDeds += amt;
   });
@@ -447,55 +455,6 @@ const createInitialEmployee = (name = '新規社員', code = '', settings = null
   return initialData;
 };
 
-const EmployeeRow = ({ empId, emp, isSelected, onClick, onEdit, onOpenPayslip, onRetire }) => {
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const master = emp.master || {};
-
-  return (
-    <div className={`relative w-full text-left px-2 py-1.5 rounded-md flex items-center justify-between transition-all ${isSelected ? 'bg-slate-800 border border-slate-700 shadow-inner' : 'hover:bg-slate-800/50 border border-transparent'}`}>
-      <div className="flex-1 min-w-0 pr-2 cursor-pointer py-1 pl-1" onClick={onClick}>
-        <div className={`text-xs font-bold truncate flex items-center gap-2 ${isSelected ? 'text-white' : 'text-slate-300'}`}>
-          {master.name || '名称未設定'}
-          {master.status === 'retired' ? (
-            <span className="text-[9px] font-bold bg-red-500/20 text-red-400 px-1 py-0.5 rounded border border-red-500/30 leading-none">退職</span>
-          ) : (
-            <span className="text-[9px] font-bold bg-emerald-500/20 text-emerald-400 px-1 py-0.5 rounded border border-emerald-500/30 leading-none">在籍</span>
-          )}
-        </div>
-        <div className="text-[10px] text-slate-500 mt-1 font-mono leading-none pl-0.5">
-          {master.employeeCode ? `ID: ${master.employeeCode}` : 'ID未設定'}
-        </div>
-      </div>
-
-      <div className="flex items-center flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-        <button onClick={onEdit} className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-600 transition-colors" title="社員情報を編集">
-          <Edit2 size={14}/>
-        </button>
-        <div className="relative">
-          <button onClick={() => setIsMenuOpen(true)} className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-600 transition-colors" title="メニュー">
-            <MoreVertical size={14}/>
-          </button>
-          
-          {isMenuOpen && (
-            <>
-              <div className="fixed inset-0 z-[60]" onClick={() => setIsMenuOpen(false)}></div>
-              <div className="absolute right-0 top-full mt-1 w-44 bg-slate-800 border border-slate-700 rounded-md shadow-2xl z-[70] py-1 overflow-hidden">
-                <button onClick={() => { setIsMenuOpen(false); onClick(); }} className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white transition-colors">賃金台帳を開く</button>
-                <button onClick={() => { setIsMenuOpen(false); onEdit(); }} className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white transition-colors">社員情報を編集</button>
-                <button onClick={() => { setIsMenuOpen(false); onOpenPayslip(); }} className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white transition-colors">給与明細を表示</button>
-                {master.status !== 'retired' && (
-                  <button onClick={() => { setIsMenuOpen(false); onRetire(); }} className="w-full text-left px-4 py-2.5 text-xs font-bold text-red-400 hover:bg-slate-700 hover:text-red-300 transition-colors border-t border-slate-700 mt-1">退職にする</button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-
 const App = () => {
   const [activeTab, setActiveTab] = useState('ledger');
   const [db, setDb] = useState(null);
@@ -508,7 +467,6 @@ const App = () => {
 
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('');
   const [employeeSearchQuery, setEmployeeSearchQuery] = useState('');
   
   const [selectedYear, setSelectedYear] = useState(null);
@@ -1368,6 +1326,21 @@ const App = () => {
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                       <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
+                        <span className="text-[10px] font-bold text-slate-400">対象社員:</span>
+                        <select 
+                          value={selectedEmployeeId || ''} 
+                          onChange={(e) => setSelectedEmployeeId(e.target.value)} 
+                          className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
+                        >
+                          {Object.entries(employees).map(([id, emp]) => (
+                            <option key={id} value={id}>{emp.master?.employeeCode} {emp.master?.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="h-6 w-px bg-slate-600 mx-1 hidden md:block"></div>
+
+                      <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
                         <span className="text-[10px] font-bold text-slate-400">年度:</span>
                         <select 
                           value={selectedYear || ''} 
@@ -1454,39 +1427,6 @@ const App = () => {
                         <input type="date" value={master.retireDate || ''} onChange={e => updateMasterObj({...master, retireDate: e.target.value})} className="bg-transparent border-b border-red-300 outline-none text-xs w-28 font-mono focus:border-red-400 text-red-600" />
                       </div>
                     )}
-                  </div>
-                </div>
-
-                <div className="flex gap-4">
-                  {/* 年度ロックは年度データのみ対象。master(手当・控除定義など)はロック対象外のため編集可能 */}
-                  <div className="flex-1 bg-white p-3 rounded-lg border border-gray-200 shadow-sm flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><Tag size={12}/> 支給項目の追加</h3>
-                      <div className="flex flex-wrap gap-2">
-                        {(master.allowanceDefinitions || []).map(def => (
-                          <div key={def.id} className="flex items-center bg-gray-50 border rounded px-2 py-1 gap-2">
-                            <input value={def.name} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="text-[10px] font-bold bg-transparent outline-none w-20" />
-                            <button onClick={() => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isTaxable: !d.isTaxable} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className={`text-[8px] font-bold px-1 rounded ${def.isTaxable ? 'bg-orange-100 text-orange-600' : 'bg-slate-200 text-slate-500'}`}>{def.isTaxable ? '課税' : '非課税'}</button>
-                            <button onClick={() => { const newDefs = master.allowanceDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="text-gray-400 hover:text-red-500"><Trash2 size={10}/></button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <button onClick={() => { const newId = `a_${Date.now()}`; updateMasterObj({...master, allowanceDefinitions: [...master.allowanceDefinitions, {id: newId, name: '新項目', isTaxable: true}]}); }} className="p-1 text-emerald-500 hover:bg-emerald-50 rounded transition-all"><PlusCircle size={20}/></button>
-                  </div>
-                  <div className="flex-1 bg-white p-3 rounded-lg border border-gray-200 shadow-sm flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><MinusCircle size={12}/> 控除項目の追加</h3>
-                      <div className="flex flex-wrap gap-2">
-                        {(master.deductionDefinitions || []).map(def => (
-                          <div key={def.id} className="flex items-center bg-gray-50 border rounded px-2 py-1 gap-2">
-                            <input value={def.name} onChange={e => { const newDefs = master.deductionDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, deductionDefinitions: newDefs}); }} className="text-[10px] font-bold bg-transparent outline-none w-20" />
-                            <button onClick={() => { const newDefs = master.deductionDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, deductionDefinitions: newDefs}); }} className="text-gray-400 hover:text-red-500"><Trash2 size={10}/></button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <button onClick={() => { const newId = `d_${Date.now()}`; updateMasterObj({...master, deductionDefinitions: [...master.deductionDefinitions, {id: newId, name: '新控除'}]}); }} className="p-1 text-red-500 hover:bg-red-50 rounded transition-all"><PlusCircle size={20}/></button>
                   </div>
                 </div>
 
@@ -1798,7 +1738,7 @@ const App = () => {
                       
                       {allAllowances.map(def => (
                         <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
-                          {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable ? '(課)' : '(非)'}</span>
+                          {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable !== false ? '(課)' : '(非)'}</span>
                         </th>
                       ))}
                       
@@ -1829,12 +1769,6 @@ const App = () => {
                       const rowData = currentYearDataObj.monthly[selectedListMonth] || {};
                       const calcResult = calculateMonthlyResult(emp.master, rowData, settings, selectedListMonth);
 
-                      const hRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, selectedListMonth) : (rowData.healthRate || 5.0);
-                      const pRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, selectedListMonth) : (rowData.pensionRate || 9.15);
-                      const nRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, selectedListMonth) : (rowData.nursingRate || 0.8);
-                      const cRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, selectedListMonth) : (rowData.childCareRate || 0.0);
-                      const eRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, selectedListMonth) : (rowData.employmentRate || 6.0);
-
                       return (
                         <tr key={empId} className="hover:bg-slate-50 border-b border-gray-200 group transition-colors">
                           <td className="border border-slate-200 p-2 sticky left-0 z-20 bg-white font-mono text-center w-[80px] min-w-[80px] group-hover:bg-slate-50 text-gray-500">
@@ -1855,8 +1789,6 @@ const App = () => {
                           </td>
                           
                           {allAllowances.map(def => {
-                            const hasDef = emp.master?.allowanceDefinitions?.some(d => d.id === def.id);
-                            if (!hasDef) return <td key={def.id} className="border border-slate-200 p-2 bg-gray-50 text-center text-gray-300">-</td>;
                             return (
                               <td key={def.id} className="border border-slate-200 p-1 bg-white">
                                 <input disabled={isYearLocked} type="number" value={rowData.allowanceAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
@@ -1880,8 +1812,6 @@ const App = () => {
                           </td>
 
                           {allDeductions.map(def => {
-                            const hasDef = emp.master?.deductionDefinitions?.some(d => d.id === def.id);
-                            if (!hasDef) return <td key={def.id} className="border border-slate-200 p-2 bg-gray-50 text-center text-gray-300">-</td>;
                             return (
                               <td key={def.id} className="border border-slate-200 p-1 bg-white">
                                 <input disabled={isYearLocked} type="number" value={rowData.deductionAmounts?.[def.id] || ''} onChange={e => updateEmployeeMonthlyObject(empId, selectedYear, selectedListMonth, 'deductionAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-mono text-red-600 focus:ring-1 ring-indigo-400 rounded py-1 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} />
@@ -2055,95 +1985,93 @@ const App = () => {
                              {typeKey === 'employment' && (
                                <p className="text-[10px] text-slate-500 mt-2">※雇用保険料率は千分率(‰)です。例: 6.0‰ = 0.6%</p>
                              )}
-                             </div>
-                           );
-                         })}
-                       </div>
-                     </section>
-   
-                     {/* 4. 支給・控除項目設定 */}
-                     <section>
-                       <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">支給・控除項目設定 <span className="text-[10px] text-slate-400 font-normal ml-2">※全従業員の賃金台帳に反映されます</span></h3>
-                       
-                       <div className="space-y-6">
-                         {/* 支給項目 */}
-                         <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
-                           <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
-                             <h4 className="text-sm font-black text-indigo-700 flex items-center gap-2"><Tag size={16}/> 支給項目の追加</h4>
-                             <button onClick={() => { 
-                               // まだ全社設定用の項目がないため、とりあえず現在の master の項目を使うか、新しく定義するか。
-                               // ※今回は、現在開いている selectedEmployeeId の master に保存する形に一時的にしておきます。（後で完全な全社設定に分離します）
-                               if(!selectedEmployeeId) { alert("社員が選択されていません"); return; }
-                               const newId = `a_${Date.now()}`; 
-                               updateMasterObj({...master, allowanceDefinitions: [...(master.allowanceDefinitions || []), {id: newId, name: '新項目', isTaxable: true, isSocialIns: true, isEmploymentIns: true}]}); 
-                             }} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
-                           </div>
-                           
-                           <div className="space-y-3">
-                             {master && (master.allowanceDefinitions || []).map(def => (
-                               <div key={def.id} className="flex flex-wrap md:flex-nowrap items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-indigo-300 transition-colors">
-                                 <div className="flex-1">
-                                   <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
-                                   <input value={def.name} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-indigo-500 w-full" placeholder="手当名" />
-                                 </div>
-                                 <div className="flex items-center gap-4 bg-slate-50 px-4 py-2 rounded border border-slate-200">
-                                   <label className="flex items-center gap-2 cursor-pointer group">
-                                     <input type="checkbox" checked={def.isTaxable} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isTaxable: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-orange-500 border-gray-300 rounded focus:ring-orange-500 cursor-pointer" />
-                                     <span className="text-xs font-bold text-slate-700 group-hover:text-orange-600 transition-colors">所得税</span>
-                                   </label>
-                                   <label className="flex items-center gap-2 cursor-pointer group">
-                                     <input type="checkbox" checked={def.isSocialIns !== false} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isSocialIns: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
-                                     <span className="text-xs font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">社会保険</span>
-                                   </label>
-                                   <label className="flex items-center gap-2 cursor-pointer group">
-                                     <input type="checkbox" checked={def.isEmploymentIns !== false} onChange={e => { const newDefs = master.allowanceDefinitions.map(d => d.id === def.id ? {...d, isEmploymentIns: e.target.checked} : d); updateMasterObj({...master, allowanceDefinitions: newDefs}); }} className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer" />
-                                     <span className="text-xs font-bold text-slate-700 group-hover:text-teal-600 transition-colors">雇用保険</span>
-                                   </label>
-                                 </div>
-                                 <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = master.allowanceDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, allowanceDefinitions: newDefs}); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
-                               </div>
-                             ))}
-                             {(!master || !master.allowanceDefinitions || master.allowanceDefinitions.length === 0) && (
-                               <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の支給項目はありません</p>
-                             )}
-                           </div>
-                         </div>
-   
-                         {/* 控除項目 */}
-                         <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
-                           <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
-                             <h4 className="text-sm font-black text-red-700 flex items-center gap-2"><MinusCircle size={16}/> 控除項目の追加</h4>
-                             <button onClick={() => { 
-                               if(!selectedEmployeeId) { alert("社員が選択されていません"); return; }
-                               const newId = `d_${Date.now()}`; 
-                               updateMasterObj({...master, deductionDefinitions: [...(master.deductionDefinitions || []), {id: newId, name: '新控除'}]}); 
-                             }} className="px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
-                           </div>
-                           
-                           <div className="space-y-3">
-                             {master && (master.deductionDefinitions || []).map(def => (
-                               <div key={def.id} className="flex items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-red-300 transition-colors">
-                                 <div className="flex-1">
-                                   <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
-                                   <input value={def.name} onChange={e => { const newDefs = master.deductionDefinitions.map(d => d.id === def.id ? {...d, name: e.target.value} : d); updateMasterObj({...master, deductionDefinitions: newDefs}); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-red-500 w-full max-w-md" placeholder="控除名" />
-                                 </div>
-                                 <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = master.deductionDefinitions.filter(d => d.id !== def.id); updateMasterObj({...master, deductionDefinitions: newDefs}); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
-                               </div>
-                             ))}
-                             {(!master || !master.deductionDefinitions || master.deductionDefinitions.length === 0) && (
-                               <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の控除項目はありません</p>
-                             )}
-                           </div>
-                         </div>
-                       </div>
-                     </section>
-   
-                     {/* 5. バックアップ管理 */}
-                     <section>
-                        <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">バックアップ管理</h3>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+
+                  {/* 4. 支給・控除項目設定 */}
+                  <section>
+                    <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">支給・控除項目設定 <span className="text-[10px] text-slate-400 font-normal ml-2">※全従業員の賃金台帳に反映されます</span></h3>
+                    
+                    <div className="space-y-6">
+                      {/* 支給項目 */}
+                      <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                        <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                          <h4 className="text-sm font-black text-indigo-700 flex items-center gap-2"><Tag size={16}/> 支給項目の追加</h4>
+                          <button onClick={() => { 
+                            const newId = `a_${Date.now()}`; 
+                            const newDefs = [...(settings.allowanceDefinitions || []), {id: newId, name: '新項目', isTaxable: true, isSocialIns: true, isEmploymentIns: true}];
+                            handleSettingChange('allowanceDefinitions', newDefs);
+                          }} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
+                        </div>
                         
-                        <div className="space-y-6">
-                          <div className="bg-slate-50 p-4 rounded border border-slate-200">
+                        <div className="space-y-3">
+                          {(settings?.allowanceDefinitions || []).map((def, idx) => (
+                            <div key={def.id} className="flex flex-wrap md:flex-nowrap items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-indigo-300 transition-colors">
+                              <div className="flex-1">
+                                <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
+                                <input value={def.name} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].name = e.target.value; handleSettingChange('allowanceDefinitions', newDefs); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-indigo-500 w-full" placeholder="手当名" />
+                              </div>
+                              <div className="flex items-center gap-4 bg-slate-50 px-4 py-2 rounded border border-slate-200">
+                                <label className="flex items-center gap-2 cursor-pointer group">
+                                  <input type="checkbox" checked={def.isTaxable !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isTaxable = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-orange-500 border-gray-300 rounded focus:ring-orange-500 cursor-pointer" />
+                                  <span className="text-xs font-bold text-slate-700 group-hover:text-orange-600 transition-colors">所得税</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer group">
+                                  <input type="checkbox" checked={def.isSocialIns !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isSocialIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
+                                  <span className="text-xs font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">社会保険</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer group">
+                                  <input type="checkbox" checked={def.isEmploymentIns !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isEmploymentIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer" />
+                                  <span className="text-xs font-bold text-slate-700 group-hover:text-teal-600 transition-colors">雇用保険</span>
+                                </label>
+                              </div>
+                              <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = settings.allowanceDefinitions.filter(d => d.id !== def.id); handleSettingChange('allowanceDefinitions', newDefs); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
+                            </div>
+                          ))}
+                          {(!settings?.allowanceDefinitions || settings.allowanceDefinitions.length === 0) && (
+                            <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の支給項目はありません</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 控除項目 */}
+                      <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                        <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                          <h4 className="text-sm font-black text-red-700 flex items-center gap-2"><MinusCircle size={16}/> 控除項目の追加</h4>
+                          <button onClick={() => { 
+                            const newId = `d_${Date.now()}`; 
+                            const newDefs = [...(settings.deductionDefinitions || []), {id: newId, name: '新控除'}];
+                            handleSettingChange('deductionDefinitions', newDefs);
+                          }} className="px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-500 rounded flex items-center gap-1 transition-colors"><PlusCircle size={14}/> 追加</button>
+                        </div>
+                        
+                        <div className="space-y-3">
+                          {(settings?.deductionDefinitions || []).map((def, idx) => (
+                            <div key={def.id} className="flex items-center bg-white border border-slate-200 rounded-lg p-3 gap-4 shadow-sm hover:border-red-300 transition-colors">
+                              <div className="flex-1">
+                                <label className="text-[10px] font-bold text-slate-500 block mb-1">項目名</label>
+                                <input value={def.name} onChange={e => { const newDefs = [...settings.deductionDefinitions]; newDefs[idx].name = e.target.value; handleSettingChange('deductionDefinitions', newDefs); }} className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-red-500 w-full max-w-md" placeholder="控除名" />
+                              </div>
+                              <button onClick={() => { if(window.confirm(`「${def.name}」を削除しますか？`)){ const newDefs = settings.deductionDefinitions.filter(d => d.id !== def.id); handleSettingChange('deductionDefinitions', newDefs); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors" title="削除"><Trash2 size={16}/></button>
+                            </div>
+                          ))}
+                          {(!settings?.deductionDefinitions || settings.deductionDefinitions.length === 0) && (
+                            <p className="text-xs text-slate-400 text-center py-4 font-bold">追加の控除項目はありません</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* 5. バックアップ管理 */}
+                  <section>
+                     <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">バックアップ管理</h3>
+                     
+                     <div className="space-y-6">
+                       <div className="bg-slate-50 p-4 rounded border border-slate-200">
                          <h4 className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Download size={14}/> バックアップ出力</h4>
                          <p className="text-[10px] text-slate-500 mb-3">現在システムに保存されているすべての設定と従業員データをJSON形式でダウンロードします。</p>
                          <button onClick={handleExportJson} className="px-5 py-2 text-sm font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded shadow-sm transition-colors flex items-center gap-2">

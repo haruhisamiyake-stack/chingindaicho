@@ -351,63 +351,83 @@ const formatCurrency = (val) => {
 };
 
 const calculateMonthlyResult = (master, row, settings, monthKey) => {
-  if (!master || !row) return {};
-  const base = Number(row.basePay) || 0;
+    if (!master || !row) return {};
+    const base = Number(row.basePay) || 0;
+    
+    let totalAllowances = 0;
+    let totalTaxableAllowances = 0;
+    let totalSocialInsAllowances = 0;
+    let totalEmploymentInsAllowances = 0;
   
-  let totalAllowances = 0;
-  let totalTaxableAllowances = 0;
-  let totalSocialInsAllowances = 0;
-  let totalEmploymentInsAllowances = 0;
-
-  (settings?.allowanceDefinitions || []).forEach(def => {
-    const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
-    totalAllowances += amt;
-    if (def.isTaxable !== false) totalTaxableAllowances += amt;
-    if (def.isSocialIns !== false) totalSocialInsAllowances += amt;
-    if (def.isEmploymentIns !== false) totalEmploymentInsAllowances += amt;
-  });
-
-  const grossPay = base + totalAllowances;
-  const taxableGross = base + totalTaxableAllowances;
-  const socialInsGross = base + totalSocialInsAllowances; 
-  const employmentInsGross = base + totalEmploymentInsAllowances; 
-
-  const hRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, monthKey) : (row.healthRate || 5.0);
-  const pRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, monthKey) : (row.pensionRate || 9.15);
-  const nRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, monthKey) : (row.nursingRate || 0.8);
-  const cRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, monthKey) : (row.childCareRate || 0.0);
-  const eRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, monthKey) : (row.employmentRate || 6.0);
-
-  const estStdAmount = settings?.standardRewardTable?.length > 0
-    ? getStandardRewardAmount(settings.standardRewardTable, socialInsGross)
-    : socialInsGross;
-
-  const stdAmount = Number(row.stdAmount) > 0 
-    ? Number(row.stdAmount) 
-    : estStdAmount;
-
-  const ins = calculateSocialIns(stdAmount, master.socialIns, hRate, pRate, nRate, cRate, row.hasNursingIns === 1);
+    // 【修正①】【修正⑥】旧データ互換レイヤーの追加と未設定時のガード
+    const allowanceDefs = settings?.allowanceDefinitions?.length > 0
+      ? settings.allowanceDefinitions
+      : master.allowanceDefinitions || [];
   
-  const employment = master.employmentIns ? Math.floor(employmentInsGross * (eRate / 1000)) : 0;
-  const socialTotal = ins.health + ins.pension + ins.nursing + ins.childCare + employment;
-  const incomeTax = calculateIncomeTax(Math.max(0, taxableGross - socialTotal), master.dependents, master.taxType === 1);
-  const residentTax = Number(row.residentTax) || 0;
-
-  let totalCustomDeds = 0;
-  (settings?.deductionDefinitions || []).forEach(def => {
-    const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-    totalCustomDeds += amt;
-  });
-
-  const totalDeductions = socialTotal + incomeTax + residentTax + totalCustomDeds;
-  const netPay = grossPay - totalDeductions;
-
-  return {
-    ...row, grossPay, health: ins.health, pension: ins.pension, nursing: ins.nursing, childCare: ins.childCare, 
-    employment, incomeTax, netPay, socialTotal, estStdAmount: estStdAmount,
-    totalCustomDeds, totalDeductions 
+    const deductionDefs = settings?.deductionDefinitions?.length > 0
+      ? settings.deductionDefinitions
+      : master.deductionDefinitions || [];
+  
+    allowanceDefs.forEach(def => {
+      const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+      totalAllowances += amt;
+      
+      // 【修正②】フラグのデフォルト挙動を明示（未設定はfalseに統一）
+      const isTaxable = def.isTaxable === true;
+      const isSocialIns = def.isSocialIns === true;
+      const isEmploymentIns = def.isEmploymentIns === true;
+  
+      if (isTaxable) totalTaxableAllowances += amt;
+      if (isSocialIns) totalSocialInsAllowances += amt;
+      if (isEmploymentIns) totalEmploymentInsAllowances += amt;
+    });
+  
+    const grossPay = base + totalAllowances;
+    const taxableGross = base + totalTaxableAllowances;
+    const socialInsGross = base + totalSocialInsAllowances; 
+    const employmentInsGross = base + totalEmploymentInsAllowances; 
+  
+    const hRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, monthKey) : (row.healthRate || 5.0);
+    const pRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, monthKey) : (row.pensionRate || 9.15);
+    const nRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, monthKey) : (row.nursingRate || 0.8);
+    const cRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, monthKey) : (row.childCareRate || 0.0);
+    const eRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, monthKey) : (row.employmentRate || 6.0);
+  
+    // 【修正③】標準報酬の仕様を明文化
+    const stdBase = socialInsGross; // 将来切替可能にする
+    // 標準報酬は「社会保険対象額ベース」で算定
+    const estStdAmount = settings?.standardRewardTable?.length > 0
+      ? getStandardRewardAmount(settings.standardRewardTable, stdBase)
+      : stdBase;
+  
+    const stdAmount = Number(row.stdAmount) > 0 
+      ? Number(row.stdAmount) 
+      : estStdAmount;
+  
+    const ins = calculateSocialIns(stdAmount, master.socialIns, hRate, pRate, nRate, cRate, row.hasNursingIns === 1);
+    
+    // 【修正④】雇用保険の計算対象の明示
+    // 雇用保険は雇用保険対象手当のみ
+    const employment = master.employmentIns ? Math.floor(employmentInsGross * (eRate / 1000)) : 0;
+    const socialTotal = ins.health + ins.pension + ins.nursing + ins.childCare + employment;
+    const incomeTax = calculateIncomeTax(Math.max(0, taxableGross - socialTotal), master.dependents, master.taxType === 1);
+    const residentTax = Number(row.residentTax) || 0;
+  
+    let totalCustomDeds = 0;
+    deductionDefs.forEach(def => {
+      const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+      totalCustomDeds += amt;
+    });
+  
+    const totalDeductions = socialTotal + incomeTax + residentTax + totalCustomDeds;
+    const netPay = grossPay - totalDeductions;
+  
+    return {
+      ...row, grossPay, health: ins.health, pension: ins.pension, nursing: ins.nursing, childCare: ins.childCare, 
+      employment, incomeTax, netPay, socialTotal, estStdAmount: estStdAmount,
+      totalCustomDeds, totalDeductions 
+    };
   };
-};
 
 const createInitialYearData = (yearStr, settings) => {
   const yStr = yearStr || settings?.editableYear || 'R08';
@@ -436,24 +456,27 @@ const createInitialYearData = (yearStr, settings) => {
 };
 
 const createInitialEmployee = (name = '新規社員', code = '', settings = null) => {
-  const defaultYear = getDefaultYear(settings);
-  const initialData = {
-    master: {
-      name, employeeCode: code, gender: '', joinDate: '', retireDate: '', status: 'active',
-      dob: '1990-01-01', closingDay: '末', paymentDay: '翌月15',
-      dependents: 0, taxType: 0, socialIns: 1, employmentIns: 1
-    },
-    data: {
-      years: {}
-    }
+    const defaultYear = getDefaultYear(settings);
+    const initialData = {
+      master: {
+        name, employeeCode: code, gender: '', joinDate: '', retireDate: '', status: 'active',
+        dob: '1990-01-01', closingDay: '末', paymentDay: '翌月15',
+        dependents: 0, taxType: 0, socialIns: 1, employmentIns: 1,
+        // 【修正⑤】定義はsettingsにある前提なので空でOKだが、フォールバック用に保持する
+        allowanceDefinitions: [],
+        deductionDefinitions: []
+      },
+      data: {
+        years: {}
+      }
+    };
+  
+    if (defaultYear) {
+      initialData.data.years[defaultYear] = createInitialYearData(defaultYear, settings);
+    }
+  
+    return initialData;
   };
-
-  if (defaultYear) {
-    initialData.data.years[defaultYear] = createInitialYearData(defaultYear, settings);
-  }
-
-  return initialData;
-};
 
 const App = () => {
   const [activeTab, setActiveTab] = useState('ledger');
@@ -640,12 +663,42 @@ const App = () => {
   }, [isAuthReady, userId, db]);
 
   useEffect(() => {
-    if (!selectedEmployeeId && Object.keys(employees).length > 0) {
-      setSelectedEmployeeId(Object.keys(employees)[0]);
-    }
-  }, [employees, selectedEmployeeId]);
-
-  const handleSaveSettingsObj = async (newSettings) => {
+        if (!selectedEmployeeId && Object.keys(employees).length > 0) {
+          setSelectedEmployeeId(Object.keys(employees)[0]);
+        }
+      }, [employees, selectedEmployeeId]);
+    
+      // 【修正⑦】データ移行処理（旧データが存在し、settingsが未設定の場合に自動コピー）
+      useEffect(() => {
+        if (Object.keys(employees).length === 0) return;
+        
+        let shouldUpdateSettings = false;
+        let newSettings = { ...settings };
+    
+        if (!settings?.allowanceDefinitions?.length) {
+          const empWithAllowances = Object.values(employees).find(emp => emp.master?.allowanceDefinitions?.length > 0);
+          if (empWithAllowances) {
+            newSettings.allowanceDefinitions = empWithAllowances.master.allowanceDefinitions;
+            shouldUpdateSettings = true;
+          }
+        }
+    
+        if (!settings?.deductionDefinitions?.length) {
+          const empWithDeductions = Object.values(employees).find(emp => emp.master?.deductionDefinitions?.length > 0);
+          if (empWithDeductions) {
+            newSettings.deductionDefinitions = empWithDeductions.master.deductionDefinitions;
+            shouldUpdateSettings = true;
+          }
+        }
+    
+        if (shouldUpdateSettings && db && userId) {
+          setSettings(newSettings);
+          setDoc(doc(db, `artifacts/${appId}/users/${userId}/payrollSettings/v1`), newSettings, { merge: true }).catch(console.error);
+        }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [employees, db, userId]);
+    
+      const handleSaveSettingsObj = async (newSettings) => {
     if (!db || !userId) return;
     setSaveStatus('保存中...');
     try {
@@ -1010,101 +1063,119 @@ const App = () => {
   };
 
   const results = useMemo(() => {
-    const defaultSums = { 
-      basePay: 0, grossPay: 0, taxableGross: 0, health: 0, pension: 0, nursing: 0, childCare: 0, employment: 0, 
-      incomeTax: 0, residentTax: 0, netPay: 0, allowances: {}, deductions: {} 
-    };
-    if (!master || !data || !selectedYear) return { monthlyResults: {}, sums: defaultSums, bonusResults: defaultSums };
-
-    const monthlyResults = {};
-    const sums = { ...defaultSums };
-
-    MONTHS.forEach(m => {
-      const row = currentYearData.monthly[m] || {};
-      const monthlyResult = calculateMonthlyResult(master, row, settings, m);
-      monthlyResults[m] = monthlyResult;
-      
-      sums.basePay += Number(row.basePay) || 0; 
-      sums.grossPay += monthlyResult.grossPay || 0;
-      
-      (settings?.allowanceDefinitions || []).forEach(def => {
-        const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
-        sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
-      });
-      (settings?.deductionDefinitions || []).forEach(def => {
-        const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-        sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
-      });
-
-      sums.health += monthlyResult.health || 0; 
-      sums.pension += monthlyResult.pension || 0; 
-      sums.nursing += monthlyResult.nursing || 0; 
-      sums.childCare += monthlyResult.childCare || 0;
-      sums.employment += monthlyResult.employment || 0;
-      sums.incomeTax += monthlyResult.incomeTax || 0; 
-      sums.residentTax += Number(row.residentTax) || 0; 
-      sums.netPay += monthlyResult.netPay || 0;
-    });
-
-    const b = currentYearData.bonus || {};
-    let bTotalAllowances = 0;
-    let bTotalSocialInsAllowances = 0;
-    let bTotalEmploymentInsAllowances = 0;
+        const defaultSums = { 
+          basePay: 0, grossPay: 0, taxableGross: 0, health: 0, pension: 0, nursing: 0, childCare: 0, employment: 0, 
+          incomeTax: 0, residentTax: 0, netPay: 0, allowances: {}, deductions: {} 
+        };
+        if (!master || !data || !selectedYear) return { monthlyResults: {}, sums: defaultSums, bonusResults: defaultSums };
     
-    (settings?.allowanceDefinitions || []).forEach(def => { 
-      const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
-      bTotalAllowances += amt; 
-      if (def.isSocialIns !== false) bTotalSocialInsAllowances += amt;
-      if (def.isEmploymentIns !== false) bTotalEmploymentInsAllowances += amt;
-    });
+        // 【修正①】【修正⑥】旧データ互換レイヤーの追加と未設定時のガード
+        const allowanceDefs = settings?.allowanceDefinitions?.length > 0 ? settings.allowanceDefinitions : master?.allowanceDefinitions || [];
+        const deductionDefs = settings?.deductionDefinitions?.length > 0 ? settings.deductionDefinitions : master?.deductionDefinitions || [];
     
-    const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
-    const bSocialInsGross = (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
-    const bEmploymentInsGross = (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
+        const monthlyResults = {};
+        const sums = { ...defaultSums };
     
-    const lastMonth = MONTHS[MONTHS.length-1];
-    const lastMonthRow = currentYearData.monthly[lastMonth] || {};
+        MONTHS.forEach(m => {
+          const row = currentYearData.monthly[m] || {};
+          const monthlyResult = calculateMonthlyResult(master, row, settings, m);
+          monthlyResults[m] = monthlyResult;
+          
+          sums.basePay += Number(row.basePay) || 0; 
+          sums.grossPay += monthlyResult.grossPay || 0;
+          
+          allowanceDefs.forEach(def => {
+            const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+            sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
+          });
+          deductionDefs.forEach(def => {
+            const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+            sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
+          });
     
-    const bhRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, lastMonth) : (lastMonthRow.healthRate || 5.0);
-    const bpRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, lastMonth) : (lastMonthRow.pensionRate || 9.15);
-    const bnRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, lastMonth) : (lastMonthRow.nursingRate || 0.8);
-    const bcRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, lastMonth) : (lastMonthRow.childCareRate || 0.0);
-    const beRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, lastMonth) : (lastMonthRow.employmentRate || 6.0);
-
-    const bEstStdAmount = settings?.standardRewardTable?.length > 0
-      ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
-      : bSocialInsGross;
-
-    const bIns = calculateSocialIns(bEstStdAmount, master.socialIns, bhRate, bpRate, bnRate, bcRate, lastMonthRow.hasNursingIns === 1);
+          sums.health += monthlyResult.health || 0; 
+          sums.pension += monthlyResult.pension || 0; 
+          sums.nursing += monthlyResult.nursing || 0; 
+          sums.childCare += monthlyResult.childCare || 0;
+          sums.employment += monthlyResult.employment || 0;
+          sums.incomeTax += monthlyResult.incomeTax || 0; 
+          sums.residentTax += Number(row.residentTax) || 0; 
+          sums.netPay += monthlyResult.netPay || 0;
+        });
     
-    const bEmp = master.employmentIns ? Math.floor(bEmploymentInsGross * (beRate / 1000)) : 0;
+        const b = currentYearData.bonus || {};
+        let bTotalAllowances = 0;
+        let bTotalSocialInsAllowances = 0;
+        let bTotalEmploymentInsAllowances = 0;
+        
+        allowanceDefs.forEach(def => { 
+          const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+          bTotalAllowances += amt; 
+          // 【修正②】フラグのデフォルト挙動を明示
+          const isSocialIns = def.isSocialIns === true;
+          const isEmploymentIns = def.isEmploymentIns === true;
+          if (isSocialIns) bTotalSocialInsAllowances += amt;
+          if (isEmploymentIns) bTotalEmploymentInsAllowances += amt;
+        });
+        
+        const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+        const bSocialInsGross = (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+        const bEmploymentInsGross = (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
+        
+        const lastMonth = MONTHS[MONTHS.length-1];
+        const lastMonthRow = currentYearData.monthly[lastMonth] || {};
+        
+        const bhRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, lastMonth) : (lastMonthRow.healthRate || 5.0);
+        const bpRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, lastMonth) : (lastMonthRow.pensionRate || 9.15);
+        const bnRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, lastMonth) : (lastMonthRow.nursingRate || 0.8);
+        const bcRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, lastMonth) : (lastMonthRow.childCareRate || 0.0);
+        const beRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, lastMonth) : (lastMonthRow.employmentRate || 6.0);
     
-    const bSocialTotal = bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
-    const bIncomeTax = Number(b.incomeTax) || 0;
-    const bResidentTax = Number(b.residentTax) || 0;
-
-    let bTotalCustomDeds = 0;
-    (settings?.deductionDefinitions || []).forEach(def => {
-      bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
-    });
-
-    const bNetPay = bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
-
-    const bonusResults = {
-      basePay: Number(b.basePay) || 0, grossPay: bGross, health: bIns.health, pension: bIns.pension, nursing: bIns.nursing, childCare: bIns.childCare, employment: bEmp,
-      incomeTax: bIncomeTax, residentTax: bResidentTax, netPay: bNetPay, allowances: b.allowanceAmounts || {}, deductions: b.deductionAmounts || {}
-    };
-
-    return { monthlyResults, sums, bonusResults };
-  }, [data, master, selectedYear, currentYearData, settings]);
-
-  const allAllowances = useMemo(() => {
-    return settings?.allowanceDefinitions || [];
-  }, [settings?.allowanceDefinitions]);
-
-  const allDeductions = useMemo(() => {
-    return settings?.deductionDefinitions || [];
-  }, [settings?.deductionDefinitions]);
+        const bEstStdAmount = settings?.standardRewardTable?.length > 0
+          ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
+          : bSocialInsGross;
+    
+        const bIns = calculateSocialIns(bEstStdAmount, master.socialIns, bhRate, bpRate, bnRate, bcRate, lastMonthRow.hasNursingIns === 1);
+        
+        const bEmp = master.employmentIns ? Math.floor(bEmploymentInsGross * (beRate / 1000)) : 0;
+        
+        const bSocialTotal = bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
+        const bIncomeTax = Number(b.incomeTax) || 0;
+        const bResidentTax = Number(b.residentTax) || 0;
+    
+        let bTotalCustomDeds = 0;
+        deductionDefs.forEach(def => {
+          bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
+        });
+    
+        const bNetPay = bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
+    
+        const bonusResults = {
+          basePay: Number(b.basePay) || 0, grossPay: bGross, health: bIns.health, pension: bIns.pension, nursing: bIns.nursing, childCare: bIns.childCare, employment: bEmp,
+          incomeTax: bIncomeTax, residentTax: bResidentTax, netPay: bNetPay, allowances: b.allowanceAmounts || {}, deductions: b.deductionAmounts || {}
+        };
+    
+        return { monthlyResults, sums, bonusResults };
+      }, [data, master, selectedYear, currentYearData, settings]);
+    
+      // 【修正①】【修正⑥】一覧表示用の定義フォールバック
+      const allAllowances = useMemo(() => {
+        if (settings?.allowanceDefinitions?.length > 0) return settings.allowanceDefinitions;
+        if (Object.values(employees).some(e => e.master?.allowanceDefinitions?.length > 0)) {
+          const empWithDefs = Object.values(employees).find(e => e.master?.allowanceDefinitions?.length > 0);
+          return empWithDefs.master.allowanceDefinitions;
+        }
+        return [];
+      }, [settings?.allowanceDefinitions, employees]);
+    
+      const allDeductions = useMemo(() => {
+        if (settings?.deductionDefinitions?.length > 0) return settings.deductionDefinitions;
+        if (Object.values(employees).some(e => e.master?.deductionDefinitions?.length > 0)) {
+          const empWithDefs = Object.values(employees).find(e => e.master?.deductionDefinitions?.length > 0);
+          return empWithDefs.master.deductionDefinitions;
+        }
+        return [];
+      }, [settings?.deductionDefinitions, employees]);
 
   const renderPayslip = (empId, emp, monthKey) => {
     const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
@@ -1992,10 +2063,16 @@ const App = () => {
                   </section>
 
                   {/* 4. 支給・控除項目設定 */}
-                  <section>
-                    <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">支給・控除項目設定 <span className="text-[10px] text-slate-400 font-normal ml-2">※全従業員の賃金台帳に反映されます</span></h3>
+                                    <section>
+                    <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">支給・控除項目設定</h3>
                     
-                    <div className="space-y-6">
+                    {/* 【修正⑧】UI上の明示 */}
+                    <div className="bg-indigo-50 border border-indigo-200 text-indigo-700 p-3 rounded-lg mb-4 text-xs font-bold">
+                      <p className="flex items-center gap-1 mb-1"><Info size={14}/> 手当・控除は全社員共通設定です。</p>
+                      <p className="ml-4 text-indigo-600 font-normal">※ここでの設定変更や項目の追加・削除は、すべての社員の賃金台帳に影響します。</p>
+                    </div>
+                    
+                    <div className="space-y-6">
                       {/* 支給項目 */}
                       <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                         <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">

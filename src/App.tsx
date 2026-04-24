@@ -5,32 +5,32 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, setLogLevel, collection } from 'firebase/firestore';
 import { 
-    Calculator, 
-    Settings, 
-    FileText,
-    Info,
-    TrendingUp,
-    ShieldCheck,
-    PlusCircle,
-    Trash2,
-    Tag,
-    MinusCircle,
-    User,
-    Search,
-    Table as TableIcon,
-    Layout,
-    List,
-    Printer,
-    X,
-    Edit2,
-    MoreVertical,
-    Download,
-    Database,
-    Users,
-    Lock,
-    Unlock,
-    Copy
-  } from 'lucide-react';
+      Calculator, 
+      Settings, 
+      FileText,
+      Info,
+      TrendingUp,
+      ShieldCheck,
+      PlusCircle,
+      Trash2,
+      Tag,
+      MinusCircle,
+      User,
+      Search,
+      Table as TableIcon,
+      Layout,
+      List,
+      Printer,
+      X,
+      Edit2,
+      MoreVertical,
+      Download,
+      Database,
+      Users,
+      Lock,
+      Unlock,
+      Copy
+    } from 'lucide-react';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -433,31 +433,31 @@ const calculateMonthlyResult = (master, row, settings, monthKey) => {
   };
 
   const createInitialYearData = (yearStr, settings) => {
-      const yStr = yearStr || settings?.editableYear || 'R08';
-      return {
-        monthly: MONTHS.reduce((acc, m) => {
-          const initDates = calculateInitialDates(yStr, m, settings || {});
-          acc[m] = { 
-            salaryMonthText: initDates.salaryMonthText,
-            payDate: initDates.payDate,
-            periodStart: initDates.periodStart,
-            periodEnd: initDates.periodEnd,
-            workingDays: '',
-            workingHours: '',
-            overtimeHours: '',
-            lateNightHours: '',
-            holidayHours: '',
-            basePay: 0, residentTax: 0, stdAmount: 0,
-            hasNursingIns: 0, allowanceAmounts: {}, deductionAmounts: {},
-            isLocked: false
+          const yStr = yearStr || settings?.editableYear || 'R08';
+          return {
+            monthly: MONTHS.reduce((acc, m) => {
+              const initDates = calculateInitialDates(yStr, m, settings || {});
+              acc[m] = { 
+                salaryMonthText: initDates.salaryMonthText,
+                payDate: initDates.payDate,
+                periodStart: initDates.periodStart,
+                periodEnd: initDates.periodEnd,
+                workingDays: '',
+                workingHours: '',
+                overtimeHours: '',
+                lateNightHours: '',
+                holidayHours: '',
+                basePay: 0, residentTax: 0, stdAmount: 0,
+                hasNursingIns: 0, allowanceAmounts: {}, deductionAmounts: {},
+                isLocked: false
+              };
+              return acc;
+            }, {}),
+            bonus: {
+              basePay: 0, allowanceAmounts: {}, deductionAmounts: {}, incomeTax: 0, residentTax: 0
+            }
           };
-          return acc;
-        }, {}),
-        bonus: {
-          basePay: 0, allowanceAmounts: {}, deductionAmounts: {}, incomeTax: 0, residentTax: 0
-        }
-      };
-    };
+        };
 
 const createInitialEmployee = (name = '新規社員', code = '', settings = null) => {
     const defaultYear = getDefaultYear(settings);
@@ -1032,99 +1032,99 @@ const App = () => {
   };
 
   const toggleNursingIns = (year, targetMonth) => {
-        if (isLockedYear(year) || !year) return;
-        if (!selectedEmployeeId || !data) return;
-        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
-        const newValue = currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
-        
-        const newMonthly = { ...currentYearDataObj.monthly };
-        const startIndex = MONTHS.indexOf(targetMonth);
-        for (let i = startIndex; i < MONTHS.length; i++) {
-          const m = MONTHS[i];
-          newMonthly[m] = { ...(newMonthly[m] || {}), hasNursingIns: newValue };
-        }
-        
-        const newData = {
-          ...data,
-          years: {
-            ...data.years,
-            [year]: {
-              ...currentYearDataObj,
-              monthly: newMonthly
-            }
-          }
-        };
-        updateDataObj(year, newData);
-      };
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId || !data) return;
+    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+    const newValue = currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
     
-      const toggleMonthLock = (year, targetMonth) => {
-        if (isLockedYear(year) || !year) return;
-        if (!selectedEmployeeId || !data) return;
-        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
-        const currentLock = currentYearDataObj.monthly[targetMonth]?.isLocked;
-        updateMonthly(year, targetMonth, 'isLocked', !currentLock);
-      };
+    const newMonthly = { ...currentYearDataObj.monthly };
+    const startIndex = MONTHS.indexOf(targetMonth);
+    for (let i = startIndex; i < MONTHS.length; i++) {
+      const m = MONTHS[i];
+      newMonthly[m] = { ...(newMonthly[m] || {}), hasNursingIns: newValue };
+    }
     
-      const copyPreviousMonth = (empId, targetYear, targetMonth) => {
-        if (isLockedYear(targetYear) || !targetYear || !empId) return;
-        const emp = employees[empId];
-        if (!emp) return;
-    
-        let sourceYear = targetYear;
-        let sourceMonth = '';
-    
-        if (targetMonth === '01') {
-          const targetYearNum = getYearNumber(targetYear);
-          sourceYear = targetYearNum > 0 ? `R${String(targetYearNum - 1).padStart(2, '0')}` : null;
-          sourceMonth = '12';
-        } else {
-          const prevM = parseInt(targetMonth, 10) - 1;
-          sourceMonth = String(prevM).padStart(2, '0');
+    const newData = {
+      ...data,
+      years: {
+        ...data.years,
+        [year]: {
+          ...currentYearDataObj,
+          monthly: newMonthly
         }
-    
-        if (!sourceYear || !emp.data?.years?.[sourceYear]?.monthly?.[sourceMonth]) {
-          alert('コピー元の前月データが存在しません。');
-          return;
-        }
-    
-        const sourceData = emp.data.years[sourceYear].monthly[sourceMonth];
-        const currentYearDataObj = emp.data?.years?.[targetYear] || createInitialYearData(targetYear, settings);
-        const targetData = currentYearDataObj.monthly[targetMonth] || {};
-    
-        if (!window.confirm(`${parseInt(sourceMonth, 10)}月支給分の「金額・控除設定」を ${parseInt(targetMonth, 10)}月支給分にコピーしますか？\n（※日付や勤怠時間はコピーされません。既存の金額は上書きされます）`)) {
-          return;
-        }
-    
-        const newData = {
-          ...targetData,
-          basePay: sourceData.basePay || 0,
-          residentTax: sourceData.residentTax || 0,
-          stdAmount: sourceData.stdAmount || 0,
-          hasNursingIns: sourceData.hasNursingIns || 0,
-          allowanceAmounts: sourceData.allowanceAmounts ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts)) : {},
-          deductionAmounts: sourceData.deductionAmounts ? JSON.parse(JSON.stringify(sourceData.deductionAmounts)) : {},
-        };
-    
-        const updatedEmpData = {
-          ...emp.data,
-          years: {
-            ...emp.data.years,
-            [targetYear]: {
-              ...currentYearDataObj,
-              monthly: {
-                ...currentYearDataObj.monthly,
-                [targetMonth]: newData
-              }
-            }
+      }
+    };
+    updateDataObj(year, newData);
+  };
+
+  const toggleMonthLock = (year, targetMonth) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId || !data) return;
+    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+    const currentLock = currentYearDataObj.monthly[targetMonth]?.isLocked;
+    updateMonthly(year, targetMonth, 'isLocked', !currentLock);
+  };
+
+  const copyPreviousMonth = (empId, targetYear, targetMonth) => {
+    if (isLockedYear(targetYear) || !targetYear || !empId) return;
+    const emp = employees[empId];
+    if (!emp) return;
+
+    let sourceYear = targetYear;
+    let sourceMonth = '';
+
+    if (targetMonth === '01') {
+      const targetYearNum = getYearNumber(targetYear);
+      sourceYear = targetYearNum > 0 ? `R${String(targetYearNum - 1).padStart(2, '0')}` : null;
+      sourceMonth = '12';
+    } else {
+      const prevM = parseInt(targetMonth, 10) - 1;
+      sourceMonth = String(prevM).padStart(2, '0');
+    }
+
+    if (!sourceYear || !emp.data?.years?.[sourceYear]?.monthly?.[sourceMonth]) {
+      alert('コピー元の前月データが存在しません。');
+      return;
+    }
+
+    const sourceData = emp.data.years[sourceYear].monthly[sourceMonth];
+    const currentYearDataObj = emp.data?.years?.[targetYear] || createInitialYearData(targetYear, settings);
+    const targetData = currentYearDataObj.monthly[targetMonth] || {};
+
+    if (!window.confirm(`${parseInt(sourceMonth, 10)}月支給分の「金額・控除設定」を ${parseInt(targetMonth, 10)}月支給分にコピーしますか？\n（※日付や勤怠時間はコピーされません。既存の金額は上書きされます）`)) {
+      return;
+    }
+
+    const newData = {
+      ...targetData,
+      basePay: sourceData.basePay || 0,
+      residentTax: sourceData.residentTax || 0,
+      stdAmount: sourceData.stdAmount || 0,
+      hasNursingIns: sourceData.hasNursingIns || 0,
+      allowanceAmounts: sourceData.allowanceAmounts ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts)) : {},
+      deductionAmounts: sourceData.deductionAmounts ? JSON.parse(JSON.stringify(sourceData.deductionAmounts)) : {},
+    };
+
+    const updatedEmpData = {
+      ...emp.data,
+      years: {
+        ...emp.data.years,
+        [targetYear]: {
+          ...currentYearDataObj,
+          monthly: {
+            ...currentYearDataObj.monthly,
+            [targetMonth]: newData
           }
-        };
-    
-        setEmployees(prev => ({
-          ...prev,
-          [empId]: { ...prev[empId], data: updatedEmpData }
-        }));
-        handleSave(empId, emp.master, updatedEmpData);
-      };
+        }
+      }
+    };
+
+    setEmployees(prev => ({
+      ...prev,
+      [empId]: { ...prev[empId], data: updatedEmpData }
+    }));
+    handleSave(empId, emp.master, updatedEmpData);
+  };
 
   const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
     if (isLockedYear(year) || !year) return;
@@ -1186,139 +1186,135 @@ const App = () => {
   };
 
   const results = useMemo(() => {
-        const defaultSums = { 
-          basePay: 0, grossPay: 0, taxableGross: 0, health: 0, pension: 0, nursing: 0, childCare: 0, employment: 0, 
-          incomeTax: 0, residentTax: 0, netPay: 0, allowances: {}, deductions: {} 
-        };
-        if (!master || !data || !selectedYear) return { monthlyResults: {}, sums: defaultSums, bonusResults: defaultSums };
-    
-        // 【修正①】【修正⑥】旧データ互換レイヤーの追加と未設定時のガード
-        const allowanceDefs = settings?.allowanceDefinitions?.length > 0 ? settings.allowanceDefinitions : master?.allowanceDefinitions || [];
-        const deductionDefs = settings?.deductionDefinitions?.length > 0 ? settings.deductionDefinitions : master?.deductionDefinitions || [];
-    
-        const monthlyResults = {};
-        const sums = { ...defaultSums };
-    
-        MONTHS.forEach(m => {
-          const row = currentYearData.monthly[m] || {};
-          const monthlyResult = calculateMonthlyResult(master, row, settings, m);
-          monthlyResults[m] = monthlyResult;
-          
-          sums.basePay += Number(row.basePay) || 0; 
-          sums.grossPay += monthlyResult.grossPay || 0;
-          
-          allowanceDefs.forEach(def => {
-            const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
-            sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
-          });
-          deductionDefs.forEach(def => {
-            const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-            sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
-          });
-    
-          sums.health += monthlyResult.health || 0; 
-          sums.pension += monthlyResult.pension || 0; 
-          sums.nursing += monthlyResult.nursing || 0; 
-          sums.childCare += monthlyResult.childCare || 0;
-          sums.employment += monthlyResult.employment || 0;
-          sums.incomeTax += monthlyResult.incomeTax || 0; 
-          sums.residentTax += Number(row.residentTax) || 0; 
-          sums.netPay += monthlyResult.netPay || 0;
-        });
-    
-        const b = currentYearData.bonus || {};
-        let bTotalAllowances = 0;
-        let bTotalSocialInsAllowances = 0;
-        let bTotalEmploymentInsAllowances = 0;
-        
-        allowanceDefs.forEach(def => { 
-          const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
-          bTotalAllowances += amt; 
-          // 【修正②】フラグのデフォルト挙動を明示
-          const isSocialIns = def.isSocialIns === true;
-          const isEmploymentIns = def.isEmploymentIns === true;
-          if (isSocialIns) bTotalSocialInsAllowances += amt;
-          if (isEmploymentIns) bTotalEmploymentInsAllowances += amt;
-        });
-        
-        const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
-        const bSocialInsGross = (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
-        const bEmploymentInsGross = (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
-        
-        const lastMonth = MONTHS[MONTHS.length-1];
-        const lastMonthRow = currentYearData.monthly[lastMonth] || {};
-        
-        const bhRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, lastMonth) : (lastMonthRow.healthRate || 5.0);
-        const bpRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, lastMonth) : (lastMonthRow.pensionRate || 9.15);
-        const bnRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, lastMonth) : (lastMonthRow.nursingRate || 0.8);
-        const bcRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, lastMonth) : (lastMonthRow.childCareRate || 0.0);
-        const beRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, lastMonth) : (lastMonthRow.employmentRate || 6.0);
-    
-        const bEstStdAmount = settings?.standardRewardTable?.length > 0
-          ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
-          : bSocialInsGross;
-    
-        const bIns = calculateSocialIns(bEstStdAmount, master.socialIns, bhRate, bpRate, bnRate, bcRate, lastMonthRow.hasNursingIns === 1);
-        
-        const bEmp = master.employmentIns ? Math.floor(bEmploymentInsGross * (beRate / 1000)) : 0;
-        
-        const bSocialTotal = bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
-        const bIncomeTax = Number(b.incomeTax) || 0;
-        const bResidentTax = Number(b.residentTax) || 0;
-    
-        let bTotalCustomDeds = 0;
-        deductionDefs.forEach(def => {
-          bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
-        });
-    
-        const bNetPay = bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
-    
-        const bonusResults = {
-          basePay: Number(b.basePay) || 0, grossPay: bGross, health: bIns.health, pension: bIns.pension, nursing: bIns.nursing, childCare: bIns.childCare, employment: bEmp,
-          incomeTax: bIncomeTax, residentTax: bResidentTax, netPay: bNetPay, allowances: b.allowanceAmounts || {}, deductions: b.deductionAmounts || {}
-        };
-    
-        return { monthlyResults, sums, bonusResults };
-      }, [data, master, selectedYear, currentYearData, settings]);
-    
-      // 【修正①】【修正⑥】一覧表示用の定義フォールバック
-      const allAllowances = useMemo(() => {
-        if (settings?.allowanceDefinitions?.length > 0) return settings.allowanceDefinitions;
-        if (Object.values(employees).some(e => e.master?.allowanceDefinitions?.length > 0)) {
-          const empWithDefs = Object.values(employees).find(e => e.master?.allowanceDefinitions?.length > 0);
-          return empWithDefs.master.allowanceDefinitions;
-        }
-        return [];
-      }, [settings?.allowanceDefinitions, employees]);
-    
-      const allDeductions = useMemo(() => {
-        if (settings?.deductionDefinitions?.length > 0) return settings.deductionDefinitions;
-        if (Object.values(employees).some(e => e.master?.deductionDefinitions?.length > 0)) {
-          const empWithDefs = Object.values(employees).find(e => e.master?.deductionDefinitions?.length > 0);
-          return empWithDefs.master.deductionDefinitions;
-        }
-        return [];
-      }, [settings?.deductionDefinitions, employees]);
+    const defaultSums = { 
+      basePay: 0, grossPay: 0, taxableGross: 0, health: 0, pension: 0, nursing: 0, childCare: 0, employment: 0, 
+      incomeTax: 0, residentTax: 0, netPay: 0, allowances: {}, deductions: {} 
+    };
+    if (!master || !data || !selectedYear) return { monthlyResults: {}, sums: defaultSums, bonusResults: defaultSums };
 
-    const renderPayslip = (empId, emp, monthKey) => {
-      const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
-      const rowData = slipYearData.monthly[monthKey] || {};
-      const calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey);
+    const allowanceDefs = settings?.allowanceDefinitions?.length > 0 ? settings.allowanceDefinitions : master?.allowanceDefinitions || [];
+    const deductionDefs = settings?.deductionDefinitions?.length > 0 ? settings.deductionDefinitions : master?.deductionDefinitions || [];
+
+    const monthlyResults = {};
+    const sums = { ...defaultSums };
+
+    MONTHS.forEach(m => {
+      const row = currentYearData.monthly[m] || {};
+      const monthlyResult = calculateMonthlyResult(master, row, settings, m);
+      monthlyResults[m] = monthlyResult;
       
-      // 【修正】明細表示用のフォールバック定義
-      const allowanceDefs = settings?.allowanceDefinitions?.length > 0
-        ? settings.allowanceDefinitions
-        : emp.master?.allowanceDefinitions || [];
+      sums.basePay += Number(row.basePay) || 0; 
+      sums.grossPay += monthlyResult.grossPay || 0;
+      
+      allowanceDefs.forEach(def => {
+        const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+        sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
+      });
+      deductionDefs.forEach(def => {
+        const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+        sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
+      });
+
+      sums.health += monthlyResult.health || 0; 
+      sums.pension += monthlyResult.pension || 0; 
+      sums.nursing += monthlyResult.nursing || 0; 
+      sums.childCare += monthlyResult.childCare || 0;
+      sums.employment += monthlyResult.employment || 0;
+      sums.incomeTax += monthlyResult.incomeTax || 0; 
+      sums.residentTax += Number(row.residentTax) || 0; 
+      sums.netPay += monthlyResult.netPay || 0;
+    });
+
+    const b = currentYearData.bonus || {};
+    let bTotalAllowances = 0;
+    let bTotalSocialInsAllowances = 0;
+    let bTotalEmploymentInsAllowances = 0;
+    
+    allowanceDefs.forEach(def => { 
+      const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+      bTotalAllowances += amt; 
+      const isSocialIns = def.isSocialIns === true;
+      const isEmploymentIns = def.isEmploymentIns === true;
+      if (isSocialIns) bTotalSocialInsAllowances += amt;
+      if (isEmploymentIns) bTotalEmploymentInsAllowances += amt;
+    });
+    
+    const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+    const bSocialInsGross = (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+    const bEmploymentInsGross = (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
+    
+    const lastMonth = MONTHS[MONTHS.length-1];
+    const lastMonthRow = currentYearData.monthly[lastMonth] || {};
+    
+    const bhRate = settings?.rateSchedules?.health ? getRateForMonth(settings.rateSchedules.health, lastMonth) : (lastMonthRow.healthRate || 5.0);
+    const bpRate = settings?.rateSchedules?.pension ? getRateForMonth(settings.rateSchedules.pension, lastMonth) : (lastMonthRow.pensionRate || 9.15);
+    const bnRate = settings?.rateSchedules?.nursing ? getRateForMonth(settings.rateSchedules.nursing, lastMonth) : (lastMonthRow.nursingRate || 0.8);
+    const bcRate = settings?.rateSchedules?.childCare ? getRateForMonth(settings.rateSchedules.childCare, lastMonth) : (lastMonthRow.childCareRate || 0.0);
+    const beRate = settings?.rateSchedules?.employment ? getRateForMonth(settings.rateSchedules.employment, lastMonth) : (lastMonthRow.employmentRate || 6.0);
+
+    const bEstStdAmount = settings?.standardRewardTable?.length > 0
+      ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
+      : bSocialInsGross;
+
+    const bIns = calculateSocialIns(bEstStdAmount, master.socialIns, bhRate, bpRate, bnRate, bcRate, lastMonthRow.hasNursingIns === 1);
+    
+    const bEmp = master.employmentIns ? Math.floor(bEmploymentInsGross * (beRate / 1000)) : 0;
+    
+    const bSocialTotal = bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
+    const bIncomeTax = Number(b.incomeTax) || 0;
+    const bResidentTax = Number(b.residentTax) || 0;
+
+    let bTotalCustomDeds = 0;
+    deductionDefs.forEach(def => {
+      bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
+    });
+
+    const bNetPay = bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
+
+    const bonusResults = {
+      basePay: Number(b.basePay) || 0, grossPay: bGross, health: bIns.health, pension: bIns.pension, nursing: bIns.nursing, childCare: bIns.childCare, employment: bEmp,
+      incomeTax: bIncomeTax, residentTax: bResidentTax, netPay: bNetPay, allowances: b.allowanceAmounts || {}, deductions: b.deductionAmounts || {}
+    };
+
+    return { monthlyResults, sums, bonusResults };
+  }, [data, master, selectedYear, currentYearData, settings]);
+
+  const allAllowances = useMemo(() => {
+    if (settings?.allowanceDefinitions?.length > 0) return settings.allowanceDefinitions;
+    if (Object.values(employees).some(e => e.master?.allowanceDefinitions?.length > 0)) {
+      const empWithDefs = Object.values(employees).find(e => e.master?.allowanceDefinitions?.length > 0);
+      return empWithDefs.master.allowanceDefinitions;
+    }
+    return [];
+  }, [settings?.allowanceDefinitions, employees]);
+
+  const allDeductions = useMemo(() => {
+    if (settings?.deductionDefinitions?.length > 0) return settings.deductionDefinitions;
+    if (Object.values(employees).some(e => e.master?.deductionDefinitions?.length > 0)) {
+      const empWithDefs = Object.values(employees).find(e => e.master?.deductionDefinitions?.length > 0);
+      return empWithDefs.master.deductionDefinitions;
+    }
+    return [];
+  }, [settings?.deductionDefinitions, employees]);
+
+  const renderPayslip = (empId, emp, monthKey) => {
+    const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+    const rowData = slipYearData.monthly[monthKey] || {};
+    const calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey);
+    
+    const allowanceDefs = settings?.allowanceDefinitions?.length > 0
+      ? settings.allowanceDefinitions
+      : emp.master?.allowanceDefinitions || [];
+      
+    const deductionDefs = settings?.deductionDefinitions?.length > 0
+      ? settings.deductionDefinitions
+      : emp.master?.deductionDefinitions || [];
+    
+    return (
+      <div key={empId} className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none">
+        <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">給与明細書</h1>
         
-      const deductionDefs = settings?.deductionDefinitions?.length > 0
-        ? settings.deductionDefinitions
-        : emp.master?.deductionDefinitions || [];
-      
-      return (
-        <div key={empId} className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none">
-          <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">給与明細書</h1>
-          
-          <div className="flex justify-between items-start mb-6 text-sm font-bold">
+        <div className="flex justify-between items-start mb-6 text-sm font-bold">
           <div className="space-y-1">
             <div className="flex gap-4"><span className="w-16">支給月</span>: {parseInt(monthKey, 10)}月支給</div>
             <div className="flex gap-4"><span className="w-16">対象月分</span>: {rowData.salaryMonthText || '未設定'}</div>

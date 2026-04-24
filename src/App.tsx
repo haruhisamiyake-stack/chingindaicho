@@ -1944,60 +1944,41 @@ const App = () => {
 
               <div className="flex-1 overflow-auto bg-gray-50/30">
                 <table className="w-full border-collapse">
-                <thead className="sticky top-0 z-40 shadow-sm">
-                    <tr className="bg-gray-100 text-gray-500 text-[10px] font-black uppercase tracking-tighter">
-                      <th className="border border-gray-300 p-2 sticky left-0 z-30 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
-                         <div className="text-left font-black text-gray-500 text-[11px]">項目 / 支給月</div>
-                      </th>
-                      {MONTHS.map(m => {
-                        const isMonthLocked = currentYearData.monthly[m]?.isLocked;
-                        return (
-                        <th key={m} className={`border border-gray-300 p-1 min-w-[76px] w-[76px] text-center align-top transition-colors ${isMonthLocked ? 'bg-slate-200' : 'bg-slate-50'}`}>
-                          <div className="flex items-center justify-between px-1 mb-1 mt-0.5">
-                            <button 
-                              onClick={() => copyPreviousMonth(selectedEmployeeId, selectedYear, m)}
-                              disabled={isYearLocked || isMonthLocked}
-                              className={`p-0.5 rounded transition-colors ${isYearLocked || isMonthLocked ? 'opacity-30 cursor-not-allowed' : 'text-indigo-500 hover:bg-indigo-100'}`}
-                              title="前月の金額をコピー"
-                            >
-                              <Copy size={12}/>
-                            </button>
-                            <div className="font-black text-slate-700 text-[11px] leading-none">{parseInt(m, 10)}月</div>
-                            <button 
-                              onClick={() => toggleMonthLock(selectedYear, m)}
-                              disabled={isYearLocked}
-                              className={`p-0.5 rounded transition-colors ${isYearLocked ? 'opacity-30 cursor-not-allowed' : 'hover:bg-slate-200'} ${isMonthLocked ? 'text-red-500' : 'text-slate-400'}`}
-                              title={isMonthLocked ? "ロック解除" : "この月をロック"}
-                            >
-                              {isMonthLocked ? <Lock size={12}/> : <Unlock size={12}/>}
-                            </button>
-                          </div>
-                          <div className="space-y-0.5 px-0.5">
-                            <input 
-                              value={currentYearData.monthly[m]?.salaryMonthText || ''}
-                              disabled={isYearLocked || isMonthLocked}
-                              onChange={e => updateMonthly(selectedYear, m, 'salaryMonthText', e.target.value)}
-                              className={`w-full text-[9px] text-center bg-white border border-slate-200 rounded-[2px] outline-none focus:border-emerald-400 font-bold py-0.5 px-0 placeholder-slate-300 ${(isYearLocked || isMonthLocked) ? 'cursor-not-allowed text-slate-400' : 'text-slate-600'}`}
-                              placeholder="○月分"
-                              title="対象月分"
-                            />
-                            <input 
-                              type="date"
-                              value={currentYearData.monthly[m]?.payDate || ''}
-                              disabled={isYearLocked || isMonthLocked}
-                              onChange={e => updateMonthly(selectedYear, m, 'payDate', e.target.value)}
-                              className={`w-full text-[8px] text-center bg-white border border-slate-200 rounded-[2px] outline-none focus:border-emerald-400 font-mono py-0.5 px-0 tracking-tighter ${(isYearLocked || isMonthLocked) ? 'cursor-not-allowed text-slate-400' : 'text-slate-600'}`}
-                              title="支給年月日"
-                            />
-                          </div>
-                        </th>
-                        );
-                      })}
-                      <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-slate-200 text-slate-700 sticky right-[190px] z-25 font-black border-l-2 align-bottom text-[10px]">累計(給与)</th>
-                      <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-purple-50 text-purple-700 sticky right-[100px] z-25 font-black border-l-2 align-bottom text-[10px]">賞与(入力)</th>
-                      <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-800 text-white sticky right-0 z-30 font-black align-bottom text-[10px]">給与・賞与合計</th>
-                    </tr>
-                  </thead>
+                  <thead className="sticky top-0 z-40 shadow-sm">
+                    <tr className="bg-slate-100 text-gray-600 text-[10px] font-black uppercase whitespace-nowrap">
+                      <th className="border border-slate-200 p-2 sticky left-0 z-50 bg-slate-200 w-[80px] min-w-[80px]">社員コード</th>
+                      <th className="border border-slate-200 p-2 sticky left-[80px] z-50 bg-slate-200 w-[120px] min-w-[120px]">氏名</th>
+                      <th className="border border-slate-200 p-2 min-w-[90px] bg-slate-100">対象月分</th>
+                      <th className="border border-slate-200 p-2 min-w-[120px] bg-slate-100">支給年月日</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">基本給</th>
+                      
+                      {allAllowances.map(def => (
+                        <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
+                          {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable === true ? '(課)' : '(非)'}</span>
+                        </th>
+                      ))}
+                      
+                      <th className="border border-slate-200 p-2 min-w-[110px] bg-blue-50 text-blue-700 border-l-2">総支給額</th>
+                      
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">健康保険</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">厚生年金</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">介護保険</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">子育て支援</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">雇用保険</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">所得税</th>
+                      <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">住民税</th>
+
+                      {allDeductions.map(def => (
+                        <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
+                          {def.name}
+                        </th>
+                      ))}
+
+                      <th className="border border-slate-200 p-2 min-w-[120px] bg-emerald-50 text-emerald-700 border-l-2">差引支給額</th>
+
+                      <th className="border border-slate-200 p-2 min-w-[80px] bg-slate-200 text-slate-700 sticky right-0 z-50 border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">操作</th>
+                    </tr>
+                  </thead>
 <tbody className="text-xs whitespace-nowrap">
                     {Object.entries(employees).map(([empId, emp]) => {
                       const currentYearDataObj = selectedYear ? (emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings)) : createInitialYearData(null, settings);

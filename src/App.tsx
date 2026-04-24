@@ -3,7 +3,7 @@ const appId = 'payroll-ledger-app';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot, setLogLevel, collection } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, setLogLevel, collection } from 'firebase/firestore';
 import { 
   Calculator, 
   Settings, 
@@ -879,15 +879,65 @@ const App = () => {
   };
 
   const handleRetireEmployee = (empId) => {
-    const emp = employees[empId];
-    if (!emp) return;
-    const newMaster = { ...emp.master, status: 'retired' };
-    setEmployees(prev => ({
-      ...prev,
-      [empId]: { ...prev[empId], master: newMaster }
-    }));
-    handleSave(empId, newMaster, emp.data);
-  };
+        const emp = employees[empId];
+        if (!emp) return;
+        const newMaster = { ...emp.master, status: 'retired' };
+        setEmployees(prev => ({
+          ...prev,
+          [empId]: { ...prev[empId], master: newMaster }
+        }));
+        handleSave(empId, newMaster, emp.data);
+      };
+    
+      const handleDeleteEmployee = async (empId) => {
+      // 【修正⑤】名前の取得
+      const emp = employees[empId];
+      const empName = emp?.master?.name || 'この社員';
+  
+      // 【修正③】確認メッセージ強化
+      if (!window.confirm(
+        `${empName} の社員データを削除します。\n` +
+        `給与台帳・賞与・明細データもすべて削除されます。\n` +
+        `この操作は元に戻せません。本当によろしいですか？`
+      )) return;
+      
+      setSaveStatus('削除中...');
+  
+      // 【修正②】削除後の自動選択を含むステート更新
+      setEmployees(prev => {
+        const next = { ...prev };
+        delete next[empId];
+        
+        const remainingIds = Object.keys(next);
+  
+        if (selectedEmployeeId === empId) {
+          setSelectedEmployeeId(
+            remainingIds.length > 0 ? remainingIds[0] : null
+          );
+        }
+  
+        return next;
+      });
+  
+      // クラウド上のデータベースから完全に消去する
+      if (db && userId) {
+        try {
+          await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`));
+          // 【修正④】削除成功ステータス
+          setSaveStatus('削除しました');
+          setTimeout(() => setSaveStatus(''), 2000);
+        } catch (error) {
+          console.error("削除エラー:", error);
+          // 【修正④】削除エラーステータス
+          setSaveStatus('削除エラー');
+          setTimeout(() => setSaveStatus(''), 2000);
+        }
+      } else {
+        // オフライン/未ログイン時のフォールバックUI更新
+        setSaveStatus('削除しました');
+        setTimeout(() => setSaveStatus(''), 2000);
+      }
+    };
   
   const selectedYearNum = getYearNumber(selectedYear);
   const prevYear = selectedYear ? `R${String(selectedYearNum - 1).padStart(2, '0')}` : null;
@@ -1177,16 +1227,25 @@ const App = () => {
         return [];
       }, [settings?.deductionDefinitions, employees]);
 
-  const renderPayslip = (empId, emp, monthKey) => {
-    const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
-    const rowData = slipYearData.monthly[monthKey] || {};
-    const calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey);
-    
-    return (
-      <div key={empId} className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none">
-        <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">給与明細書</h1>
+    const renderPayslip = (empId, emp, monthKey) => {
+      const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+      const rowData = slipYearData.monthly[monthKey] || {};
+      const calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey);
+      
+      // 【修正】明細表示用のフォールバック定義
+      const allowanceDefs = settings?.allowanceDefinitions?.length > 0
+        ? settings.allowanceDefinitions
+        : emp.master?.allowanceDefinitions || [];
         
-        <div className="flex justify-between items-start mb-6 text-sm font-bold">
+      const deductionDefs = settings?.deductionDefinitions?.length > 0
+        ? settings.deductionDefinitions
+        : emp.master?.deductionDefinitions || [];
+      
+      return (
+        <div key={empId} className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none">
+          <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">給与明細書</h1>
+          
+          <div className="flex justify-between items-start mb-6 text-sm font-bold">
           <div className="space-y-1">
             <div className="flex gap-4"><span className="w-16">支給月</span>: {parseInt(monthKey, 10)}月支給</div>
             <div className="flex gap-4"><span className="w-16">対象月分</span>: {rowData.salaryMonthText || '未設定'}</div>
@@ -1216,10 +1275,10 @@ const App = () => {
           <div className="border-r-2 border-slate-800 flex flex-col">
             <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">支給</div>
             <div className="p-3 space-y-1.5 flex-1">
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
+            <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                 <span>基本給</span><span>{formatCurrency(rowData.basePay)}</span>
               </div>
-              {(settings?.allowanceDefinitions || []).map(def => (
+              {allowanceDefs.map(def => (
                 <div key={def.id} className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                   <span>{def.name}</span><span>{formatCurrency(rowData.allowanceAmounts?.[def.id])}</span>
                 </div>
@@ -1240,7 +1299,7 @@ const App = () => {
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>雇用保険料</span><span>{formatCurrency(calcResult.employment)}</span></div>
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>所得税</span><span>{formatCurrency(calcResult.incomeTax)}</span></div>
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"><span>住民税</span><span>{formatCurrency(rowData.residentTax)}</span></div>
-              {(settings?.deductionDefinitions || []).map(def => (
+              {deductionDefs.map(def => (
                 <div key={def.id} className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                   <span>{def.name}</span><span>{formatCurrency(rowData.deductionAmounts?.[def.id])}</span>
                 </div>
@@ -1356,12 +1415,13 @@ const App = () => {
                               )}
                             </td>
                             <td className="p-3 flex items-center justify-center gap-2">
-                              <button onClick={() => { setEditingEmployeeId(id); setEditingMaster({ ...emp.master }); }} className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded text-xs font-bold transition-colors border border-slate-200"><Edit2 size={12}/> 編集</button>
-                              {emp.master?.status !== 'retired' && (
-                                <button onClick={() => { if(window.confirm('この社員を退職済みにしますか？')) handleRetireEmployee(id); }} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-bold transition-colors border border-red-100">退職</button>
-                              )}
-                              <button onClick={() => { setSelectedEmployeeId(id); setActiveTab('ledger'); }} className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-xs font-bold transition-colors border border-indigo-100"><Layout size={12}/> 台帳へ</button>
-                            </td>
+                              <button onClick={() => { setEditingEmployeeId(id); setEditingMaster({ ...emp.master }); }} className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded text-xs font-bold transition-colors border border-slate-200"><Edit2 size={12}/> 編集</button>
+                              {emp.master?.status !== 'retired' && (
+                                <button onClick={() => { if(window.confirm('この社員を退職済みにしますか？')) handleRetireEmployee(id); }} className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-bold transition-colors border border-red-100">退職</button>
+                              )}
+                              <button onClick={() => handleDeleteEmployee(id)} className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-red-600 hover:text-white text-slate-500 rounded text-xs font-bold transition-colors border border-slate-200"><Trash2 size={12}/> 削除</button>
+                              <button onClick={() => { setSelectedEmployeeId(id); setActiveTab('ledger'); }} className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-xs font-bold transition-colors border border-indigo-100"><Layout size={12}/> 台帳へ</button>
+                            </td>
                           </tr>
                       ))}
                     </tbody>
@@ -1806,14 +1866,14 @@ const App = () => {
                       <th className="border border-slate-200 p-2 min-w-[90px] bg-slate-100">対象月分</th>
                       <th className="border border-slate-200 p-2 min-w-[120px] bg-slate-100">支給年月日</th>
                       <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">基本給</th>
-                      
-                      {allAllowances.map(def => (
-                        <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
-                          {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable !== false ? '(課)' : '(非)'}</span>
-                        </th>
-                      ))}
-                      
-                      <th className="border border-slate-200 p-2 min-w-[110px] bg-blue-50 text-blue-700 border-l-2">総支給額</th>
+                      
+                      {allAllowances.map(def => (
+                        <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
+                          {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable === true ? '(課)' : '(非)'}</span>
+                        </th>
+                      ))}
+                      
+                      <th className="border border-slate-200 p-2 min-w-[110px] bg-blue-50 text-blue-700 border-l-2">総支給額</th>
                       
                       <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">健康保険</th>
                       <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">厚生年金</th>
@@ -2063,16 +2123,16 @@ const App = () => {
                   </section>
 
                   {/* 4. 支給・控除項目設定 */}
-                                    <section>
-                    <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">支給・控除項目設定</h3>
+                  <section>
+                    <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">支給・控除項目設定</h3>
                     
-                    {/* 【修正⑧】UI上の明示 */}
+                    {/* 【明示文】手当・控除が全社共通設定である旨を表示 */}
                     <div className="bg-indigo-50 border border-indigo-200 text-indigo-700 p-3 rounded-lg mb-4 text-xs font-bold">
                       <p className="flex items-center gap-1 mb-1"><Info size={14}/> 手当・控除は全社員共通設定です。</p>
                       <p className="ml-4 text-indigo-600 font-normal">※ここでの設定変更や項目の追加・削除は、すべての社員の賃金台帳に影響します。</p>
                     </div>
-                    
-                    <div className="space-y-6">
+                    
+                    <div className="space-y-6">
                       {/* 支給項目 */}
                       <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
                         <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
@@ -2093,15 +2153,18 @@ const App = () => {
                               </div>
                               <div className="flex items-center gap-4 bg-slate-50 px-4 py-2 rounded border border-slate-200">
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  <input type="checkbox" checked={def.isTaxable !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isTaxable = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-orange-500 border-gray-300 rounded focus:ring-orange-500 cursor-pointer" />
+                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
+                                  <input type="checkbox" checked={def.isTaxable === true} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isTaxable = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-orange-500 border-gray-300 rounded focus:ring-orange-500 cursor-pointer" />
                                   <span className="text-xs font-bold text-slate-700 group-hover:text-orange-600 transition-colors">所得税</span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  <input type="checkbox" checked={def.isSocialIns !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isSocialIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
+                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
+                                  <input type="checkbox" checked={def.isSocialIns === true} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isSocialIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
                                   <span className="text-xs font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">社会保険</span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  <input type="checkbox" checked={def.isEmploymentIns !== false} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isEmploymentIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer" />
+                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
+                                  <input type="checkbox" checked={def.isEmploymentIns === true} onChange={e => { const newDefs = [...settings.allowanceDefinitions]; newDefs[idx].isEmploymentIns = e.target.checked; handleSettingChange('allowanceDefinitions', newDefs); }} className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer" />
                                   <span className="text-xs font-bold text-slate-700 group-hover:text-teal-600 transition-colors">雇用保険</span>
                                 </label>
                               </div>

@@ -4,30 +4,33 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, setLogLevel, collection } from 'firebase/firestore';
-import { 
-  Calculator, 
-  Settings, 
-  FileText,
-  Info,
-  TrendingUp,
-  ShieldCheck,
-  PlusCircle,
-  Trash2,
-  Tag,
-  MinusCircle,
-  User,
-  Search,
-  Table as TableIcon,
-  Layout,
-  List,
-  Printer,
-  X,
-  Edit2,
-  MoreVertical,
-  Download,
-  Database,
-  Users
-} from 'lucide-react';
+import { 
+    Calculator, 
+    Settings, 
+    FileText,
+    Info,
+    TrendingUp,
+    ShieldCheck,
+    PlusCircle,
+    Trash2,
+    Tag,
+    MinusCircle,
+    User,
+    Search,
+    Table as TableIcon,
+    Layout,
+    List,
+    Printer,
+    X,
+    Edit2,
+    MoreVertical,
+    Download,
+    Database,
+    Users,
+    Lock,
+    Unlock,
+    Copy
+  } from 'lucide-react';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -429,31 +432,32 @@ const calculateMonthlyResult = (master, row, settings, monthKey) => {
     };
   };
 
-const createInitialYearData = (yearStr, settings) => {
-  const yStr = yearStr || settings?.editableYear || 'R08';
-  return {
-    monthly: MONTHS.reduce((acc, m) => {
-      const initDates = calculateInitialDates(yStr, m, settings || {});
-      acc[m] = { 
-        salaryMonthText: initDates.salaryMonthText,
-        payDate: initDates.payDate,
-        periodStart: initDates.periodStart,
-        periodEnd: initDates.periodEnd,
-        workingDays: '',
-        workingHours: '',
-        overtimeHours: '',
-        lateNightHours: '',
-        holidayHours: '',
-        basePay: 0, residentTax: 0, stdAmount: 0,
-        hasNursingIns: 0, allowanceAmounts: {}, deductionAmounts: {}
-      };
-      return acc;
-    }, {}),
-    bonus: {
-      basePay: 0, allowanceAmounts: {}, deductionAmounts: {}, incomeTax: 0, residentTax: 0
-    }
-  };
-};
+  const createInitialYearData = (yearStr, settings) => {
+      const yStr = yearStr || settings?.editableYear || 'R08';
+      return {
+        monthly: MONTHS.reduce((acc, m) => {
+          const initDates = calculateInitialDates(yStr, m, settings || {});
+          acc[m] = { 
+            salaryMonthText: initDates.salaryMonthText,
+            payDate: initDates.payDate,
+            periodStart: initDates.periodStart,
+            periodEnd: initDates.periodEnd,
+            workingDays: '',
+            workingHours: '',
+            overtimeHours: '',
+            lateNightHours: '',
+            holidayHours: '',
+            basePay: 0, residentTax: 0, stdAmount: 0,
+            hasNursingIns: 0, allowanceAmounts: {}, deductionAmounts: {},
+            isLocked: false
+          };
+          return acc;
+        }, {}),
+        bonus: {
+          basePay: 0, allowanceAmounts: {}, deductionAmounts: {}, incomeTax: 0, residentTax: 0
+        }
+      };
+    };
 
 const createInitialEmployee = (name = '新規社員', code = '', settings = null) => {
     const defaultYear = getDefaultYear(settings);
@@ -1028,30 +1032,99 @@ const App = () => {
   };
 
   const toggleNursingIns = (year, targetMonth) => {
-    if (isLockedYear(year) || !year) return;
-    if (!selectedEmployeeId || !data) return;
-    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
-    const newValue = currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
+        if (isLockedYear(year) || !year) return;
+        if (!selectedEmployeeId || !data) return;
+        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+        const newValue = currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
+        
+        const newMonthly = { ...currentYearDataObj.monthly };
+        const startIndex = MONTHS.indexOf(targetMonth);
+        for (let i = startIndex; i < MONTHS.length; i++) {
+          const m = MONTHS[i];
+          newMonthly[m] = { ...(newMonthly[m] || {}), hasNursingIns: newValue };
+        }
+        
+        const newData = {
+          ...data,
+          years: {
+            ...data.years,
+            [year]: {
+              ...currentYearDataObj,
+              monthly: newMonthly
+            }
+          }
+        };
+        updateDataObj(year, newData);
+      };
     
-    const newMonthly = { ...currentYearDataObj.monthly };
-    const startIndex = MONTHS.indexOf(targetMonth);
-    for (let i = startIndex; i < MONTHS.length; i++) {
-      const m = MONTHS[i];
-      newMonthly[m] = { ...(newMonthly[m] || {}), hasNursingIns: newValue };
-    }
+      const toggleMonthLock = (year, targetMonth) => {
+        if (isLockedYear(year) || !year) return;
+        if (!selectedEmployeeId || !data) return;
+        const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+        const currentLock = currentYearDataObj.monthly[targetMonth]?.isLocked;
+        updateMonthly(year, targetMonth, 'isLocked', !currentLock);
+      };
     
-    const newData = {
-      ...data,
-      years: {
-        ...data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: newMonthly
+      const copyPreviousMonth = (empId, targetYear, targetMonth) => {
+        if (isLockedYear(targetYear) || !targetYear || !empId) return;
+        const emp = employees[empId];
+        if (!emp) return;
+    
+        let sourceYear = targetYear;
+        let sourceMonth = '';
+    
+        if (targetMonth === '01') {
+          const targetYearNum = getYearNumber(targetYear);
+          sourceYear = targetYearNum > 0 ? `R${String(targetYearNum - 1).padStart(2, '0')}` : null;
+          sourceMonth = '12';
+        } else {
+          const prevM = parseInt(targetMonth, 10) - 1;
+          sourceMonth = String(prevM).padStart(2, '0');
         }
-      }
-    };
-    updateDataObj(year, newData);
-  };
+    
+        if (!sourceYear || !emp.data?.years?.[sourceYear]?.monthly?.[sourceMonth]) {
+          alert('コピー元の前月データが存在しません。');
+          return;
+        }
+    
+        const sourceData = emp.data.years[sourceYear].monthly[sourceMonth];
+        const currentYearDataObj = emp.data?.years?.[targetYear] || createInitialYearData(targetYear, settings);
+        const targetData = currentYearDataObj.monthly[targetMonth] || {};
+    
+        if (!window.confirm(`${parseInt(sourceMonth, 10)}月支給分の「金額・控除設定」を ${parseInt(targetMonth, 10)}月支給分にコピーしますか？\n（※日付や勤怠時間はコピーされません。既存の金額は上書きされます）`)) {
+          return;
+        }
+    
+        const newData = {
+          ...targetData,
+          basePay: sourceData.basePay || 0,
+          residentTax: sourceData.residentTax || 0,
+          stdAmount: sourceData.stdAmount || 0,
+          hasNursingIns: sourceData.hasNursingIns || 0,
+          allowanceAmounts: sourceData.allowanceAmounts ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts)) : {},
+          deductionAmounts: sourceData.deductionAmounts ? JSON.parse(JSON.stringify(sourceData.deductionAmounts)) : {},
+        };
+    
+        const updatedEmpData = {
+          ...emp.data,
+          years: {
+            ...emp.data.years,
+            [targetYear]: {
+              ...currentYearDataObj,
+              monthly: {
+                ...currentYearDataObj.monthly,
+                [targetMonth]: newData
+              }
+            }
+          }
+        };
+    
+        setEmployees(prev => ({
+          ...prev,
+          [empId]: { ...prev[empId], data: updatedEmpData }
+        }));
+        handleSave(empId, emp.master, updatedEmpData);
+      };
 
   const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
     if (isLockedYear(year) || !year) return;
@@ -1649,21 +1722,21 @@ const App = () => {
                         </tr>
 
                         {(settings?.allowanceDefinitions || []).map(def => (
-                          <tr key={def.id}>
-                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
-                              {def.name} 
-                              <div className="flex gap-0.5">
-                                <span className={`text-[8px] px-1 border rounded ${def.isTaxable !== false ? 'bg-orange-50 text-orange-500' : 'bg-slate-50 text-slate-400'}`} title="所得税対象">{def.isTaxable !== false ? '税' : '非'}</span>
-                                <span className={`text-[8px] px-1 border rounded ${def.isSocialIns !== false ? 'bg-indigo-50 text-indigo-500' : 'bg-slate-50 text-slate-400'}`} title="社会保険対象">{def.isSocialIns !== false ? '社' : '非'}</span>
-                                <span className={`text-[8px] px-1 border rounded ${def.isEmploymentIns !== false ? 'bg-teal-50 text-teal-500' : 'bg-slate-50 text-slate-400'}`} title="雇用保険対象">{def.isEmploymentIns !== false ? '雇' : '非'}</span>
-                              </div>
-                            </td>
-                            {MONTHS.map(m => (<td key={m} className="border border-gray-300 p-0.5 text-right"><input type="number" disabled={isYearLocked} value={currentYearData.monthly[m]?.allowanceAmounts?.[def.id] || ''} onChange={e => { const newMD = {...(currentYearData.monthly[m]?.allowanceAmounts || {}), [def.id]: Number(e.target.value)}; updateMonthly(selectedYear, m, 'allowanceAmounts', newMD); }} className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed text-slate-400' : ''}`} /></td>))}
-                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-gray-50 sticky right-[190px] text-[11px]">{formatCurrency(results.sums.allowances[def.id])}</td>
-                            <td className="border border-gray-300 p-0.5 text-right bg-purple-50 sticky right-[100px]"><input type="number" disabled={isYearLocked} value={currentYearData.bonus?.allowanceAmounts?.[def.id] || ''} onChange={e => updateBonus(selectedYear, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-bold text-purple-700 text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed opacity-50' : ''}`} /></td>
-                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-gray-100 sticky right-0 text-[11px]">{formatCurrency((results.sums.allowances[def.id] || 0) + (results.bonusResults.allowances[def.id] || 0))}</td>
-                          </tr>
-                        ))}
+                          <tr key={def.id}>
+                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
+                              {def.name} 
+                              <div className="flex gap-0.5">
+                                <span className={`text-[8px] px-1 border rounded ${def.isTaxable === true ? 'bg-orange-50 text-orange-500' : 'bg-slate-50 text-slate-400'}`} title="所得税対象">{def.isTaxable === true ? '税' : '非'}</span>
+                                <span className={`text-[8px] px-1 border rounded ${def.isSocialIns === true ? 'bg-indigo-50 text-indigo-500' : 'bg-slate-50 text-slate-400'}`} title="社会保険対象">{def.isSocialIns === true ? '社' : '非'}</span>
+                                <span className={`text-[8px] px-1 border rounded ${def.isEmploymentIns === true ? 'bg-teal-50 text-teal-500' : 'bg-slate-50 text-slate-400'}`} title="雇用保険対象">{def.isEmploymentIns === true ? '雇' : '非'}</span>
+                              </div>
+                            </td>
+                            {MONTHS.map(m => (<td key={m} className="border border-gray-300 p-0.5 text-right"><input type="number" disabled={isYearLocked || currentYearData.monthly[m]?.isLocked} value={currentYearData.monthly[m]?.allowanceAmounts?.[def.id] || ''} onChange={e => { const newMD = {...(currentYearData.monthly[m]?.allowanceAmounts || {}), [def.id]: Number(e.target.value)}; updateMonthly(selectedYear, m, 'allowanceAmounts', newMD); }} className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${(isYearLocked || currentYearData.monthly[m]?.isLocked) ? 'cursor-not-allowed text-slate-400' : ''}`} /></td>))}
+                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-gray-50 sticky right-[190px] text-[11px]">{formatCurrency(results.sums.allowances[def.id])}</td>
+                            <td className="border border-gray-300 p-0.5 text-right bg-purple-50 sticky right-[100px]"><input type="number" disabled={isYearLocked} value={currentYearData.bonus?.allowanceAmounts?.[def.id] || ''} onChange={e => updateBonus(selectedYear, 'allowanceAmounts', def.id, Number(e.target.value))} className={`w-full bg-transparent text-right outline-none font-bold text-purple-700 text-[11px] px-0.5 ${isYearLocked ? 'cursor-not-allowed opacity-50' : ''}`} /></td>
+                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-gray-100 sticky right-0 text-[11px]">{formatCurrency((results.sums.allowances[def.id] || 0) + (results.bonusResults.allowances[def.id] || 0))}</td>
+                          </tr>
+                        ))}
 
                         <tr className="bg-blue-50 font-black border-y-2 border-blue-100">
                           <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-blue-50 font-black text-blue-700 flex justify-between items-center text-[11px]">総支給額 <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded ml-2 font-normal">連動</span></td>
@@ -1867,7 +1940,7 @@ const App = () => {
                       <th className="border border-slate-200 p-2 min-w-[120px] bg-slate-100">支給年月日</th>
                       <th className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">基本給</th>
                       
-                      {allAllowances.map(def => (
+                                            {allAllowances.map(def => (
                         <th key={def.id} className="border border-slate-200 p-2 min-w-[100px] bg-slate-100">
                           {def.name} <span className="text-[8px] font-normal text-gray-400">{def.isTaxable === true ? '(課)' : '(非)'}</span>
                         </th>

@@ -900,6 +900,7 @@ const App = () => {
   const [ledgerSelectedMonth, setLedgerSelectedMonth] = useState("01");
 
   const [isLedgerPrintOpen, setIsLedgerPrintOpen] = useState(false); // ★追加: 賃金台帳の印刷モーダル状態
+  const [isResidentTaxModalOpen, setIsResidentTaxModalOpen] = useState(false); // ★追加: 住民税管理モーダル状態
 
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
@@ -1657,45 +1658,60 @@ const App = () => {
     handleSave(empId, emp.master, newData);
   };
 
-  const updateEmployeeMonthlyObject = (
+  const handleSaveResidentTaxBulk = async (
     empId,
-    year,
-    monthKey,
-    objectField,
-    innerField,
-    val
+    startYear,
+    juneAmount,
+    remainingAmount
   ) => {
-    if (isLockedYear(year) || !year) return;
     const emp = employees[empId];
     if (!emp) return;
-    const currentYearDataObj =
-      emp.data?.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
-    const currentObj = currentMonthData[objectField] || {};
 
-    // ★追加: 月がロックされていたら無効
-    if (currentMonthData.isLocked) return;
-    const newData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [monthKey]: {
-              ...currentMonthData,
-              [objectField]: { ...currentObj, [innerField]: val },
-            },
-          },
-        },
-      },
-    };
+    let updatedData = { ...emp.data };
+    if (!updatedData.years) updatedData.years = {};
+
+    // 1. 当年度（6月〜12月）の更新
+    const currentYear = startYear;
+    if (!updatedData.years[currentYear]) {
+      updatedData.years[currentYear] = createInitialYearData(
+        currentYear,
+        settings
+      );
+    }
+
+    const monthsCurrent = ["06", "07", "08", "09", "10", "11", "12"];
+    monthsCurrent.forEach((m) => {
+      const amount = m === "06" ? juneAmount : remainingAmount;
+      updatedData.years[currentYear].monthly[m] = {
+        ...updatedData.years[currentYear].monthly[m],
+        residentTax: amount,
+      };
+    });
+
+    // 2. 翌年度（1月〜5月）の更新
+    const nextYearNum = getYearNumber(startYear) + 1;
+    const nextYear = `R${String(nextYearNum).padStart(2, "0")}`;
+    if (!updatedData.years[nextYear]) {
+      updatedData.years[nextYear] = createInitialYearData(nextYear, settings);
+    }
+
+    const monthsNext = ["01", "02", "03", "04", "05"];
+    monthsNext.forEach((m) => {
+      updatedData.years[nextYear].monthly[m] = {
+        ...updatedData.years[nextYear].monthly[m],
+        residentTax: remainingAmount,
+      };
+    });
+
     setEmployees((prev) => ({
       ...prev,
-      [empId]: { ...prev[empId], data: newData },
+      [empId]: { ...prev[empId], data: updatedData },
     }));
-    handleSave(empId, emp.master, newData);
+
+    await handleSave(empId, emp.master, updatedData);
+    alert(
+      `${currentYear}年6月〜${nextYear}年5月分の住民税を一括更新しました。`
+    );
   };
 
   const results = useMemo(() => {
@@ -2932,58 +2948,119 @@ const App = () => {
 
               {selectedEmployeeId && master && data && selectedYear ? (
                 <>
-                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4">
-                    {/* 上段：基本情報 */}
-                    <div className="bg-slate-800 p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 text-white">
-                      <div className="flex items-center gap-3">
-                        <User className="text-emerald-400" size={20} />
-                        <h2 className="font-black text-sm tracking-widest uppercase">
-                          Employee Master
-                        </h2>
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4 p-4 flex flex-col md:flex-row justify-between items-center gap-4">
+                    {/* 左側：氏名を一番左に、大きく強調 */}
+                    <div className="flex items-center gap-6">
+                      <div className="flex flex-col">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-2xl font-black text-slate-800 border-b-2 border-indigo-500 pb-0.5">
+                            {master.name || "氏名未設定"}
+                          </span>
+                          <span className="text-sm text-slate-500 font-bold">
+                            様
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
-                          <span className="text-[10px] font-bold text-slate-400">
-                            対象社員:
+
+                      <div className="h-10 w-px bg-slate-200 hidden md:block mx-2"></div>
+
+                      <div className="flex flex-wrap gap-x-6 gap-y-2">
+                        <div className="flex flex-col">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            社員コード
                           </span>
-                          <select
-                            value={selectedEmployeeId || ""}
-                            onChange={(e) =>
-                              setSelectedEmployeeId(e.target.value)
-                            }
-                            className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
-                          >
-                            {Object.entries(employees).map(([id, emp]) => (
-                              <option key={id} value={id}>
-                                {emp.master?.employeeCode} {emp.master?.name}
-                              </option>
-                            ))}
-                          </select>
+                          <span className="text-sm font-mono font-black text-slate-700">
+                            {master.employeeCode || "---"}
+                          </span>
                         </div>
-
-                        <div className="h-6 w-px bg-slate-600 mx-1 hidden md:block"></div>
-
-                        <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
-                          <span className="text-[10px] font-bold text-slate-400">
-                            年度:
+                        <div className="flex flex-col">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            入社日
                           </span>
-                          <select
-                            value={selectedYear || ""}
-                            onChange={(e) => setSelectedYear(e.target.value)}
-                            className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
-                          >
-                            {yearsList.map((y) => (
-                              <option key={y} value={y}>
-                                {y}
-                              </option>
-                            ))}
-                          </select>
-                          {isYearLocked && (
-                            <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/30 whitespace-nowrap ml-1">
-                              ロック中
+                          <span className="text-sm font-mono font-black text-slate-700">
+                            {master.joinDate || "---"}
+                          </span>
+                        </div>
+                        <div className="flex flex-col">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            扶養人数
+                          </span>
+                          <div className="flex items-baseline gap-1">
+                            <span className="text-sm font-mono font-black text-slate-700">
+                              {master.dependents ?? 0}
                             </span>
-                          )}
+                            <span className="text-[10px] font-bold text-slate-500">
+                              人
+                            </span>
+                          </div>
                         </div>
+                        <div className="flex flex-col">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            税区分
+                          </span>
+                          <span
+                            className={`text-[11px] font-black px-1.5 rounded border ${
+                              master.taxType === 1
+                                ? "bg-amber-50 text-amber-600 border-amber-200"
+                                : "bg-blue-50 text-blue-600 border-blue-200"
+                            }`}
+                          >
+                            {master.taxType === 1 ? "乙欄" : "甲欄"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 右側：操作系（年度、社員切替、印刷など） */}
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200 shadow-sm">
+                        <span className="text-[10px] font-bold text-slate-500">
+                          年度:
+                        </span>
+                        <select
+                          value={selectedYear || ""}
+                          onChange={(e) => setSelectedYear(e.target.value)}
+                          className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
+                        >
+                          {yearsList.map((y) => (
+                            <option key={y} value={y}>
+                              {y}
+                            </option>
+                          ))}
+                        </select>
+                        {isYearLocked && (
+                          <span className="bg-red-50 text-red-600 text-[10px] font-black px-1.5 py-0.5 rounded border border-red-200 whitespace-nowrap ml-1 animate-pulse">
+                            ロック
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200 shadow-sm">
+                        <span className="text-[10px] font-bold text-slate-500">
+                          社員選択:
+                        </span>
+                        <select
+                          value={selectedEmployeeId || ""}
+                          onChange={(e) =>
+                            setSelectedEmployeeId(e.target.value)
+                          }
+                          className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer max-w-[150px]"
+                        >
+                          {Object.entries(employees).map(([id, emp]) => (
+                            <option key={id} value={id}>
+                              {emp.master?.employeeCode} {emp.master?.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setIsResidentTaxModalOpen(true)}
+                          className="flex items-center gap-1 text-[10px] font-black px-3 py-2 rounded border border-orange-200 bg-orange-50 text-orange-600 hover:bg-orange-100 transition-all shadow-sm"
+                        >
+                          住民税設定・確認
+                        </button>
                         <button
                           onClick={handleCopyPreviousYear}
                           disabled={
@@ -2991,133 +3068,17 @@ const App = () => {
                             !canCopyPreviousYear ||
                             !selectedYear
                           }
-                          className="text-[10px] font-bold px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                          className="text-[10px] font-black px-3 py-2 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
                         >
                           前年コピー
                         </button>
-
-                        <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block"></div>
-
                         <button
                           onClick={() => setIsLedgerPrintOpen(true)}
-                          className="flex items-center gap-1 text-[10px] font-bold px-4 py-1.5 rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-500 transition-colors whitespace-nowrap shadow-sm"
+                          className="flex items-center gap-1 text-[10px] font-black px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500 transition-all shadow-md active:transform active:scale-95"
                         >
                           <Printer size={12} /> 台帳印刷
                         </button>
-
-                        <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block"></div>
-
-                        <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded border border-slate-200">
-                          <span className="text-[10px] font-bold text-slate-500">
-                            社員コード:
-                          </span>
-                          <span className="font-bold text-white w-16 text-center font-mono">
-                            {master.employeeCode || "---"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded">
-                          <span className="text-[10px] font-bold text-slate-400">
-                            氏名:
-                          </span>
-                          <span className="font-bold text-white w-32">
-                            {master.name || "未設定"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded">
-                          <span className="text-[10px] font-bold text-slate-400">
-                            扶養人数:
-                          </span>
-                          <span className="font-bold text-white w-8 text-right font-mono">
-                            {master.dependents ?? 0}
-                          </span>
-                          <span className="text-[10px] text-slate-400">人</span>
-                        </div>
                       </div>
-                    </div>
-
-                    {/* 下段：詳細情報 */}
-                    <div className="p-4 bg-gray-50 flex flex-wrap items-center gap-x-8 gap-y-4 text-sm border-t border-gray-200">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                          マスター引用
-                        </span>
-                        <span className="text-xs font-bold text-slate-600">
-                          生年月日:
-                        </span>
-                        <span className="text-xs w-28 font-mono text-slate-700">
-                          {master.dob || "未設定"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                          マスター引用
-                        </span>
-                        <span className="text-xs font-bold text-slate-600">
-                          性別:
-                        </span>
-                        <span className="text-xs w-16 text-slate-700">
-                          {master.gender === "male"
-                            ? "男"
-                            : master.gender === "female"
-                            ? "女"
-                            : master.gender === "other"
-                            ? "その他"
-                            : "未設定"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                          マスター引用
-                        </span>
-                        <span className="text-xs font-bold text-slate-600">
-                          入社日:
-                        </span>
-                        <span className="text-xs w-28 font-mono text-slate-700">
-                          {master.joinDate || "未設定"}
-                        </span>
-                      </div>
-                      <div className="h-6 w-px bg-slate-300 hidden md:block"></div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                          マスター引用
-                        </span>
-                        <span className="text-xs font-bold text-slate-600">
-                          所得税区分:
-                        </span>
-                        <span className="text-xs text-slate-700 font-bold bg-white border border-slate-200 px-2 py-0.5 rounded">
-                          {master.taxType === 1 ? "乙：1" : "甲：0"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                          マスター引用
-                        </span>
-                        <span className="text-xs font-bold text-slate-600">
-                          ステータス:
-                        </span>
-                        <span
-                          className={`text-xs font-bold bg-white border px-2 py-0.5 rounded ${
-                            master.status === "retired"
-                              ? "text-red-600 border-red-200"
-                              : "text-emerald-600 border-emerald-200"
-                          }`}
-                        >
-                          {master.status === "retired" ? "退職" : "在籍"}
-                        </span>
-                      </div>
-                      {master.status === "retired" && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
-                            マスター引用
-                          </span>
-                          <span className="text-xs font-bold text-slate-600">
-                            退職日:
-                          </span>
-                          <span className="text-xs w-28 font-mono text-red-600 font-bold">
-                            {master.retireDate || "未設定"}
-                          </span>
-                        </div>
-                      )}
                     </div>
                   </div>
 

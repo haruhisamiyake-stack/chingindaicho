@@ -707,20 +707,43 @@ const calculateMonthlyResult = (master, row, settings, monthKey) => {
   const stdAmount =
     Number(row.stdAmount) > 0 ? Number(row.stdAmount) : estStdAmount;
 
+  // 加入フラグの取得（過去データ互換のためsocialInsにもフォールバック）
+  const hasHealth =
+    master.healthIns !== undefined
+      ? master.healthIns === 1
+      : master.socialIns === 1;
+  const hasPension =
+    master.pensionIns !== undefined
+      ? master.pensionIns === 1
+      : master.socialIns === 1;
+  const hasEmployment = master.employmentIns === 1;
+
   const ins = calculateSocialIns(
     stdAmount,
-    master.socialIns,
+    1, // 関数内部の必須判定をバイパスし、外部のフラグで厳密に制御する
     hRate,
     pRate,
     nRate,
     cRate,
     row.hasNursingIns === 1
   );
+
+  // チェックが外れている場合は強制的に0円にする
+  if (!hasHealth) {
+    ins.health = 0;
+    ins.nursing = 0;
+  }
+  if (!hasPension) {
+    ins.pension = 0;
+    ins.childCare = 0;
+  }
+
   // 【修正④】雇用保険の計算対象の明示
   // 雇用保険は雇用保険対象手当のみ
-  const employment = master.employmentIns
+  const employment = hasEmployment
     ? Math.floor(employmentInsGross * (eRate / 1000))
     : 0;
+
   const socialTotal =
     ins.health + ins.pension + ins.nursing + ins.childCare + employment;
   const incomeTax = calculateIncomeTax(
@@ -788,6 +811,7 @@ const createInitialYearData = (yearStr, settings) => {
       deductionAmounts: {},
       incomeTax: 0,
       residentTax: 0,
+      payDate: "",
     },
     bonus2: {
       basePay: 0,
@@ -795,6 +819,7 @@ const createInitialYearData = (yearStr, settings) => {
       deductionAmounts: {},
       incomeTax: 0,
       residentTax: 0,
+      payDate: "",
     },
   };
 };
@@ -818,7 +843,9 @@ const createInitialEmployee = (
       paymentDay: "翌月15",
       dependents: 0,
       taxType: 0,
-      socialIns: 1,
+      socialIns: 1, // 古いデータとの互換性のために残す
+      healthIns: 1,
+      pensionIns: 1,
       employmentIns: 1,
       // 【修正⑤】定義はsettingsにある前提なので空でOKだが、フォールバック用に保持する
       allowanceDefinitions: [],
@@ -871,6 +898,8 @@ const App = () => {
 
   const [ledgerViewMode, setLedgerViewMode] = useState("annual");
   const [ledgerSelectedMonth, setLedgerSelectedMonth] = useState("01");
+
+  const [isLedgerPrintOpen, setIsLedgerPrintOpen] = useState(false); // ★追加: 賃金台帳の印刷モーダル状態
 
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
@@ -1709,7 +1738,45 @@ const App = () => {
 
     MONTHS.forEach((m) => {
       const row = currentYearData.monthly[m] || {};
-      const monthlyResult = calculateMonthlyResult(master, row, settings, m);
+      const rawResult = calculateMonthlyResult(master, row, settings, m);
+
+      // ★実際の標準報酬月額が未入力（0または空）の場合は、社会保険料の計算結果を強制的に0にする
+      const hasStdAmount = Number(row.stdAmount) > 0;
+      const monthlyResult = hasStdAmount
+        ? rawResult
+        : {
+            ...rawResult,
+            health: 0,
+            pension: 0,
+            nursing: 0,
+            childCare: 0,
+            socialTotal: rawResult.employment, // 雇用保険は標準報酬月額に依存しないためそのまま残す
+            incomeTax: calculateIncomeTax(
+              Math.max(0, rawResult.taxableGross - rawResult.employment),
+              master.dependents,
+              master.taxType === 1
+            ),
+            totalDeductions:
+              rawResult.employment +
+              calculateIncomeTax(
+                Math.max(0, rawResult.taxableGross - rawResult.employment),
+                master.dependents,
+                master.taxType === 1
+              ) +
+              (Number(row.residentTax) || 0) +
+              rawResult.totalCustomDeds,
+            netPay:
+              rawResult.grossPay -
+              (rawResult.employment +
+                calculateIncomeTax(
+                  Math.max(0, rawResult.taxableGross - rawResult.employment),
+                  master.dependents,
+                  master.taxType === 1
+                ) +
+                (Number(row.residentTax) || 0) +
+                rawResult.totalCustomDeds),
+          };
+
       monthlyResults[m] = monthlyResult;
 
       sums.basePay += Number(row.basePay) || 0;
@@ -1782,16 +1849,37 @@ const App = () => {
               bSocialInsGross
             )
           : bSocialInsGross;
+
       const bIns = calculateSocialIns(
         bEstStdAmount,
-        master.socialIns,
+        1,
         bhRate,
         bpRate,
         bnRate,
         bcRate,
         lastMonthRow.hasNursingIns === 1
       );
-      const bEmp = master.employmentIns
+
+      const hasHealth =
+        master.healthIns !== undefined
+          ? master.healthIns === 1
+          : master.socialIns === 1;
+      const hasPension =
+        master.pensionIns !== undefined
+          ? master.pensionIns === 1
+          : master.socialIns === 1;
+      const hasEmployment = master.employmentIns === 1;
+
+      if (!hasHealth) {
+        bIns.health = 0;
+        bIns.nursing = 0;
+      }
+      if (!hasPension) {
+        bIns.pension = 0;
+        bIns.childCare = 0;
+      }
+
+      const bEmp = hasEmployment
         ? Math.floor(bEmploymentInsGross * (beRate / 1000))
         : 0;
       const bSocialTotal =
@@ -1845,7 +1933,6 @@ const App = () => {
       }
     });
 
-    // 画面側の変更が終わるまでエラーにならないよう、古い名前（bonusResults）も同時に出力します
     return {
       monthlyResults,
       sums,
@@ -1892,23 +1979,120 @@ const App = () => {
     const slipYearData =
       emp.data?.years?.[selectedYear] ||
       createInitialYearData(selectedYear, settings);
-    const rowData = slipYearData.monthly[monthKey] || {};
-    const calcResult = calculateMonthlyResult(
-      emp.master,
-      rowData,
-      settings,
-      monthKey
-    );
+    const isBonus = monthKey === "bonus" || monthKey === "bonus2";
+
+    let rowData = {};
+    let calcResult = {};
+    let titleText = "給与明細書";
+    let targetMonthText = "";
+    let payDateText = "";
 
     const allowanceDefs =
       settings?.allowanceDefinitions?.length > 0
         ? settings.allowanceDefinitions
         : emp.master?.allowanceDefinitions || [];
-
     const deductionDefs =
       settings?.deductionDefinitions?.length > 0
         ? settings.deductionDefinitions
         : emp.master?.deductionDefinitions || [];
+
+    if (isBonus) {
+      rowData = slipYearData[monthKey] || {};
+      titleText =
+        monthKey === "bonus" ? "賞与明細書（１回目）" : "賞与明細書（２回目）";
+      targetMonthText = "賞与";
+      payDateText = rowData.payDate || "未設定";
+
+      const b = rowData;
+      let bTotalAllowances = 0,
+        bTotalSocialInsAllowances = 0,
+        bTotalEmploymentInsAllowances = 0;
+      allowanceDefs.forEach((def) => {
+        const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+        bTotalAllowances += amt;
+        if (def.isSocialIns) bTotalSocialInsAllowances += amt;
+        if (def.isEmploymentIns) bTotalEmploymentInsAllowances += amt;
+      });
+      const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+      const bSocialInsGross =
+        (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+      const bEmploymentInsGross =
+        (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
+
+      const lastMonth = MONTHS[MONTHS.length - 1];
+      const lastMonthRow = slipYearData.monthly[lastMonth] || {};
+
+      const bhRate = settings?.rateSchedules?.health
+        ? getRateForMonth(settings.rateSchedules.health, lastMonth)
+        : lastMonthRow.healthRate || 5.0;
+      const bpRate = settings?.rateSchedules?.pension
+        ? getRateForMonth(settings.rateSchedules.pension, lastMonth)
+        : lastMonthRow.pensionRate || 9.15;
+      const bnRate = settings?.rateSchedules?.nursing
+        ? getRateForMonth(settings.rateSchedules.nursing, lastMonth)
+        : lastMonthRow.nursingRate || 0.8;
+      const bcRate = settings?.rateSchedules?.childCare
+        ? getRateForMonth(settings.rateSchedules.childCare, lastMonth)
+        : lastMonthRow.childCareRate || 0.0;
+      const beRate = settings?.rateSchedules?.employment
+        ? getRateForMonth(settings.rateSchedules.employment, lastMonth)
+        : lastMonthRow.employmentRate || 6.0;
+
+      const bEstStdAmount =
+        settings?.standardRewardTable?.length > 0
+          ? getStandardRewardAmount(
+              settings.standardRewardTable,
+              bSocialInsGross
+            )
+          : bSocialInsGross;
+      const bIns = calculateSocialIns(
+        bEstStdAmount,
+        emp.master.socialIns,
+        bhRate,
+        bpRate,
+        bnRate,
+        bcRate,
+        lastMonthRow.hasNursingIns === 1
+      );
+      const bEmp = emp.master.employmentIns
+        ? Math.floor(bEmploymentInsGross * (beRate / 1000))
+        : 0;
+      const bSocialTotal =
+        bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
+      const bIncomeTax = Number(b.incomeTax) || 0;
+      const bResidentTax = Number(b.residentTax) || 0;
+
+      let bTotalCustomDeds = 0;
+      deductionDefs.forEach((def) => {
+        bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
+      });
+      const bTotalDeductions =
+        bSocialTotal + bIncomeTax + bResidentTax + bTotalCustomDeds;
+      const bNetPay = bGross - bTotalDeductions;
+
+      calcResult = {
+        grossPay: bGross,
+        health: bIns.health,
+        pension: bIns.pension,
+        nursing: bIns.nursing,
+        childCare: bIns.childCare,
+        employment: bEmp,
+        incomeTax: bIncomeTax,
+        totalDeductions: bTotalDeductions,
+        netPay: bNetPay,
+      };
+    } else {
+      rowData = slipYearData.monthly[monthKey] || {};
+      calcResult = calculateMonthlyResult(
+        emp.master,
+        rowData,
+        settings,
+        monthKey
+      );
+      titleText = "給与明細書";
+      targetMonthText = rowData.salaryMonthText || "未設定";
+      payDateText = rowData.payDate || "未設定";
+    }
 
     return (
       <div
@@ -1916,22 +2100,23 @@ const App = () => {
         className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none"
       >
         <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">
-          給与明細書
+          {titleText}
         </h1>
 
         <div className="flex justify-between items-start mb-6 text-sm font-bold">
           <div className="space-y-1">
+            {!isBonus && (
+              <div className="flex gap-4">
+                <span className="w-16">支給月</span>: {parseInt(monthKey, 10)}
+                月支給
+              </div>
+            )}
             <div className="flex gap-4">
-              <span className="w-16">支給月</span>: {parseInt(monthKey, 10)}
-              月支給
+              <span className="w-16">対象{isBonus ? "" : "月分"}</span>:{" "}
+              {targetMonthText}
             </div>
             <div className="flex gap-4">
-              <span className="w-16">対象月分</span>:{" "}
-              {rowData.salaryMonthText || "未設定"}
-            </div>
-            <div className="flex gap-4">
-              <span className="w-16">支給日</span>:{" "}
-              {rowData.payDate || "未設定"}
+              <span className="w-16">支給日</span>: {payDateText}
             </div>
           </div>
           <div className="text-right space-y-1">
@@ -1961,37 +2146,43 @@ const App = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-0 border-t-2 border-l-2 border-slate-800 mb-6 text-[13px]">
-          <div className="border-r-2 border-slate-800">
-            <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
-              勤怠
+        <div
+          className={`grid ${
+            isBonus ? "grid-cols-2" : "grid-cols-3"
+          } gap-0 border-t-2 border-l-2 border-slate-800 mb-6 text-[13px]`}
+        >
+          {!isBonus && (
+            <div className="border-r-2 border-slate-800">
+              <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
+                勤怠
+              </div>
+              <div className="p-3 space-y-1.5 min-h-[220px]">
+                {[
+                  "出勤日数",
+                  "欠勤日数",
+                  "有休取得",
+                  "総労働時間",
+                  "時間外労働",
+                  "深夜労働",
+                  "休日労働",
+                ].map((label) => (
+                  <div
+                    key={label}
+                    className="flex justify-between border-b border-slate-300 border-dashed pb-0.5 text-slate-500"
+                  >
+                    <span>{label}</span>
+                    <span>-</span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="p-3 space-y-1.5 min-h-[220px]">
-              {[
-                "出勤日数",
-                "欠勤日数",
-                "有休取得",
-                "総労働時間",
-                "時間外労働",
-                "深夜労働",
-                "休日労働",
-              ].map((label) => (
-                <div
-                  key={label}
-                  className="flex justify-between border-b border-slate-300 border-dashed pb-0.5 text-slate-500"
-                >
-                  <span>{label}</span>
-                  <span>-</span>
-                </div>
-              ))}
-            </div>
-          </div>
+          )}
 
           <div className="border-r-2 border-slate-800 flex flex-col">
             <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
               支給
             </div>
-            <div className="p-3 space-y-1.5 flex-1">
+            <div className="p-3 space-y-1.5 flex-1 min-h-[220px]">
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                 <span>基本給</span>
                 <span>{formatCurrency(rowData.basePay)}</span>
@@ -2018,7 +2209,7 @@ const App = () => {
             <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
               控除
             </div>
-            <div className="p-3 space-y-1.5 flex-1">
+            <div className="p-3 space-y-1.5 flex-1 min-h-[220px]">
               <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                 <span>健康保険料</span>
                 <span>{formatCurrency(calcResult.health)}</span>
@@ -2218,20 +2409,23 @@ const App = () => {
                   <table className="w-full border-collapse">
                     <thead>
                       <tr className="bg-slate-100 text-slate-600 text-xs font-black uppercase text-left">
-                        <th className="p-3 border-b border-slate-200 w-32">
+                        <th className="p-3 border-b border-slate-200 w-24">
                           社員コード
                         </th>
                         <th className="p-3 border-b border-slate-200">氏名</th>
-                        <th className="p-3 border-b border-slate-200 w-24">
+                        <th className="p-3 border-b border-slate-200 w-20">
                           性別
                         </th>
-                        <th className="p-3 border-b border-slate-200 w-32">
+                        <th className="p-3 border-b border-slate-200 w-28">
                           入社日
                         </th>
-                        <th className="p-3 border-b border-slate-200 w-24">
-                          ステータス
+                        <th className="p-3 border-b border-slate-200 w-44">
+                          保/税
                         </th>
-                        <th className="p-3 border-b border-slate-200 text-center w-64">
+                        <th className="p-3 border-b border-slate-200 w-20">
+                          状態
+                        </th>
+                        <th className="p-3 border-b border-slate-200 text-center w-56">
                           操作
                         </th>
                       </tr>
@@ -2247,88 +2441,140 @@ const App = () => {
                               employeeSearchQuery
                             )
                         )
-                        .map(([id, emp]) => (
-                          <tr
-                            key={id}
-                            className="hover:bg-slate-50 border-b border-slate-100 transition-colors"
-                          >
-                            <td className="p-3 font-mono text-slate-500 text-sm">
-                              {emp.master?.employeeCode || "-"}
-                            </td>
-                            <td className="p-3 font-bold text-slate-700">
-                              {emp.master?.name || "名称未設定"}
-                            </td>
-                            <td className="p-3 text-sm text-slate-600">
-                              {emp.master?.gender === "male"
-                                ? "男"
-                                : emp.master?.gender === "female"
-                                ? "女"
-                                : emp.master?.gender === "other"
-                                ? "その他"
-                                : "未設定"}
-                            </td>
-                            <td className="p-3 font-mono text-slate-500 text-sm">
-                              {emp.master?.joinDate || "-"}
-                            </td>
-                            <td className="p-3">
-                              {emp.master?.status === "retired" ? (
-                                <span className="bg-red-100 text-red-600 text-xs font-bold px-2 py-1 rounded border border-red-200">
-                                  退職
-                                </span>
-                              ) : (
-                                <span className="bg-emerald-100 text-emerald-600 text-xs font-bold px-2 py-1 rounded border border-emerald-200">
-                                  在籍
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 flex items-center justify-center gap-2">
-                                                           {" "}
-                              <button
-                                onClick={() => {
-                                  setEditingEmployeeId(id);
-                                  setEditingMaster({ ...emp.master });
-                                }}
-                                className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded text-xs font-bold transition-colors border border-slate-200"
-                              >
-                                <Edit2 size={12} /> 編集
-                              </button>
-                                                           {" "}
-                              {emp.master?.status !== "retired" && (
+                        .map(([id, emp]) => {
+                          const hasHealth =
+                            emp.master?.healthIns !== undefined
+                              ? emp.master.healthIns === 1
+                              : emp.master?.socialIns === 1;
+                          const hasPension =
+                            emp.master?.pensionIns !== undefined
+                              ? emp.master.pensionIns === 1
+                              : emp.master?.socialIns === 1;
+                          const hasEmployment = emp.master?.employmentIns === 1;
+                          const isOtsu = emp.master?.taxType === 1;
+
+                          return (
+                            <tr
+                              key={id}
+                              className="hover:bg-slate-50 border-b border-slate-100 transition-colors"
+                            >
+                              <td className="p-3 font-mono text-slate-500 text-sm">
+                                {emp.master?.employeeCode || "-"}
+                              </td>
+                              <td className="p-3 font-bold text-slate-700">
+                                {emp.master?.name || "名称未設定"}
+                              </td>
+                              <td className="p-3 text-sm text-slate-600">
+                                {emp.master?.gender === "male"
+                                  ? "男"
+                                  : emp.master?.gender === "female"
+                                  ? "女"
+                                  : emp.master?.gender === "other"
+                                  ? "その他"
+                                  : "-"}
+                              </td>
+                              <td className="p-3 font-mono text-slate-500 text-sm">
+                                {emp.master?.joinDate || "-"}
+                              </td>
+                              <td className="p-3">
+                                <div className="flex gap-1">
+                                  <span
+                                    className={`text-[10px] font-black px-1.5 py-0.5 border rounded ${
+                                      hasHealth
+                                        ? "bg-indigo-50 text-indigo-600 border-indigo-200"
+                                        : "bg-slate-50 text-slate-300 border-slate-200"
+                                    }`}
+                                    title="健康保険"
+                                  >
+                                    健
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-black px-1.5 py-0.5 border rounded ${
+                                      hasPension
+                                        ? "bg-indigo-50 text-indigo-600 border-indigo-200"
+                                        : "bg-slate-50 text-slate-300 border-slate-200"
+                                    }`}
+                                    title="厚生年金"
+                                  >
+                                    厚
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-black px-1.5 py-0.5 border rounded ${
+                                      hasEmployment
+                                        ? "bg-teal-50 text-teal-600 border-teal-200"
+                                        : "bg-slate-50 text-slate-300 border-slate-200"
+                                    }`}
+                                    title="雇用保険"
+                                  >
+                                    雇
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-black px-1.5 py-0.5 border rounded ${
+                                      isOtsu
+                                        ? "bg-amber-50 text-amber-600 border-amber-200"
+                                        : "bg-blue-50 text-blue-600 border-blue-200"
+                                    }`}
+                                    title="所得税区分"
+                                  >
+                                    {isOtsu ? "乙" : "甲"}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="p-3">
+                                {emp.master?.status === "retired" ? (
+                                  <span className="bg-red-100 text-red-600 text-[10px] font-bold px-2 py-1 rounded border border-red-200">
+                                    退職
+                                  </span>
+                                ) : (
+                                  <span className="bg-emerald-100 text-emerald-600 text-[10px] font-bold px-2 py-1 rounded border border-emerald-200">
+                                    在籍
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3 flex items-center justify-center gap-2">
                                 <button
                                   onClick={() => {
-                                    if (
-                                      window.confirm(
-                                        "この社員を退職済みにしますか？"
-                                      )
-                                    )
-                                      handleRetireEmployee(id);
+                                    setEditingEmployeeId(id);
+                                    setEditingMaster({ ...emp.master });
                                   }}
-                                  className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-bold transition-colors border border-red-100"
+                                  className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded text-[10px] font-bold transition-colors border border-slate-200"
                                 >
-                                  退職
+                                  <Edit2 size={12} /> 編集
                                 </button>
-                              )}
-                                                           {" "}
-                              <button
-                                onClick={() => handleDeleteEmployee(id)}
-                                className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-red-600 hover:text-white text-slate-500 rounded text-xs font-bold transition-colors border border-slate-200"
-                              >
-                                <Trash2 size={12} /> 削除
-                              </button>
-                                                           {" "}
-                              <button
-                                onClick={() => {
-                                  setSelectedEmployeeId(id);
-                                  setActiveTab("ledger");
-                                }}
-                                className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-xs font-bold transition-colors border border-indigo-100"
-                              >
-                                <Layout size={12} /> 台帳へ
-                              </button>
-                                                         {" "}
-                            </td>
-                          </tr>
-                        ))}
+                                {emp.master?.status !== "retired" && (
+                                  <button
+                                    onClick={() => {
+                                      if (
+                                        window.confirm(
+                                          "この社員を退職済みにしますか？"
+                                        )
+                                      )
+                                        handleRetireEmployee(id);
+                                    }}
+                                    className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-[10px] font-bold transition-colors border border-red-100"
+                                  >
+                                    退職
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDeleteEmployee(id)}
+                                  className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-red-600 hover:text-white text-slate-500 rounded text-[10px] font-bold transition-colors border border-slate-200"
+                                >
+                                  <Trash2 size={12} /> 削除
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setSelectedEmployeeId(id);
+                                    setActiveTab("ledger");
+                                  }}
+                                  className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-[10px] font-bold transition-colors border border-indigo-100"
+                                >
+                                  <Layout size={12} /> 台帳へ
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                   {Object.keys(employees).length === 0 && (
@@ -2675,43 +2921,31 @@ const App = () => {
                              {" "}
               </div>
             )}
-                        {/* ▼ 既存の個人別（1年分）ビュー ▼ */}           {" "}
+                        {/* ▼ 既存の個人別（1年分）ビュー ▼ */}
             <div className={ledgerViewMode === "annual" ? "block" : "hidden"}>
-                           {" "}
               {isYearLocked && (
                 <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg font-bold text-sm flex items-center gap-2 shadow-sm mb-4">
-                                    <ShieldCheck size={18} />                 
-                  この年度はロックされています。閲覧・印刷のみ可能です。        
-                         {" "}
+                  <ShieldCheck size={18} />
+                  この年度はロックされています。閲覧・印刷のみ可能です。
                 </div>
               )}
-                                         {" "}
+
               {selectedEmployeeId && master && data && selectedYear ? (
                 <>
-                                   {" "}
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4">
-                                        {/* 上段：基本情報 */}                 
-                     {" "}
+                    {/* 上段：基本情報 */}
                     <div className="bg-slate-800 p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 text-white">
-                                           {" "}
                       <div className="flex items-center gap-3">
-                                               {" "}
-                        <User className="text-emerald-400" size={20} />         
-                                     {" "}
+                        <User className="text-emerald-400" size={20} />
                         <h2 className="font-black text-sm tracking-widest uppercase">
                           Employee Master
                         </h2>
-                                             {" "}
                       </div>
-                                           {" "}
                       <div className="flex flex-wrap items-center gap-3">
-                                               {" "}
                         <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
-                                                   {" "}
                           <span className="text-[10px] font-bold text-slate-400">
                             対象社員:
                           </span>
-                                                   {" "}
                           <select
                             value={selectedEmployeeId || ""}
                             onChange={(e) =>
@@ -2719,48 +2953,37 @@ const App = () => {
                             }
                             className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
                           >
-                                                       {" "}
                             {Object.entries(employees).map(([id, emp]) => (
                               <option key={id} value={id}>
                                 {emp.master?.employeeCode} {emp.master?.name}
                               </option>
                             ))}
-                                                     {" "}
                           </select>
-                                                 {" "}
                         </div>
-                                               {" "}
+
                         <div className="h-6 w-px bg-slate-600 mx-1 hidden md:block"></div>
-                                               {" "}
+
                         <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
-                                                   {" "}
                           <span className="text-[10px] font-bold text-slate-400">
                             年度:
                           </span>
-                                                   {" "}
                           <select
                             value={selectedYear || ""}
                             onChange={(e) => setSelectedYear(e.target.value)}
                             className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
                           >
-                                                       {" "}
                             {yearsList.map((y) => (
                               <option key={y} value={y}>
                                 {y}
                               </option>
                             ))}
-                                                     {" "}
                           </select>
-                                                   {" "}
                           {isYearLocked && (
                             <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/30 whitespace-nowrap ml-1">
-                                                            ロック中            
-                                             {" "}
+                              ロック中
                             </span>
                           )}
-                                                 {" "}
                         </div>
-                                               {" "}
                         <button
                           onClick={handleCopyPreviousYear}
                           disabled={
@@ -2768,87 +2991,71 @@ const App = () => {
                             !canCopyPreviousYear ||
                             !selectedYear
                           }
-                          className="text-[10px] font-bold px-3 py-1.5 rounded border border-slate-600 bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                          className="text-[10px] font-bold px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
                         >
-                                                    前年コピー                  
-                               {" "}
+                          前年コピー
                         </button>
-                                                                       {" "}
-                        <div className="h-6 w-px bg-slate-600 mx-1 hidden md:block"></div>
-                                               {" "}
-                        <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded">
-                                                   {" "}
-                          <span className="text-[10px] font-bold text-slate-400">
+
+                        <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block"></div>
+
+                        <button
+                          onClick={() => setIsLedgerPrintOpen(true)}
+                          className="flex items-center gap-1 text-[10px] font-bold px-4 py-1.5 rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-500 transition-colors whitespace-nowrap shadow-sm"
+                        >
+                          <Printer size={12} /> 台帳印刷
+                        </button>
+
+                        <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block"></div>
+
+                        <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded border border-slate-200">
+                          <span className="text-[10px] font-bold text-slate-500">
                             社員コード:
                           </span>
-                                                   {" "}
                           <span className="font-bold text-white w-16 text-center font-mono">
                             {master.employeeCode || "---"}
                           </span>
-                                                 {" "}
                         </div>
-                                               {" "}
                         <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded">
-                                                   {" "}
                           <span className="text-[10px] font-bold text-slate-400">
                             氏名:
                           </span>
-                                                   {" "}
                           <span className="font-bold text-white w-32">
                             {master.name || "未設定"}
                           </span>
-                                                 {" "}
                         </div>
-                                               {" "}
                         <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded">
-                                                   {" "}
                           <span className="text-[10px] font-bold text-slate-400">
                             扶養人数:
                           </span>
-                                                   {" "}
                           <span className="font-bold text-white w-8 text-right font-mono">
                             {master.dependents ?? 0}
                           </span>
-                                                   {" "}
                           <span className="text-[10px] text-slate-400">人</span>
-                                                 {" "}
                         </div>
-                                             {" "}
                       </div>
-                                         {" "}
                     </div>
-                                        {/* 下段：詳細情報 */}                 
-                     {" "}
+
+                    {/* 下段：詳細情報 */}
                     <div className="p-4 bg-gray-50 flex flex-wrap items-center gap-x-8 gap-y-4 text-sm border-t border-gray-200">
-                                           {" "}
                       <div className="flex items-center gap-2">
-                                               {" "}
                         <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                           マスター引用
                         </span>
-                                               {" "}
                         <span className="text-xs font-bold text-slate-600">
                           生年月日:
                         </span>
-                                               {" "}
                         <span className="text-xs w-28 font-mono text-slate-700">
                           {master.dob || "未設定"}
                         </span>
-                                             {" "}
                       </div>
-                                           {" "}
                       <div className="flex items-center gap-2">
-                                               {" "}
                         <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                           マスター引用
                         </span>
-                                               {" "}
                         <span className="text-xs font-bold text-slate-600">
                           性別:
                         </span>
-                                               {" "}
                         <span className="text-xs w-16 text-slate-700">
-                                                   {" "}
                           {master.gender === "male"
                             ? "男"
                             : master.gender === "female"
@@ -2856,57 +3063,38 @@ const App = () => {
                             : master.gender === "other"
                             ? "その他"
                             : "未設定"}
-                                                 {" "}
                         </span>
-                                             {" "}
                       </div>
-                                           {" "}
                       <div className="flex items-center gap-2">
-                                               {" "}
                         <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                           マスター引用
                         </span>
-                                               {" "}
                         <span className="text-xs font-bold text-slate-600">
                           入社日:
                         </span>
-                                               {" "}
                         <span className="text-xs w-28 font-mono text-slate-700">
                           {master.joinDate || "未設定"}
                         </span>
-                                             {" "}
                       </div>
-                                           {" "}
                       <div className="h-6 w-px bg-slate-300 hidden md:block"></div>
-                                           {" "}
                       <div className="flex items-center gap-2">
-                                               {" "}
                         <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                           マスター引用
                         </span>
-                                               {" "}
                         <span className="text-xs font-bold text-slate-600">
                           所得税区分:
                         </span>
-                                               {" "}
                         <span className="text-xs text-slate-700 font-bold bg-white border border-slate-200 px-2 py-0.5 rounded">
-                                                   {" "}
-                          {master.taxType === 1 ? "乙：1" : "甲：0"}           
-                                     {" "}
+                          {master.taxType === 1 ? "乙：1" : "甲：0"}
                         </span>
-                                             {" "}
                       </div>
-                                           {" "}
                       <div className="flex items-center gap-2">
-                                               {" "}
                         <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                           マスター引用
                         </span>
-                                               {" "}
                         <span className="text-xs font-bold text-slate-600">
                           ステータス:
                         </span>
-                                               {" "}
                         <span
                           className={`text-xs font-bold bg-white border px-2 py-0.5 rounded ${
                             master.status === "retired"
@@ -2914,61 +3102,41 @@ const App = () => {
                               : "text-emerald-600 border-emerald-200"
                           }`}
                         >
-                                                   {" "}
-                          {master.status === "retired" ? "退職" : "在籍"}       
-                                         {" "}
+                          {master.status === "retired" ? "退職" : "在籍"}
                         </span>
-                                             {" "}
                       </div>
-                                           {" "}
                       {master.status === "retired" && (
                         <div className="flex items-center gap-2">
-                                                   {" "}
                           <span className="text-[9px] font-bold text-slate-500 bg-slate-200 px-1.5 py-0.5 border border-slate-300 rounded">
                             マスター引用
                           </span>
-                                                   {" "}
                           <span className="text-xs font-bold text-slate-600">
                             退職日:
                           </span>
-                                                   {" "}
                           <span className="text-xs w-28 font-mono text-red-600 font-bold">
                             {master.retireDate || "未設定"}
                           </span>
-                                                 {" "}
                         </div>
                       )}
-                                         {" "}
                     </div>
-                                     {" "}
                   </div>
-                                   {" "}
+
                   <div className="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden">
-                                       {" "}
                     <div className="overflow-x-auto relative">
-                                           {" "}
                       <table className="w-full border-collapse">
-                                               {" "}
                         <thead>
-                                                   {" "}
                           <tr className="bg-gray-100 text-gray-500 text-[10px] font-black uppercase tracking-tighter">
-                                                       {" "}
                             <th className="border border-gray-300 p-2 sticky left-0 z-30 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
-                                                             
                               <div className="text-left font-black text-gray-500 text-[11px]">
                                 項目 / 支給月
                               </div>
-                                                         {" "}
                             </th>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <th
                                 key={m}
                                 className="border border-gray-300 p-1 min-w-[76px] w-[76px] text-center bg-slate-50 align-top group"
                               >
-                                                               {" "}
                                 <div className="flex justify-between items-center mb-1 px-1">
-                                                                   {" "}
                                   <button
                                     onClick={() =>
                                       toggleMonthLock(selectedYear, m)
@@ -2984,15 +3152,12 @@ const App = () => {
                                         : "text-slate-300 hover:text-slate-600 hover:bg-slate-200"
                                     }`}
                                   >
-                                                                       {" "}
                                     {currentYearData.monthly[m]?.isLocked ? (
                                       <Lock size={12} />
                                     ) : (
                                       <Unlock size={12} />
                                     )}
-                                                                     {" "}
                                   </button>
-                                                                   {" "}
                                   <button
                                     onClick={() =>
                                       copyPreviousMonth(
@@ -3013,19 +3178,13 @@ const App = () => {
                                         : "text-indigo-400 hover:text-indigo-600 hover:bg-indigo-100"
                                     }`}
                                   >
-                                                                       {" "}
-                                    <Copy size={12} />                         
-                                           {" "}
+                                    <Copy size={12} />
                                   </button>
-                                                                 {" "}
                                 </div>
-                                                               {" "}
                                 <div className="font-black text-slate-700 text-[11px] mb-0.5 leading-none mt-1">
                                   {parseInt(m, 10)}月支給
                                 </div>
-                                                               {" "}
                                 <div className="space-y-0.5 px-0.5">
-                                                                   {" "}
                                   <input
                                     value={
                                       currentYearData.monthly[m]
@@ -3048,7 +3207,6 @@ const App = () => {
                                     placeholder="○月分"
                                     title="対象月分"
                                   />
-                                                                   {" "}
                                   <input
                                     type="date"
                                     value={
@@ -3070,50 +3228,83 @@ const App = () => {
                                     }`}
                                     title="支給年月日"
                                   />
-                                                                 {" "}
                                 </div>
-                                                             {" "}
                               </th>
                             ))}
-                                                       {" "}
-                            {/* ▼ 右側3列（累計・賞与・合計）ヘッダーのプレミアム化 ▼ */}
-                                                       {" "}
-                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-slate-100 text-slate-600 sticky right-[190px] z-25 font-black border-l-0 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] align-bottom text-[10px]">
-                              累計(給与)
+                            {/* ▼ 右側5列（給与累計・賞与1・賞与2・賞与累計・総合計） ▼ */}
+                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-slate-100 text-slate-600 sticky right-[350px] z-25 font-black border-l-0 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] align-bottom text-[10px]">
+                              給与累計
                             </th>
-                                                       {" "}
-                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-white text-indigo-700 sticky right-[100px] z-25 font-black border-t-[3px] border-t-indigo-500 align-bottom text-[10px]">
-                              賞与(入力)
+                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[270px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
+                              <div className="text-center border-b border-indigo-100 pb-1 mb-1">
+                                賞与①
+                              </div>
+                              <div className="text-[8px] text-slate-500 text-center font-normal mb-0.5">
+                                支給日
+                              </div>
+                              <input
+                                type="date"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus?.payDate || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus",
+                                    "payDate",
+                                    null,
+                                    e.target.value
+                                  )
+                                }
+                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
+                              />
                             </th>
-                                                       {" "}
-                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-800 text-white sticky right-0 z-30 font-black align-bottom text-[10px]">
-                              給与・賞与合計
+                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[190px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
+                              <div className="text-center border-b border-indigo-100 pb-1 mb-1">
+                                賞与②
+                              </div>
+                              <div className="text-[8px] text-slate-500 text-center font-normal mb-0.5">
+                                支給日
+                              </div>
+                              <input
+                                type="date"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus2?.payDate || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "payDate",
+                                    null,
+                                    e.target.value
+                                  )
+                                }
+                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
+                              />
                             </th>
-                                                     {" "}
+                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 font-black align-bottom text-[10px]">
+                              賞与累計
+                            </th>
+                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-200 text-slate-800 sticky right-0 z-30 font-black align-bottom text-[10px]">
+                              総合計
+                            </th>
                           </tr>
-                                                 {" "}
                         </thead>
-                                               {" "}
+
                         <tbody className="text-xs">
-                                                   {" "}
-                          {/* --- 勤怠・計算期間ブロック --- */}               
-                                   {" "}
+                          {/* --- 勤怠・計算期間ブロック --- */}
                           <tr className="bg-gray-100">
                             <td
-                              colSpan={MONTHS.length + 4}
+                              colSpan={MONTHS.length + 6}
                               className="p-0.5"
                             ></td>
                           </tr>
-                                                   {" "}
                           <tr className="bg-white">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px] text-slate-600 border-l-4 border-l-indigo-300">
                               計算期間 (開始){" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3146,24 +3337,19 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-slate-50"></td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-white"></td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-slate-100"></td>
-                                                     {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                           </tr>
-                                                   {" "}
                           <tr className="bg-white">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px] text-slate-600 border-l-4 border-l-indigo-300">
                               計算期間 (終了){" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3195,24 +3381,20 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-slate-50"></td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-white"></td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-slate-100"></td>
-                                                     {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                           </tr>
-                                                                             {" "}
+
                           <tr className="bg-indigo-50/30">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-indigo-50/30 font-bold flex justify-between items-center text-[11px] text-indigo-700 border-l-4 border-l-indigo-300">
                               労働日数{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3246,26 +3428,19 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)] text-center text-[9px] text-slate-400 font-bold tracking-widest">
-                              計算連動しません
-                            </td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-indigo-50/30">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-indigo-50/30 font-bold flex justify-between items-center text-[11px] text-indigo-700 border-l-4 border-l-indigo-300">
                               総労働時間{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3299,24 +3474,19 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-indigo-50/30">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-indigo-50/30 font-bold flex justify-between items-center text-[11px] text-indigo-700 border-l-4 border-l-indigo-300">
                               時間外労働時間{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3350,24 +3520,19 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-indigo-50/30">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-indigo-50/30 font-bold flex justify-between items-center text-[11px] text-indigo-700 border-l-4 border-l-indigo-300">
                               深夜労働時間{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3401,24 +3566,19 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-indigo-50/30">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-indigo-50/30 font-bold flex justify-between items-center text-[11px] text-indigo-700 border-l-4 border-l-indigo-300">
                               休日労働時間{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3452,31 +3612,26 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-gray-100">
                             <td
-                              colSpan={MONTHS.length + 4}
+                              colSpan={MONTHS.length + 6}
                               className="p-0.5"
                             ></td>
                           </tr>
-                                                   {" "}
+
                           <tr className="bg-amber-50/10">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
                               基本給{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3508,12 +3663,10 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                            <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.basePay)}
                             </td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[100px] z-25">
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
                               <input
                                 type="number"
                                 disabled={isYearLocked}
@@ -3521,36 +3674,56 @@ const App = () => {
                                 onChange={(e) =>
                                   updateBonus(
                                     selectedYear,
+                                    "bonus",
                                     "basePay",
                                     null,
                                     Number(e.target.value)
                                   )
                                 }
-                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
                                   isYearLocked
                                     ? "cursor-not-allowed opacity-50"
                                     : ""
                                 }`}
                               />
                             </td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
+                              <input
+                                type="number"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus2?.basePay || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "basePay",
+                                    null,
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  isYearLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : ""
+                                }`}
+                              />
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.basePay)}
+                            </td>
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                               {formatCurrency(
                                 results.sums.basePay +
-                                  results.bonusResults.basePay
+                                  results.bonusTotal.basePay
                               )}
                             </td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
+
                           {allAllowances.map((def) => (
                             <tr key={def.id}>
-                                                           {" "}
                               <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
-                                                                {def.name}     
-                                                         {" "}
+                                {def.name}
                                 <div className="flex gap-0.5">
-                                                                   {" "}
                                   <span
                                     className={`text-[8px] px-1 border rounded ${
                                       def.isTaxable === true
@@ -3561,7 +3734,6 @@ const App = () => {
                                   >
                                     {def.isTaxable === true ? "税" : "非"}
                                   </span>
-                                                                   {" "}
                                   <span
                                     className={`text-[8px] px-1 border rounded ${
                                       def.isSocialIns === true
@@ -3572,7 +3744,6 @@ const App = () => {
                                   >
                                     {def.isSocialIns === true ? "社" : "非"}
                                   </span>
-                                                                   {" "}
                                   <span
                                     className={`text-[8px] px-1 border rounded ${
                                       def.isEmploymentIns === true
@@ -3583,11 +3754,8 @@ const App = () => {
                                   >
                                     {def.isEmploymentIns === true ? "雇" : "非"}
                                   </span>
-                                                                 {" "}
                                 </div>
-                                                             {" "}
                               </td>
-                                                           {" "}
                               {MONTHS.map((m) => (
                                 <td
                                   key={m}
@@ -3625,14 +3793,12 @@ const App = () => {
                                   />
                                 </td>
                               ))}
-                                                           {" "}
-                              <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                              <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                                 {formatCurrency(
                                   results.sums.allowances[def.id]
                                 )}
                               </td>
-                                                           {" "}
-                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[100px] z-25">
+                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
                                 <input
                                   type="number"
                                   disabled={isYearLocked}
@@ -3644,39 +3810,65 @@ const App = () => {
                                   onChange={(e) =>
                                     updateBonus(
                                       selectedYear,
+                                      "bonus",
                                       "allowanceAmounts",
                                       def.id,
                                       Number(e.target.value)
                                     )
                                   }
-                                  className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
                                     isYearLocked
                                       ? "cursor-not-allowed opacity-50"
                                       : ""
                                   }`}
                                 />
                               </td>
-                                                           {" "}
+                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
+                                <input
+                                  type="number"
+                                  disabled={isYearLocked}
+                                  value={
+                                    currentYearData.bonus2?.allowanceAmounts?.[
+                                      def.id
+                                    ] || ""
+                                  }
+                                  onChange={(e) =>
+                                    updateBonus(
+                                      selectedYear,
+                                      "bonus2",
+                                      "allowanceAmounts",
+                                      def.id,
+                                      Number(e.target.value)
+                                    )
+                                  }
+                                  className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                    isYearLocked
+                                      ? "cursor-not-allowed opacity-50"
+                                      : ""
+                                  }`}
+                                />
+                              </td>
+                              <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                                {formatCurrency(
+                                  results.bonusTotal.allowances[def.id]
+                                )}
+                              </td>
                               <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                                 {formatCurrency(
                                   (results.sums.allowances[def.id] || 0) +
-                                    (results.bonusResults.allowances[def.id] ||
-                                      0)
+                                    (results.bonusTotal.allowances[def.id] || 0)
                                 )}
                               </td>
-                                                         {" "}
                             </tr>
                           ))}
-                                                   {" "}
+
                           <tr className="bg-blue-50 font-black border-y-2 border-blue-100">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-blue-50 font-black text-blue-700 flex justify-between items-center text-[11px]">
                               総支給額{" "}
                               <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded ml-2 font-normal">
                                 連動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3687,31 +3879,33 @@ const App = () => {
                                 )}
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right bg-blue-50/80 text-blue-800 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                            <td className="border border-gray-300 p-1.5 text-right bg-blue-50/80 text-blue-800 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.grossPay)}
                             </td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right bg-white text-indigo-600 sticky right-[100px] z-25 text-[11px]">
-                              {formatCurrency(results.bonusResults.grossPay)}
+                            <td className="border border-gray-300 p-1.5 text-right bg-white text-indigo-600 sticky right-[270px] z-25 text-[11px]">
+                              {formatCurrency(results.bonus1.grossPay)}
                             </td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right bg-slate-800 text-white sticky right-0 z-30 text-[11px]">
+                            <td className="border border-gray-300 p-1.5 text-right bg-white text-indigo-600 sticky right-[190px] z-25 text-[11px]">
+                              {formatCurrency(results.bonus2.grossPay)}
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-100 text-indigo-900 sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.grossPay)}
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right bg-slate-300 text-slate-800 sticky right-0 z-30 text-[11px]">
                               {formatCurrency(
                                 results.sums.grossPay +
-                                  results.bonusResults.grossPay
+                                  results.bonusTotal.grossPay
                               )}
                             </td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
+
                           <tr className="bg-gray-200">
                             <td
-                              colSpan={MONTHS.length + 4}
+                              colSpan={MONTHS.length + 6}
                               className="p-[2px]"
                             ></td>
                           </tr>
-                                                   {" "}
+
                           {[
                             "health",
                             "pension",
@@ -3728,14 +3922,12 @@ const App = () => {
                             };
                             return (
                               <tr key={key} className="bg-slate-50">
-                                                               {" "}
                                 <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-slate-50 font-bold text-gray-600 flex justify-between items-center text-[11px]">
                                   {labels[key]}{" "}
                                   <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded font-normal">
                                     連動
                                   </span>
                                 </td>
-                                                               {" "}
                                 {MONTHS.map((m) => (
                                   <td
                                     key={m}
@@ -3746,35 +3938,34 @@ const App = () => {
                                     )}
                                   </td>
                                 ))}
-                                                               {" "}
-                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                                   {formatCurrency(results.sums[key])}
                                 </td>
-                                                               {" "}
-                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-white text-indigo-400 sticky right-[100px] z-25 text-[11px]">
-                                  {formatCurrency(results.bonusResults[key])}
+                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-white text-indigo-400 sticky right-[270px] z-25 text-[11px]">
+                                  {formatCurrency(results.bonus1[key])}
                                 </td>
-                                                               {" "}
+                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-white text-indigo-400 sticky right-[190px] z-25 text-[11px]">
+                                  {formatCurrency(results.bonus2[key])}
+                                </td>
+                                <td className="border border-gray-300 p-1.5 text-right font-bold bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                                  {formatCurrency(results.bonusTotal[key])}
+                                </td>
                                 <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                                   {formatCurrency(
-                                    results.sums[key] +
-                                      results.bonusResults[key]
+                                    results.sums[key] + results.bonusTotal[key]
                                   )}
                                 </td>
-                                                             {" "}
                               </tr>
                             );
                           })}
-                                                   {" "}
+
                           <tr>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
                               所得税{" "}
                               <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded font-normal">
                                 連動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3785,12 +3976,10 @@ const App = () => {
                                 )}
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.incomeTax)}
                             </td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[100px] z-25">
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
                               <input
                                 type="number"
                                 disabled={isYearLocked}
@@ -3798,6 +3987,7 @@ const App = () => {
                                 onChange={(e) =>
                                   updateBonus(
                                     selectedYear,
+                                    "bonus",
                                     "incomeTax",
                                     null,
                                     Number(e.target.value)
@@ -3810,25 +4000,44 @@ const App = () => {
                                 }`}
                               />
                             </td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
+                              <input
+                                type="number"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus2?.incomeTax || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "incomeTax",
+                                    null,
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  isYearLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : ""
+                                }`}
+                              />
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.incomeTax)}
+                            </td>
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                               {formatCurrency(
                                 results.sums.incomeTax +
-                                  results.bonusResults.incomeTax
+                                  results.bonusTotal.incomeTax
                               )}
                             </td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
                               住民税{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -3861,12 +4070,10 @@ const App = () => {
                                 />
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.residentTax)}
                             </td>
-                                                       {" "}
-                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[100px] z-25">
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
                               <input
                                 type="number"
                                 disabled={isYearLocked}
@@ -3874,6 +4081,7 @@ const App = () => {
                                 onChange={(e) =>
                                   updateBonus(
                                     selectedYear,
+                                    "bonus",
                                     "residentTax",
                                     null,
                                     Number(e.target.value)
@@ -3886,26 +4094,48 @@ const App = () => {
                                 }`}
                               />
                             </td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
+                              <input
+                                type="number"
+                                disabled={isYearLocked}
+                                value={
+                                  currentYearData.bonus2?.residentTax || ""
+                                }
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "residentTax",
+                                    null,
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  isYearLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : ""
+                                }`}
+                              />
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.residentTax)}
+                            </td>
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                               {formatCurrency(
                                 results.sums.residentTax +
-                                  results.bonusResults.residentTax
+                                  results.bonusTotal.residentTax
                               )}
                             </td>
-                                                     {" "}
                           </tr>
-                                                                             {" "}
+
                           {(settings?.deductionDefinitions || []).map((def) => (
                             <tr key={def.id}>
-                                                           {" "}
                               <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold text-red-700 flex justify-between items-center text-[11px]">
                                 {def.name}{" "}
                                 <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                   手動
                                 </span>
                               </td>
-                                                           {" "}
                               {MONTHS.map((m) => (
                                 <td
                                   key={m}
@@ -3943,14 +4173,12 @@ const App = () => {
                                   />
                                 </td>
                               ))}
-                                                           {" "}
-                              <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                              <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                                 {formatCurrency(
                                   results.sums.deductions[def.id]
                                 )}
                               </td>
-                                                           {" "}
-                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[100px] z-25">
+                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
                                 <input
                                   type="number"
                                   disabled={isYearLocked}
@@ -3962,6 +4190,7 @@ const App = () => {
                                   onChange={(e) =>
                                     updateBonus(
                                       selectedYear,
+                                      "bonus",
                                       "deductionAmounts",
                                       def.id,
                                       Number(e.target.value)
@@ -3974,27 +4203,52 @@ const App = () => {
                                   }`}
                                 />
                               </td>
-                                                           {" "}
+                              <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
+                                <input
+                                  type="number"
+                                  disabled={isYearLocked}
+                                  value={
+                                    currentYearData.bonus2?.deductionAmounts?.[
+                                      def.id
+                                    ] || ""
+                                  }
+                                  onChange={(e) =>
+                                    updateBonus(
+                                      selectedYear,
+                                      "bonus2",
+                                      "deductionAmounts",
+                                      def.id,
+                                      Number(e.target.value)
+                                    )
+                                  }
+                                  className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                    isYearLocked
+                                      ? "cursor-not-allowed opacity-50"
+                                      : ""
+                                  }`}
+                                />
+                              </td>
+                              <td className="border border-gray-300 p-1.5 text-right font-bold bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                                {formatCurrency(
+                                  results.bonusTotal.deductions[def.id]
+                                )}
+                              </td>
                               <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
                                 {formatCurrency(
                                   (results.sums.deductions[def.id] || 0) +
-                                    (results.bonusResults.deductions[def.id] ||
-                                      0)
+                                    (results.bonusTotal.deductions[def.id] || 0)
                                 )}
                               </td>
-                                                         {" "}
                             </tr>
                           ))}
-                                                                             {" "}
+
                           <tr className="bg-emerald-600 text-white font-black">
-                                                       {" "}
                             <td className="border border-emerald-700 p-1.5 sticky left-0 z-20 bg-emerald-700 font-black flex justify-between items-center text-[11px]">
                               差引支給額 (手取り){" "}
                               <span className="text-[8px] bg-emerald-500 text-white px-1 border border-emerald-500 rounded font-normal">
                                 連動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -4005,40 +4259,39 @@ const App = () => {
                                 )}
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-emerald-800 p-1.5 text-right bg-emerald-100/80 text-emerald-900 sticky right-[190px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                            <td className="border border-emerald-800 p-1.5 text-right bg-emerald-100/80 text-emerald-900 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.netPay)}
                             </td>
-                                                       {" "}
-                            <td className="border border-emerald-900 p-1.5 text-right bg-emerald-50/50 text-emerald-700 sticky right-[100px] z-25 text-[11px]">
-                              {formatCurrency(results.bonusResults.netPay)}
+                            <td className="border border-emerald-900 p-1.5 text-right bg-emerald-50/50 text-emerald-700 sticky right-[270px] z-25 text-[11px]">
+                              {formatCurrency(results.bonus1.netPay)}
                             </td>
-                                                       {" "}
-                            <td className="border border-emerald-950 p-1.5 text-right bg-emerald-950 text-emerald-100 sticky right-0 z-30 text-[11px]">
+                            <td className="border border-emerald-900 p-1.5 text-right bg-emerald-50/50 text-emerald-700 sticky right-[190px] z-25 text-[11px]">
+                              {formatCurrency(results.bonus2.netPay)}
+                            </td>
+                            <td className="border border-emerald-900 p-1.5 text-right bg-emerald-200 text-emerald-900 font-black sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.netPay)}
+                            </td>
+                            <td className="border border-emerald-950 p-1.5 text-right bg-emerald-700 text-white sticky right-0 z-30 text-[11px]">
                               {formatCurrency(
-                                results.sums.netPay +
-                                  results.bonusResults.netPay
+                                results.sums.netPay + results.bonusTotal.netPay
                               )}
                             </td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
+
                           <tr className="bg-gray-100">
                             <td
-                              colSpan={MONTHS.length + 4}
+                              colSpan={MONTHS.length + 6}
                               className="p-[2px]"
                             ></td>
                           </tr>
-                                                   {" "}
+
                           <tr className="bg-blue-50/20 italic">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-blue-50/20 font-bold text-blue-700 flex justify-between items-center text-[11px]">
                               想定報酬月額{" "}
                               <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded ml-2 font-normal">
                                 自動取得
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
@@ -4049,73 +4302,101 @@ const App = () => {
                                 )}
                               </td>
                             ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           <tr className="bg-slate-100">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-slate-100 font-black text-blue-900 flex justify-between items-center text-[11px]">
                               実際の標準報酬月額{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
-                            {MONTHS.map((m) => (
-                              <td
-                                key={m}
-                                className="border border-gray-300 p-0.5 bg-white"
-                              >
-                                <input
-                                  type="number"
-                                  disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.stdAmount || ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "stdAmount",
-                                      Number(e.target.value)
-                                    )
-                                  }
-                                  className={`w-full text-right outline-none font-black text-blue-900 font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
+                            {MONTHS.map((m) => {
+                              // 社員マスターから健康保険・厚生年金の加入状況をチェック
+                              const hasHealth =
+                                master.healthIns !== undefined
+                                  ? master.healthIns === 1
+                                  : master.socialIns === 1;
+                              const hasPension =
+                                master.pensionIns !== undefined
+                                  ? master.pensionIns === 1
+                                  : master.socialIns === 1;
+                              const isSocialInsEnrolled =
+                                hasHealth || hasPension;
+
+                              const stdAmount =
+                                currentYearData.monthly[m]?.stdAmount;
+                              // 社会保険に加入している場合のみ未入力判定を行う
+                              const isUnset =
+                                isSocialInsEnrolled &&
+                                (!stdAmount || Number(stdAmount) <= 0);
+
+                              return (
+                                <td
+                                  key={m}
+                                  className={`border border-gray-300 p-0.5 relative ${
+                                    isUnset ? "bg-red-50" : "bg-white"
                                   }`}
-                                />
-                              </td>
-                            ))}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                                >
+                                  {isUnset && (
+                                    <div className="absolute top-0 left-0 w-full flex justify-center -mt-1 pointer-events-none">
+                                      <span className="text-[7px] text-red-600 font-black leading-none whitespace-nowrap drop-shadow-md">
+                                        ⚠️未入力
+                                      </span>
+                                    </div>
+                                  )}
+                                  <input
+                                    type="number"
+                                    disabled={
+                                      isYearLocked ||
+                                      currentYearData.monthly[m]?.isLocked ||
+                                      !isSocialInsEnrolled
+                                    }
+                                    value={stdAmount || ""}
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "stdAmount",
+                                        Number(e.target.value)
+                                      )
+                                    }
+                                    className={`w-full text-right outline-none font-black font-mono text-[11px] px-0.5 mt-2 bg-transparent ${
+                                      isUnset
+                                        ? "text-red-600 placeholder-red-300"
+                                        : "text-blue-900"
+                                    } ${
+                                      isYearLocked ||
+                                      currentYearData.monthly[m]?.isLocked ||
+                                      !isSocialInsEnrolled
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                    placeholder={
+                                      isSocialInsEnrolled ? "入力必須" : "不要"
+                                    }
+                                  />
+                                </td>
+                              );
+                            })}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                                             {" "}
+
                           <tr className="bg-rose-50/50">
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-rose-50/50 font-bold text-rose-600 flex justify-between items-center text-[11px]">
                               介護保険 加入有無{" "}
                               <span className="text-[8px] bg-orange-50 text-orange-500 px-1 border rounded font-normal">
                                 手動
                               </span>
                             </td>
-                                                       {" "}
                             {MONTHS.map((m) => {
                               const alertText = getNursingAlert(
                                 master?.dob,
@@ -4127,17 +4408,12 @@ const App = () => {
                                   key={m}
                                   className="border border-gray-300 p-0.5 text-center bg-white relative"
                                 >
-                                                                   {" "}
                                   <div className="flex flex-col items-center justify-center">
-                                                                       {" "}
                                     {alertText && (
                                       <span className="text-[8px] text-red-600 font-bold whitespace-nowrap leading-none mb-0.5 bg-red-50 border border-red-200 px-1 py-0.5 rounded-sm">
-                                                                               {" "}
-                                        {alertText}                             
-                                               {" "}
+                                        {alertText}
                                       </span>
                                     )}
-                                                                       {" "}
                                     <button
                                       disabled={
                                         isYearLocked ||
@@ -4158,28 +4434,21 @@ const App = () => {
                                           : ""
                                       }`}
                                     >
-                                                                           {" "}
                                       {currentYearData.monthly[m]
                                         ?.hasNursingIns === 1
                                         ? "加入(1)"
                                         : "未(0)"}
-                                                                         {" "}
                                     </button>
-                                                                     {" "}
                                   </div>
-                                                                 {" "}
                                 </td>
                               );
                             })}
-                                                       {" "}
-                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                       {" "}
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                     {" "}
                           </tr>
-                                                   {" "}
                           {[
                             "health",
                             "pension",
@@ -4199,16 +4468,12 @@ const App = () => {
                                 key={rateKey}
                                 className="bg-slate-50 text-[10px]"
                               >
-                                                               {" "}
                                 <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-slate-50 font-bold text-indigo-500 flex justify-between items-center text-[11px]">
-                                                                   {" "}
                                   {labels[rateKey]}{" "}
                                   <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded font-normal">
                                     共通設定連動
                                   </span>
-                                                                 {" "}
                                 </td>
-                                                               {" "}
                                 {MONTHS.map((m) => {
                                   const rateVal = settings?.rateSchedules?.[
                                     rateKey
@@ -4225,42 +4490,30 @@ const App = () => {
                                       key={m}
                                       className="border border-gray-300 p-0.5 text-center font-bold text-indigo-500 text-[10px]"
                                     >
-                                                                           {" "}
-                                      {rateVal.toFixed(2)}                     
-                                                   {" "}
+                                      {rateVal.toFixed(2)}
                                     </td>
                                   );
                                 })}
-                                                               {" "}
-                                <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                               {" "}
+                                <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                                <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                                <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                                 <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                               {" "}
                                 <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
-                                                             {" "}
                               </tr>
                             );
                           })}
-                                                 {" "}
                         </tbody>
-                                             {" "}
                       </table>
-                                         {" "}
                     </div>
-                                     {" "}
                   </div>
-                                                     {" "}
+
                   <div className="flex flex-wrap gap-4">
-                                       {" "}
                     <div className="flex-1 min-w-[400px] bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-between">
-                                           {" "}
                       <h3 className="text-xs font-black text-slate-400 mb-4 uppercase flex items-center gap-1">
                         <TrendingUp size={14} className="text-blue-500" />{" "}
                         Annual Aggregated Total
                       </h3>
-                                           {" "}
                       <div className="grid grid-cols-2 gap-6">
-                                               {" "}
                         <div className="space-y-1">
                           <p className="text-[10px] text-gray-400 font-bold">
                             年間総支給額 (額面)
@@ -4269,11 +4522,10 @@ const App = () => {
                             ¥
                             {formatCurrency(
                               results.sums.grossPay +
-                                results.bonusResults.grossPay
+                                results.bonusTotal.grossPay
                             )}
                           </p>
                         </div>
-                                               {" "}
                         <div className="space-y-1">
                           <p className="text-[10px] text-gray-400 font-bold">
                             年間総手取り額
@@ -4281,55 +4533,41 @@ const App = () => {
                           <p className="text-2xl font-black text-emerald-600 font-mono italic">
                             ¥
                             {formatCurrency(
-                              results.sums.netPay + results.bonusResults.netPay
+                              results.sums.netPay + results.bonusTotal.netPay
                             )}
                           </p>
                         </div>
-                                             {" "}
                       </div>
-                                         {" "}
                     </div>
-                                       {" "}
-                    <div className="w-[300px] bg-slate-800 p-5 rounded-xl text-white shadow-xl flex flex-col justify-center gap-2">
-                                             {" "}
-                      <div className="flex justify-between items-center border-b border-slate-700 pb-2">
-                        <span className="text-[10px] font-bold text-slate-400">
+                    <div className="w-[300px] bg-indigo-50 border border-indigo-100 p-5 rounded-xl text-slate-800 shadow-sm flex flex-col justify-center gap-2">
+                      <div className="flex justify-between items-center border-b border-indigo-200 pb-2">
+                        <span className="text-[10px] font-bold text-indigo-500">
                           賞与 累計
                         </span>
-                        <span className="text-xl font-black text-purple-400">
-                          ¥{formatCurrency(results.bonusResults.grossPay)}
+                        <span className="text-xl font-black text-indigo-700">
+                          ¥{formatCurrency(results.bonusTotal.grossPay)}
                         </span>
                       </div>
-                                             {" "}
                       <p className="text-[9px] text-slate-500 leading-tight">
                         ※右側の賞与列に入力した値が年間の賞与実績として集計されます。
                       </p>
-                                         {" "}
                     </div>
-                                     {" "}
                   </div>
-                                 {" "}
                 </>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-4 pt-20">
-                                     {" "}
-                  <Users size={64} className="text-slate-300" />               
-                     {" "}
+                  <Users size={64} className="text-slate-300" />
                   <p className="font-bold text-lg">
                     従業員を選択するか、新しく追加してください
                   </p>
-                                     {" "}
                   <button
                     onClick={handleAddEmployee}
                     className="bg-emerald-600 text-white px-6 py-2 rounded-lg font-bold shadow-md hover:bg-emerald-500 transition-colors flex items-center gap-2"
                   >
-                                          <PlusCircle size={18} />{" "}
-                    新規従業員を追加                    {" "}
+                    <PlusCircle size={18} /> 新規従業員を追加
                   </button>
-                                 {" "}
                 </div>
               )}
-                         {" "}
             </div>
                      {" "}
           </div>
@@ -4349,7 +4587,7 @@ const App = () => {
                 <div className="flex items-center gap-2">
                   <Users size={18} className="text-indigo-400" />
                   <h2 className="font-black text-sm tracking-widest uppercase">
-                    給与明細一覧表
+                    給与(賞与)明細一覧表
                   </h2>
                 </div>
                 <div className="flex items-center gap-3">
@@ -4381,7 +4619,7 @@ const App = () => {
                     </span>
                   )}
                   <span className="text-xs font-bold text-slate-300 border-l border-slate-600 pl-4 ml-2">
-                    支給月:
+                    対象:
                   </span>
                   <select
                     value={selectedListMonth}
@@ -4390,9 +4628,11 @@ const App = () => {
                   >
                     {MONTHS.map((m) => (
                       <option key={m} value={m}>
-                        {parseInt(m, 10)}月支給
+                        {parseInt(m, 10)}月支給 (給与)
                       </option>
                     ))}
+                    <option value="bonus">賞与①</option>
+                    <option value="bonus2">賞与②</option>
                   </select>
                 </div>
               </div>
@@ -4407,9 +4647,14 @@ const App = () => {
                       <th className="border border-slate-200 p-2 sticky left-[80px] z-50 bg-slate-200 w-[120px] min-w-[120px]">
                         氏名
                       </th>
-                      <th className="border border-slate-200 p-2 min-w-[90px] bg-slate-100">
-                        対象月分
-                      </th>
+                      {!(
+                        selectedListMonth === "bonus" ||
+                        selectedListMonth === "bonus2"
+                      ) && (
+                        <th className="border border-slate-200 p-2 min-w-[90px] bg-slate-100">
+                          対象月分
+                        </th>
+                      )}
                       <th className="border border-slate-200 p-2 min-w-[120px] bg-slate-100">
                         支給年月日
                       </th>
@@ -4474,23 +4719,146 @@ const App = () => {
                     </tr>
                   </thead>
                   <tbody className="text-xs whitespace-nowrap">
-                                       {" "}
                     {Object.entries(employees).map(([empId, emp]) => {
                       const currentYearDataObj = selectedYear
                         ? emp.data?.years?.[selectedYear] ||
                           createInitialYearData(selectedYear, settings)
                         : createInitialYearData(null, settings);
-                      const rowData =
-                        currentYearDataObj.monthly[selectedListMonth] || {};
-                      const calcResult = calculateMonthlyResult(
-                        emp.master,
-                        rowData,
-                        settings,
-                        selectedListMonth
-                      );
+                      const isBonusList =
+                        selectedListMonth === "bonus" ||
+                        selectedListMonth === "bonus2";
 
-                      // ★追加: この画面でも月のロック状態を判定する
-                      const isMonthLocked = rowData?.isLocked === true;
+                      let rowData = {};
+                      let calcResult = {};
+                      let isMonthLocked = false;
+
+                      const allowanceDefs =
+                        settings?.allowanceDefinitions?.length > 0
+                          ? settings.allowanceDefinitions
+                          : emp.master?.allowanceDefinitions || [];
+                      const deductionDefs =
+                        settings?.deductionDefinitions?.length > 0
+                          ? settings.deductionDefinitions
+                          : emp.master?.deductionDefinitions || [];
+
+                      if (isBonusList) {
+                        rowData = currentYearDataObj[selectedListMonth] || {};
+                        const b = rowData;
+                        let bTotalAllowances = 0,
+                          bTotalSocialInsAllowances = 0,
+                          bTotalEmploymentInsAllowances = 0;
+                        allowanceDefs.forEach((def) => {
+                          const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+                          bTotalAllowances += amt;
+                          if (def.isSocialIns) bTotalSocialInsAllowances += amt;
+                          if (def.isEmploymentIns)
+                            bTotalEmploymentInsAllowances += amt;
+                        });
+                        const bGross =
+                          (Number(b.basePay) || 0) + bTotalAllowances;
+                        const bSocialInsGross =
+                          (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+                        const bEmploymentInsGross =
+                          (Number(b.basePay) || 0) +
+                          bTotalEmploymentInsAllowances;
+
+                        const lastMonth = MONTHS[MONTHS.length - 1];
+                        const lastMonthRow =
+                          currentYearDataObj.monthly[lastMonth] || {};
+                        const bhRate = settings?.rateSchedules?.health
+                          ? getRateForMonth(
+                              settings.rateSchedules.health,
+                              lastMonth
+                            )
+                          : lastMonthRow.healthRate || 5.0;
+                        const bpRate = settings?.rateSchedules?.pension
+                          ? getRateForMonth(
+                              settings.rateSchedules.pension,
+                              lastMonth
+                            )
+                          : lastMonthRow.pensionRate || 9.15;
+                        const bnRate = settings?.rateSchedules?.nursing
+                          ? getRateForMonth(
+                              settings.rateSchedules.nursing,
+                              lastMonth
+                            )
+                          : lastMonthRow.nursingRate || 0.8;
+                        const bcRate = settings?.rateSchedules?.childCare
+                          ? getRateForMonth(
+                              settings.rateSchedules.childCare,
+                              lastMonth
+                            )
+                          : lastMonthRow.childCareRate || 0.0;
+                        const beRate = settings?.rateSchedules?.employment
+                          ? getRateForMonth(
+                              settings.rateSchedules.employment,
+                              lastMonth
+                            )
+                          : lastMonthRow.employmentRate || 6.0;
+
+                        const bEstStdAmount =
+                          settings?.standardRewardTable?.length > 0
+                            ? getStandardRewardAmount(
+                                settings.standardRewardTable,
+                                bSocialInsGross
+                              )
+                            : bSocialInsGross;
+                        const bIns = calculateSocialIns(
+                          bEstStdAmount,
+                          emp.master.socialIns,
+                          bhRate,
+                          bpRate,
+                          bnRate,
+                          bcRate,
+                          lastMonthRow.hasNursingIns === 1
+                        );
+                        const bEmp = emp.master.employmentIns
+                          ? Math.floor(bEmploymentInsGross * (beRate / 1000))
+                          : 0;
+                        const bSocialTotal =
+                          bIns.health +
+                          bIns.pension +
+                          bIns.nursing +
+                          bIns.childCare +
+                          bEmp;
+                        const bIncomeTax = Number(b.incomeTax) || 0;
+                        const bResidentTax = Number(b.residentTax) || 0;
+
+                        let bTotalCustomDeds = 0;
+                        deductionDefs.forEach((def) => {
+                          bTotalCustomDeds +=
+                            Number(b.deductionAmounts?.[def.id]) || 0;
+                        });
+                        const bTotalDeductions =
+                          bSocialTotal +
+                          bIncomeTax +
+                          bResidentTax +
+                          bTotalCustomDeds;
+                        const bNetPay = bGross - bTotalDeductions;
+
+                        calcResult = {
+                          grossPay: bGross,
+                          health: bIns.health,
+                          pension: bIns.pension,
+                          nursing: bIns.nursing,
+                          childCare: bIns.childCare,
+                          employment: bEmp,
+                          incomeTax: bIncomeTax,
+                          totalDeductions: bTotalDeductions,
+                          netPay: bNetPay,
+                        };
+                      } else {
+                        rowData =
+                          currentYearDataObj.monthly[selectedListMonth] || {};
+                        calcResult = calculateMonthlyResult(
+                          emp.master,
+                          rowData,
+                          settings,
+                          selectedListMonth
+                        );
+                        isMonthLocked = rowData?.isLocked === true;
+                      }
+
                       const isDisabled = isYearLocked || isMonthLocked;
 
                       return (
@@ -4498,235 +4866,343 @@ const App = () => {
                           key={empId}
                           className="hover:bg-slate-50 border-b border-gray-200 group transition-colors"
                         >
-                                                   {" "}
                           <td className="border border-slate-200 p-2 sticky left-0 z-20 bg-white font-mono text-center w-[80px] min-w-[80px] group-hover:bg-slate-50 text-gray-500">
-                                                       {" "}
-                            {emp.master?.employeeCode || "-"}                   
-                                 {" "}
+                            {emp.master?.employeeCode || "-"}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 sticky left-[80px] z-20 bg-white font-bold w-[120px] min-w-[120px] group-hover:bg-slate-50 text-slate-700">
-                                                       {" "}
-                            {emp.master?.name || "未設定"}                     
-                               {" "}
+                            {emp.master?.name || "未設定"}
                           </td>
-                                                                              {" "}
+
+                          {!isBonusList && (
+                            <td className="border border-slate-200 p-1 bg-white">
+                              <input
+                                disabled={isDisabled}
+                                value={rowData.salaryMonthText || ""}
+                                onChange={(e) =>
+                                  updateEmployeeMonthly(
+                                    empId,
+                                    selectedYear,
+                                    selectedListMonth,
+                                    "salaryMonthText",
+                                    e.target.value
+                                  )
+                                }
+                                className={`w-full bg-transparent outline-none text-center focus:ring-1 ring-indigo-400 rounded py-1 ${
+                                  isDisabled
+                                    ? "cursor-not-allowed text-slate-400"
+                                    : ""
+                                }`}
+                              />
+                            </td>
+                          )}
                           <td className="border border-slate-200 p-1 bg-white">
-                                                       {" "}
-                            <input
-                              disabled={isDisabled}
-                              value={rowData.salaryMonthText || ""}
-                              onChange={(e) =>
-                                updateEmployeeMonthly(
-                                  empId,
-                                  selectedYear,
-                                  selectedListMonth,
-                                  "salaryMonthText",
-                                  e.target.value
-                                )
-                              }
-                              className={`w-full bg-transparent outline-none text-center focus:ring-1 ring-indigo-400 rounded py-1 ${
-                                isDisabled
-                                  ? "cursor-not-allowed text-slate-400"
-                                  : ""
-                              }`}
-                            />
-                                                     {" "}
-                          </td>
-                                                   {" "}
-                          <td className="border border-slate-200 p-1 bg-white">
-                                                       {" "}
                             <input
                               disabled={isDisabled}
                               type="date"
                               value={rowData.payDate || ""}
-                              onChange={(e) =>
-                                updateEmployeeMonthly(
-                                  empId,
-                                  selectedYear,
-                                  selectedListMonth,
-                                  "payDate",
-                                  e.target.value
-                                )
-                              }
+                              onChange={(e) => {
+                                if (isBonusList) {
+                                  const currentBonusData =
+                                    emp.data.years[selectedYear][
+                                      selectedListMonth
+                                    ] || {};
+                                  const newData = {
+                                    ...emp.data,
+                                    years: {
+                                      ...emp.data.years,
+                                      [selectedYear]: {
+                                        ...currentYearDataObj,
+                                        [selectedListMonth]: {
+                                          ...currentBonusData,
+                                          payDate: e.target.value,
+                                        },
+                                      },
+                                    },
+                                  };
+                                  setEmployees((prev) => ({
+                                    ...prev,
+                                    [empId]: { ...prev[empId], data: newData },
+                                  }));
+                                  handleSave(empId, emp.master, newData);
+                                } else {
+                                  updateEmployeeMonthly(
+                                    empId,
+                                    selectedYear,
+                                    selectedListMonth,
+                                    "payDate",
+                                    e.target.value
+                                  );
+                                }
+                              }}
                               className={`w-full bg-transparent outline-none font-mono text-center focus:ring-1 ring-indigo-400 rounded py-1 text-[10px] ${
                                 isDisabled
                                   ? "cursor-not-allowed text-slate-400"
                                   : ""
                               }`}
                             />
-                                                     {" "}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-1 bg-white">
-                                                       {" "}
                             <input
                               disabled={isDisabled}
                               type="number"
                               value={rowData.basePay || ""}
-                              onChange={(e) =>
-                                updateEmployeeMonthly(
-                                  empId,
-                                  selectedYear,
-                                  selectedListMonth,
-                                  "basePay",
-                                  Number(e.target.value)
-                                )
-                              }
+                              onChange={(e) => {
+                                if (isBonusList) {
+                                  const currentBonusData =
+                                    emp.data.years[selectedYear][
+                                      selectedListMonth
+                                    ] || {};
+                                  const newData = {
+                                    ...emp.data,
+                                    years: {
+                                      ...emp.data.years,
+                                      [selectedYear]: {
+                                        ...currentYearDataObj,
+                                        [selectedListMonth]: {
+                                          ...currentBonusData,
+                                          basePay: Number(e.target.value),
+                                        },
+                                      },
+                                    },
+                                  };
+                                  setEmployees((prev) => ({
+                                    ...prev,
+                                    [empId]: { ...prev[empId], data: newData },
+                                  }));
+                                  handleSave(empId, emp.master, newData);
+                                } else {
+                                  updateEmployeeMonthly(
+                                    empId,
+                                    selectedYear,
+                                    selectedListMonth,
+                                    "basePay",
+                                    Number(e.target.value)
+                                  );
+                                }
+                              }}
                               className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${
                                 isDisabled
                                   ? "cursor-not-allowed text-slate-400"
                                   : ""
                               }`}
                             />
-                                                     {" "}
                           </td>
-                                                                              {" "}
+
                           {allAllowances.map((def) => {
                             return (
                               <td
                                 key={def.id}
                                 className="border border-slate-200 p-1 bg-white"
                               >
-                                                               {" "}
                                 <input
                                   disabled={isDisabled}
                                   type="number"
                                   value={
                                     rowData.allowanceAmounts?.[def.id] || ""
                                   }
-                                  onChange={(e) =>
-                                    updateEmployeeMonthlyObject(
-                                      empId,
-                                      selectedYear,
-                                      selectedListMonth,
-                                      "allowanceAmounts",
-                                      def.id,
-                                      Number(e.target.value)
-                                    )
-                                  }
+                                  onChange={(e) => {
+                                    if (isBonusList) {
+                                      const currentBonusData =
+                                        emp.data.years[selectedYear][
+                                          selectedListMonth
+                                        ] || {};
+                                      const newAllowances = {
+                                        ...(currentBonusData.allowanceAmounts ||
+                                          {}),
+                                        [def.id]: Number(e.target.value),
+                                      };
+                                      const newData = {
+                                        ...emp.data,
+                                        years: {
+                                          ...emp.data.years,
+                                          [selectedYear]: {
+                                            ...currentYearDataObj,
+                                            [selectedListMonth]: {
+                                              ...currentBonusData,
+                                              allowanceAmounts: newAllowances,
+                                            },
+                                          },
+                                        },
+                                      };
+                                      setEmployees((prev) => ({
+                                        ...prev,
+                                        [empId]: {
+                                          ...prev[empId],
+                                          data: newData,
+                                        },
+                                      }));
+                                      handleSave(empId, emp.master, newData);
+                                    } else {
+                                      updateEmployeeMonthlyObject(
+                                        empId,
+                                        selectedYear,
+                                        selectedListMonth,
+                                        "allowanceAmounts",
+                                        def.id,
+                                        Number(e.target.value)
+                                      );
+                                    }
+                                  }}
                                   className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${
                                     isDisabled
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
                                 />
-                                                             {" "}
                               </td>
                             );
                           })}
-                                                   {" "}
+
                           <td className="border border-slate-200 p-2 text-right bg-blue-50/50 font-black text-blue-700 border-l-2">
-                                                       {" "}
-                            {formatCurrency(calcResult.grossPay)}               
-                                     {" "}
+                            {formatCurrency(calcResult.grossPay)}
                           </td>
-                                                                              {" "}
+
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.health)}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.pension)}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.nursing)}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.childCare)}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.employment)}
                           </td>
-                                                   {" "}
                           <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">
                             {formatCurrency(calcResult.incomeTax)}
                           </td>
-                                                                              {" "}
+
                           <td className="border border-slate-200 p-1 bg-white">
-                                                       {" "}
                             <input
                               disabled={isDisabled}
                               type="number"
                               value={rowData.residentTax || ""}
-                              onChange={(e) =>
-                                updateEmployeeMonthly(
-                                  empId,
-                                  selectedYear,
-                                  selectedListMonth,
-                                  "residentTax",
-                                  Number(e.target.value)
-                                )
-                              }
+                              onChange={(e) => {
+                                if (isBonusList) {
+                                  const currentBonusData =
+                                    emp.data.years[selectedYear][
+                                      selectedListMonth
+                                    ] || {};
+                                  const newData = {
+                                    ...emp.data,
+                                    years: {
+                                      ...emp.data.years,
+                                      [selectedYear]: {
+                                        ...currentYearDataObj,
+                                        [selectedListMonth]: {
+                                          ...currentBonusData,
+                                          residentTax: Number(e.target.value),
+                                        },
+                                      },
+                                    },
+                                  };
+                                  setEmployees((prev) => ({
+                                    ...prev,
+                                    [empId]: { ...prev[empId], data: newData },
+                                  }));
+                                  handleSave(empId, emp.master, newData);
+                                } else {
+                                  updateEmployeeMonthly(
+                                    empId,
+                                    selectedYear,
+                                    selectedListMonth,
+                                    "residentTax",
+                                    Number(e.target.value)
+                                  );
+                                }
+                              }}
                               className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 focus:ring-1 ring-indigo-400 rounded py-1 ${
                                 isDisabled
                                   ? "cursor-not-allowed text-slate-400"
                                   : ""
                               }`}
                             />
-                                                     {" "}
                           </td>
-                                                   {" "}
+
                           {allDeductions.map((def) => {
                             return (
                               <td
                                 key={def.id}
                                 className="border border-slate-200 p-1 bg-white"
                               >
-                                                               {" "}
                                 <input
                                   disabled={isDisabled}
                                   type="number"
                                   value={
                                     rowData.deductionAmounts?.[def.id] || ""
                                   }
-                                  onChange={(e) =>
-                                    updateEmployeeMonthlyObject(
-                                      empId,
-                                      selectedYear,
-                                      selectedListMonth,
-                                      "deductionAmounts",
-                                      def.id,
-                                      Number(e.target.value)
-                                    )
-                                  }
+                                  onChange={(e) => {
+                                    if (isBonusList) {
+                                      const currentBonusData =
+                                        emp.data.years[selectedYear][
+                                          selectedListMonth
+                                        ] || {};
+                                      const newDeductions = {
+                                        ...(currentBonusData.deductionAmounts ||
+                                          {}),
+                                        [def.id]: Number(e.target.value),
+                                      };
+                                      const newData = {
+                                        ...emp.data,
+                                        years: {
+                                          ...emp.data.years,
+                                          [selectedYear]: {
+                                            ...currentYearDataObj,
+                                            [selectedListMonth]: {
+                                              ...currentBonusData,
+                                              deductionAmounts: newDeductions,
+                                            },
+                                          },
+                                        },
+                                      };
+                                      setEmployees((prev) => ({
+                                        ...prev,
+                                        [empId]: {
+                                          ...prev[empId],
+                                          data: newData,
+                                        },
+                                      }));
+                                      handleSave(empId, emp.master, newData);
+                                    } else {
+                                      updateEmployeeMonthlyObject(
+                                        empId,
+                                        selectedYear,
+                                        selectedListMonth,
+                                        "deductionAmounts",
+                                        def.id,
+                                        Number(e.target.value)
+                                      );
+                                    }
+                                  }}
                                   className={`w-full bg-transparent text-right outline-none font-mono text-red-600 focus:ring-1 ring-indigo-400 rounded py-1 ${
                                     isDisabled
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
                                 />
-                                                             {" "}
                               </td>
                             );
                           })}
-                                                   {" "}
+
                           <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700 border-l-2">
-                                                       {" "}
-                            {formatCurrency(calcResult.netPay)}                 
-                                   {" "}
+                            {formatCurrency(calcResult.netPay)}
                           </td>
-                                                   {" "}
+
                           <td className="border border-slate-200 p-1.5 sticky right-0 z-20 bg-white border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
-                                                       {" "}
                             <button
                               onClick={() => setSlipEmployeeId(empId)}
                               className="w-full flex items-center justify-center gap-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-1.5 rounded text-[10px] font-bold transition-colors"
                             >
-                                                           {" "}
-                              <FileText size={12} /> 明細表示                  
-                                       {" "}
+                              <FileText size={12} /> 明細表示
                             </button>
-                                                     {" "}
                           </td>
-                                                 {" "}
                         </tr>
                       );
                     })}
-                                     {" "}
                   </tbody>
                 </table>
               </div>
@@ -5810,6 +6286,73 @@ const App = () => {
                     />
                   </div>
                 )}
+                {/* --- 保険加入状況 --- */}
+                <div className="col-span-2 space-y-2 mt-2 pt-4 border-t border-slate-200">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                    社会保険・雇用保険 加入状況
+                  </label>
+                  <div className="flex flex-wrap gap-6 bg-slate-50 p-4 rounded border border-slate-200">
+                    <label className="flex items-center gap-2 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={
+                          editingMaster.healthIns !== undefined
+                            ? editingMaster.healthIns === 1
+                            : editingMaster.socialIns === 1
+                        }
+                        onChange={(e) =>
+                          setEditingMaster({
+                            ...editingMaster,
+                            healthIns: e.target.checked ? 1 : 0,
+                          })
+                        }
+                        className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <span className="text-sm font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">
+                        健康保険
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={
+                          editingMaster.pensionIns !== undefined
+                            ? editingMaster.pensionIns === 1
+                            : editingMaster.socialIns === 1
+                        }
+                        onChange={(e) =>
+                          setEditingMaster({
+                            ...editingMaster,
+                            pensionIns: e.target.checked ? 1 : 0,
+                          })
+                        }
+                        className="w-4 h-4 text-indigo-500 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <span className="text-sm font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">
+                        厚生年金
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={editingMaster.employmentIns === 1}
+                        onChange={(e) =>
+                          setEditingMaster({
+                            ...editingMaster,
+                            employmentIns: e.target.checked ? 1 : 0,
+                          })
+                        }
+                        className="w-4 h-4 text-teal-500 border-gray-300 rounded focus:ring-teal-500 cursor-pointer"
+                      />
+                      <span className="text-sm font-bold text-slate-700 group-hover:text-teal-600 transition-colors">
+                        雇用保険
+                      </span>
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    ※チェックを外すと、その保険料は自動計算されず「0円」となります。
+                  </p>
+                </div>
               </div>
             </div>
             <div className="p-4 bg-gray-50 flex justify-end gap-3 border-t border-gray-200">
@@ -5917,6 +6460,637 @@ const App = () => {
           );
         })()}
 
+      {/* ＝＝＝ 給与明細プレビュー モーダル (一括印刷) ＝＝＝ */}
+      {isBulkPrintOpen &&
+        (() => {
+          const activeEmployees = Object.entries(employees).filter(
+            ([id, emp]) => emp.master?.status !== "retired"
+          );
+          return (
+            <div
+              id="modal-backdrop-bulk"
+              className="fixed inset-0 bg-slate-900/60 z-[100] flex justify-center items-start overflow-y-auto py-10 backdrop-blur-sm transition-opacity"
+            >
+              <div className="print-area w-[850px] relative print:w-full">
+                <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
+                  <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
+                    <div className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                      <span className="text-indigo-600">一括印刷</span>
+                      <span className="text-slate-500 text-xs">
+                        ({selectedYear}年度 {parseInt(selectedListMonth, 10)}
+                        月支給分)
+                      </span>
+                      <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs">
+                        対象 {activeEmployees.length}名
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => window.print()}
+                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors disabled:opacity-50"
+                      disabled={activeEmployees.length === 0}
+                    >
+                      <Printer size={16} /> 印刷する
+                    </button>
+                    <button
+                      onClick={() => setIsBulkPrintOpen(false)}
+                      className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
+                    >
+                      <X size={16} /> 閉じる
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-8 print:space-y-0">
+                  {activeEmployees.length > 0 ? (
+                    activeEmployees.map(([id, emp]) =>
+                      renderPayslip(id, emp, selectedListMonth)
+                    )
+                  ) : (
+                    <div className="bg-white p-10 text-center text-slate-500 rounded-lg shadow no-print font-bold">
+                      印刷対象の従業員がいません。
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+      {/* ＝＝＝ 賃金台帳 印刷プレビュー モーダル ＝＝＝ */}
+      {isLedgerPrintOpen &&
+        selectedEmployeeId &&
+        master &&
+        selectedYear &&
+        currentYearData && (
+          <div
+            id="modal-backdrop-ledger-print"
+            className="fixed inset-0 bg-slate-900/60 z-[100] flex justify-center items-start overflow-y-auto py-10 backdrop-blur-sm transition-opacity"
+          >
+            <div className="print-area w-[1100px] relative print:w-full bg-white p-8 shadow-2xl">
+              <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
+                <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4 border border-slate-200">
+                  <div className="text-sm font-bold text-slate-700">
+                    <span className="text-indigo-600 mr-2">
+                      賃金台帳 印刷プレビュー
+                    </span>
+                    <span className="text-slate-500 text-xs">
+                      ※A4横向きで印刷されます
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => window.print()}
+                    className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors"
+                  >
+                    <Printer size={16} /> 印刷する
+                  </button>
+                  <button
+                    onClick={() => setIsLedgerPrintOpen(false)}
+                    className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
+                  >
+                    <X size={16} /> 閉じる
+                  </button>
+                </div>
+              </div>
+
+              {/* 印刷用ヘッダー */}
+              <div className="mb-6">
+                <h1 className="text-2xl font-black text-center mb-6 tracking-widest">
+                  {selectedYear}年度 賃金台帳
+                </h1>
+                <div className="flex justify-between items-end border-b-2 border-black pb-2">
+                  <div className="flex gap-8 text-sm">
+                    <div className="flex gap-2">
+                      <span className="font-bold">社員コード:</span>
+                      <span>{master.employeeCode || "---"}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="font-bold">氏名:</span>
+                      <span className="font-bold text-lg leading-none">
+                        {master.name || "未設定"}
+                      </span>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="font-bold">入社日:</span>
+                      <span>{master.joinDate || "---"}</span>
+                    </div>
+                    {master.status === "retired" && (
+                      <div className="flex gap-2 text-red-600">
+                        <span className="font-bold">退職日:</span>
+                        <span>{master.retireDate || "---"}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-right text-sm">
+                    <div className="font-bold">
+                      {settings.companyName || "会社名未設定"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 印刷用テーブル */}
+              <div className="overflow-hidden">
+                <table className="w-full border-collapse border border-black text-[9px]">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="border border-black p-1 text-left whitespace-nowrap">
+                        項目 / 支給月
+                      </th>
+                      {MONTHS.map((m) => (
+                        <th
+                          key={m}
+                          className="border border-black p-1 text-center font-bold"
+                        >
+                          <div>{parseInt(m, 10)}月支給</div>
+                          <div className="text-[7px] font-normal">
+                            {currentYearData.monthly[m]?.salaryMonthText || "-"}
+                          </div>
+                          <div className="text-[7px] font-normal">
+                            {currentYearData.monthly[m]?.payDate
+                              ? currentYearData.monthly[m]?.payDate
+                                  .replace("-", "/")
+                                  .replace("-", "/")
+                              : "-"}
+                          </div>
+                        </th>
+                      ))}
+                      <th className="border border-black p-1 text-center font-bold bg-gray-200">
+                        給与累計
+                      </th>
+                      <th className="border border-black p-1 text-center font-bold">
+                        <div>賞与①</div>
+                        <div className="text-[7px] font-normal">
+                          {currentYearData.bonus?.payDate
+                            ? currentYearData.bonus?.payDate
+                                .replace("-", "/")
+                                .replace("-", "/")
+                            : "-"}
+                        </div>
+                      </th>
+                      <th className="border border-black p-1 text-center font-bold">
+                        <div>賞与②</div>
+                        <div className="text-[7px] font-normal">
+                          {currentYearData.bonus2?.payDate
+                            ? currentYearData.bonus2?.payDate
+                                .replace("-", "/")
+                                .replace("-", "/")
+                            : "-"}
+                        </div>
+                      </th>
+                      <th className="border border-black p-1 text-center font-bold bg-gray-200">
+                        賞与累計
+                      </th>
+                      <th className="border border-black p-1 text-center font-black bg-gray-300">
+                        総合計
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {/* 計算期間 */}
+                    <tr>
+                      <td className="border border-black p-1 font-bold">
+                        計算期間 (開始)
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-center font-mono"
+                        >
+                          {currentYearData.monthly[m]?.periodStart
+                            ? currentYearData.monthly[m]?.periodStart
+                                .replace("-", "/")
+                                .replace("-", "/")
+                            : "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+                    <tr>
+                      <td className="border border-black p-1 font-bold">
+                        計算期間 (終了)
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-center font-mono"
+                        >
+                          {currentYearData.monthly[m]?.periodEnd
+                            ? currentYearData.monthly[m]?.periodEnd
+                                .replace("-", "/")
+                                .replace("-", "/")
+                            : "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+
+                    {/* 勤怠 */}
+                    <tr className="bg-gray-50 border-t-2 border-black">
+                      <td className="border border-black p-1 font-bold">
+                        労働日数
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {currentYearData.monthly[m]?.workingDays || "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+                    <tr className="bg-gray-50">
+                      <td className="border border-black p-1 font-bold">
+                        総労働時間
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {currentYearData.monthly[m]?.workingHours || "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+                    <tr className="bg-gray-50">
+                      <td className="border border-black p-1 font-bold">
+                        時間外労働時間
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {currentYearData.monthly[m]?.overtimeHours || "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+                    <tr className="bg-gray-50">
+                      <td className="border border-black p-1 font-bold">
+                        深夜労働時間
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {currentYearData.monthly[m]?.lateNightHours || "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+                    <tr className="bg-gray-50">
+                      <td className="border border-black p-1 font-bold">
+                        休日労働時間
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {currentYearData.monthly[m]?.holidayHours || "-"}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1"></td>
+                      <td className="border border-black p-1 bg-gray-100"></td>
+                      <td className="border border-black p-1 bg-gray-200"></td>
+                    </tr>
+
+                    {/* 支給 */}
+                    <tr className="border-t-2 border-black">
+                      <td className="border border-black p-1 font-bold">
+                        基本給
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {formatCurrency(currentYearData.monthly[m]?.basePay)}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                        {formatCurrency(results.sums.basePay)}
+                      </td>
+                      <td className="border border-black p-1 text-right">
+                        {formatCurrency(currentYearData.bonus?.basePay)}
+                      </td>
+                      <td className="border border-black p-1 text-right">
+                        {formatCurrency(currentYearData.bonus2?.basePay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                        {formatCurrency(results.bonusTotal.basePay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-200">
+                        {formatCurrency(
+                          results.sums.basePay + results.bonusTotal.basePay
+                        )}
+                      </td>
+                    </tr>
+
+                    {(settings?.allowanceDefinitions || []).map((def) => (
+                      <tr key={def.id}>
+                        <td className="border border-black p-1 font-bold">
+                          {def.name}{" "}
+                          <span className="text-[6px] font-normal">
+                            {def.isTaxable ? "(課)" : "(非)"}
+                          </span>
+                        </td>
+                        {MONTHS.map((m) => (
+                          <td
+                            key={m}
+                            className="border border-black p-1 text-right font-mono"
+                          >
+                            {formatCurrency(
+                              currentYearData.monthly[m]?.allowanceAmounts?.[
+                                def.id
+                              ]
+                            )}
+                          </td>
+                        ))}
+                        <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                          {formatCurrency(results.sums.allowances[def.id])}
+                        </td>
+                        <td className="border border-black p-1 text-right">
+                          {formatCurrency(
+                            currentYearData.bonus?.allowanceAmounts?.[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right">
+                          {formatCurrency(
+                            currentYearData.bonus2?.allowanceAmounts?.[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                          {formatCurrency(
+                            results.bonusTotal.allowances[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right font-black bg-gray-200">
+                          {formatCurrency(
+                            (results.sums.allowances[def.id] || 0) +
+                              (results.bonusTotal.allowances[def.id] || 0)
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+
+                    <tr className="bg-gray-100 border-y-2 border-black">
+                      <td className="border border-black p-1 font-black">
+                        総支給額
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-black"
+                        >
+                          {formatCurrency(results.monthlyResults[m]?.grossPay)}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 text-right font-black bg-gray-200">
+                        {formatCurrency(results.sums.grossPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-white">
+                        {formatCurrency(results.bonus1.grossPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-white">
+                        {formatCurrency(results.bonus2.grossPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-200">
+                        {formatCurrency(results.bonusTotal.grossPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-300">
+                        {formatCurrency(
+                          results.sums.grossPay + results.bonusTotal.grossPay
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* 控除 */}
+                    {[
+                      "health",
+                      "pension",
+                      "nursing",
+                      "childCare",
+                      "employment",
+                    ].map((key) => {
+                      const labels = {
+                        health: "健康保険",
+                        pension: "厚生年金",
+                        nursing: "介護保険",
+                        childCare: "子育て支援金",
+                        employment: "雇用保険",
+                      };
+                      return (
+                        <tr key={key}>
+                          <td className="border border-black p-1 font-bold">
+                            {labels[key]}
+                          </td>
+                          {MONTHS.map((m) => (
+                            <td
+                              key={m}
+                              className="border border-black p-1 text-right font-mono"
+                            >
+                              {formatCurrency(results.monthlyResults[m]?.[key])}
+                            </td>
+                          ))}
+                          <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                            {formatCurrency(results.sums[key])}
+                          </td>
+                          <td className="border border-black p-1 text-right">
+                            {formatCurrency(results.bonus1[key])}
+                          </td>
+                          <td className="border border-black p-1 text-right">
+                            {formatCurrency(results.bonus2[key])}
+                          </td>
+                          <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                            {formatCurrency(results.bonusTotal[key])}
+                          </td>
+                          <td className="border border-black p-1 text-right font-black bg-gray-200">
+                            {formatCurrency(
+                              results.sums[key] + results.bonusTotal[key]
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    <tr>
+                      <td className="border border-black p-1 font-bold">
+                        所得税
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-bold"
+                        >
+                          {formatCurrency(results.monthlyResults[m]?.incomeTax)}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 text-right font-black bg-gray-100">
+                        {formatCurrency(results.sums.incomeTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-bold">
+                        {formatCurrency(currentYearData.bonus?.incomeTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-bold">
+                        {formatCurrency(currentYearData.bonus2?.incomeTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-100">
+                        {formatCurrency(results.bonusTotal.incomeTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-200">
+                        {formatCurrency(
+                          results.sums.incomeTax + results.bonusTotal.incomeTax
+                        )}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="border border-black p-1 font-bold">
+                        住民税
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-mono"
+                        >
+                          {formatCurrency(
+                            currentYearData.monthly[m]?.residentTax
+                          )}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                        {formatCurrency(results.sums.residentTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right">
+                        {formatCurrency(currentYearData.bonus?.residentTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right">
+                        {formatCurrency(currentYearData.bonus2?.residentTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                        {formatCurrency(results.bonusTotal.residentTax)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-200">
+                        {formatCurrency(
+                          results.sums.residentTax +
+                            results.bonusTotal.residentTax
+                        )}
+                      </td>
+                    </tr>
+
+                    {(settings?.deductionDefinitions || []).map((def) => (
+                      <tr key={def.id}>
+                        <td className="border border-black p-1 font-bold">
+                          {def.name}
+                        </td>
+                        {MONTHS.map((m) => (
+                          <td
+                            key={m}
+                            className="border border-black p-1 text-right font-mono"
+                          >
+                            {formatCurrency(
+                              currentYearData.monthly[m]?.deductionAmounts?.[
+                                def.id
+                              ]
+                            )}
+                          </td>
+                        ))}
+                        <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                          {formatCurrency(results.sums.deductions[def.id])}
+                        </td>
+                        <td className="border border-black p-1 text-right">
+                          {formatCurrency(
+                            currentYearData.bonus?.deductionAmounts?.[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right">
+                          {formatCurrency(
+                            currentYearData.bonus2?.deductionAmounts?.[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right font-bold bg-gray-100">
+                          {formatCurrency(
+                            results.bonusTotal.deductions[def.id]
+                          )}
+                        </td>
+                        <td className="border border-black p-1 text-right font-black bg-gray-200">
+                          {formatCurrency(
+                            (results.sums.deductions[def.id] || 0) +
+                              (results.bonusTotal.deductions[def.id] || 0)
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+
+                    <tr className="bg-gray-200 border-y-2 border-black">
+                      <td className="border border-black p-1 font-black">
+                        差引支給額
+                      </td>
+                      {MONTHS.map((m) => (
+                        <td
+                          key={m}
+                          className="border border-black p-1 text-right font-black"
+                        >
+                          {formatCurrency(results.monthlyResults[m]?.netPay)}
+                        </td>
+                      ))}
+                      <td className="border border-black p-1 text-right font-black bg-gray-300">
+                        {formatCurrency(results.sums.netPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-white">
+                        {formatCurrency(results.bonus1.netPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-white">
+                        {formatCurrency(results.bonus2.netPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-300">
+                        {formatCurrency(results.bonusTotal.netPay)}
+                      </td>
+                      <td className="border border-black p-1 text-right font-black bg-gray-400">
+                        {formatCurrency(
+                          results.sums.netPay + results.bonusTotal.netPay
+                        )}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-4 text-xs font-bold text-right">
+                出力日: {new Date().toLocaleDateString("ja-JP")}
+              </div>
+            </div>
+          </div>
+        )}
+
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -5931,6 +7105,7 @@ const App = () => {
         main ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
         @media print {
+          @page { size: landscape; margin: 10mm; }
           body * { visibility: hidden; }
           .print-area, .print-area * { visibility: visible; }
           .print-area { position: absolute; top: 0; left: 0; width: 100%; margin: 0; padding: 0; box-shadow: none !important; border: none !important; }

@@ -1689,6 +1689,9 @@ const App = () => {
       return {
         monthlyResults: {},
         sums: defaultSums,
+        bonus1: defaultSums,
+        bonus2: defaultSums,
+        bonusTotal: defaultSums,
         bonusResults: defaultSums,
       };
 
@@ -1731,93 +1734,126 @@ const App = () => {
       sums.netPay += monthlyResult.netPay || 0;
     });
 
-    const b = currentYearData.bonus || {};
-    let bTotalAllowances = 0;
-    let bTotalSocialInsAllowances = 0;
-    let bTotalEmploymentInsAllowances = 0;
+    const calcBonus = (b) => {
+      if (!b) return { ...defaultSums };
+      let bTotalAllowances = 0,
+        bTotalSocialInsAllowances = 0,
+        bTotalEmploymentInsAllowances = 0;
+      const bAllowances = {},
+        bDeductions = {};
 
-    allowanceDefs.forEach((def) => {
-      const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
-      bTotalAllowances += amt;
-      const isSocialIns = def.isSocialIns === true;
-      const isEmploymentIns = def.isEmploymentIns === true;
-      if (isSocialIns) bTotalSocialInsAllowances += amt;
-      if (isEmploymentIns) bTotalEmploymentInsAllowances += amt;
-    });
+      allowanceDefs.forEach((def) => {
+        const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+        bAllowances[def.id] = amt;
+        bTotalAllowances += amt;
+        if (def.isSocialIns) bTotalSocialInsAllowances += amt;
+        if (def.isEmploymentIns) bTotalEmploymentInsAllowances += amt;
+      });
 
-    const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
-    const bSocialInsGross =
-      (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
-    const bEmploymentInsGross =
-      (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
+      const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+      const bSocialInsGross =
+        (Number(b.basePay) || 0) + bTotalSocialInsAllowances;
+      const bEmploymentInsGross =
+        (Number(b.basePay) || 0) + bTotalEmploymentInsAllowances;
 
-    const lastMonth = MONTHS[MONTHS.length - 1];
-    const lastMonthRow = currentYearData.monthly[lastMonth] || {};
+      const lastMonth = MONTHS[MONTHS.length - 1];
+      const lastMonthRow = currentYearData.monthly[lastMonth] || {};
 
-    const bhRate = settings?.rateSchedules?.health
-      ? getRateForMonth(settings.rateSchedules.health, lastMonth)
-      : lastMonthRow.healthRate || 5.0;
-    const bpRate = settings?.rateSchedules?.pension
-      ? getRateForMonth(settings.rateSchedules.pension, lastMonth)
-      : lastMonthRow.pensionRate || 9.15;
-    const bnRate = settings?.rateSchedules?.nursing
-      ? getRateForMonth(settings.rateSchedules.nursing, lastMonth)
-      : lastMonthRow.nursingRate || 0.8;
-    const bcRate = settings?.rateSchedules?.childCare
-      ? getRateForMonth(settings.rateSchedules.childCare, lastMonth)
-      : lastMonthRow.childCareRate || 0.0;
-    const beRate = settings?.rateSchedules?.employment
-      ? getRateForMonth(settings.rateSchedules.employment, lastMonth)
-      : lastMonthRow.employmentRate || 6.0;
+      const bhRate = settings?.rateSchedules?.health
+        ? getRateForMonth(settings.rateSchedules.health, lastMonth)
+        : lastMonthRow.healthRate || 5.0;
+      const bpRate = settings?.rateSchedules?.pension
+        ? getRateForMonth(settings.rateSchedules.pension, lastMonth)
+        : lastMonthRow.pensionRate || 9.15;
+      const bnRate = settings?.rateSchedules?.nursing
+        ? getRateForMonth(settings.rateSchedules.nursing, lastMonth)
+        : lastMonthRow.nursingRate || 0.8;
+      const bcRate = settings?.rateSchedules?.childCare
+        ? getRateForMonth(settings.rateSchedules.childCare, lastMonth)
+        : lastMonthRow.childCareRate || 0.0;
+      const beRate = settings?.rateSchedules?.employment
+        ? getRateForMonth(settings.rateSchedules.employment, lastMonth)
+        : lastMonthRow.employmentRate || 6.0;
 
-    const bEstStdAmount =
-      settings?.standardRewardTable?.length > 0
-        ? getStandardRewardAmount(settings.standardRewardTable, bSocialInsGross)
-        : bSocialInsGross;
+      const bEstStdAmount =
+        settings?.standardRewardTable?.length > 0
+          ? getStandardRewardAmount(
+              settings.standardRewardTable,
+              bSocialInsGross
+            )
+          : bSocialInsGross;
+      const bIns = calculateSocialIns(
+        bEstStdAmount,
+        master.socialIns,
+        bhRate,
+        bpRate,
+        bnRate,
+        bcRate,
+        lastMonthRow.hasNursingIns === 1
+      );
+      const bEmp = master.employmentIns
+        ? Math.floor(bEmploymentInsGross * (beRate / 1000))
+        : 0;
+      const bSocialTotal =
+        bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
 
-    const bIns = calculateSocialIns(
-      bEstStdAmount,
-      master.socialIns,
-      bhRate,
-      bpRate,
-      bnRate,
-      bcRate,
-      lastMonthRow.hasNursingIns === 1
-    );
+      const bIncomeTax = Number(b.incomeTax) || 0;
+      const bResidentTax = Number(b.residentTax) || 0;
 
-    const bEmp = master.employmentIns
-      ? Math.floor(bEmploymentInsGross * (beRate / 1000))
-      : 0;
+      let bTotalCustomDeds = 0;
+      deductionDefs.forEach((def) => {
+        const amt = Number(b.deductionAmounts?.[def.id]) || 0;
+        bDeductions[def.id] = amt;
+        bTotalCustomDeds += amt;
+      });
 
-    const bSocialTotal =
-      bIns.health + bIns.pension + bIns.nursing + bIns.childCare + bEmp;
-    const bIncomeTax = Number(b.incomeTax) || 0;
-    const bResidentTax = Number(b.residentTax) || 0;
+      const bNetPay =
+        bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
 
-    let bTotalCustomDeds = 0;
-    deductionDefs.forEach((def) => {
-      bTotalCustomDeds += Number(b.deductionAmounts?.[def.id]) || 0;
-    });
-
-    const bNetPay =
-      bGross - bSocialTotal - bIncomeTax - bResidentTax - bTotalCustomDeds;
-
-    const bonusResults = {
-      basePay: Number(b.basePay) || 0,
-      grossPay: bGross,
-      health: bIns.health,
-      pension: bIns.pension,
-      nursing: bIns.nursing,
-      childCare: bIns.childCare,
-      employment: bEmp,
-      incomeTax: bIncomeTax,
-      residentTax: bResidentTax,
-      netPay: bNetPay,
-      allowances: b.allowanceAmounts || {},
-      deductions: b.deductionAmounts || {},
+      return {
+        basePay: Number(b.basePay) || 0,
+        grossPay: bGross,
+        health: bIns.health,
+        pension: bIns.pension,
+        nursing: bIns.nursing,
+        childCare: bIns.childCare,
+        employment: bEmp,
+        incomeTax: bIncomeTax,
+        residentTax: bResidentTax,
+        netPay: bNetPay,
+        allowances: bAllowances,
+        deductions: bDeductions,
+      };
     };
 
-    return { monthlyResults, sums, bonusResults };
+    const bonus1 = calcBonus(currentYearData.bonus);
+    const bonus2 = calcBonus(currentYearData.bonus2);
+
+    const bonusTotal = { ...defaultSums };
+    Object.keys(bonusTotal).forEach((key) => {
+      if (key === "allowances" || key === "deductions") {
+        [...(allowanceDefs || []), ...(deductionDefs || [])].forEach((def) => {
+          const target =
+            key === "allowances"
+              ? bonusTotal.allowances
+              : bonusTotal.deductions;
+          target[def.id] =
+            (bonus1[key]?.[def.id] || 0) + (bonus2[key]?.[def.id] || 0);
+        });
+      } else {
+        bonusTotal[key] = (bonus1[key] || 0) + (bonus2[key] || 0);
+      }
+    });
+
+    // 画面側の変更が終わるまでエラーにならないよう、古い名前（bonusResults）も同時に出力します
+    return {
+      monthlyResults,
+      sums,
+      bonus1,
+      bonus2,
+      bonusTotal,
+      bonusResults: bonusTotal,
+    };
   }, [data, master, selectedYear, currentYearData, settings]);
 
   const allAllowances = useMemo(() => {

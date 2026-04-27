@@ -7052,6 +7052,187 @@ const App = () => {
           </div>
         )}
 
+      {/* ＝＝＝ 住民税 管理・一括入力・確認モーダル ＝＝＝ */}
+      {isResidentTaxModalOpen &&
+        selectedEmployeeId &&
+        master &&
+        selectedYear && (
+          <div
+            id="modal-backdrop-restax"
+            className="fixed inset-0 bg-slate-900/60 z-[120] flex justify-center items-center backdrop-blur-sm transition-opacity p-4"
+          >
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="bg-orange-600 p-4 text-white flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <Tag size={20} />
+                  <div>
+                    <h2 className="font-black text-sm uppercase tracking-wider">
+                      住民税 年度管理・確認
+                    </h2>
+                    <p className="text-[10px] opacity-80">
+                      {master.name} 様 （{selectedYear}年6月〜翌年5月サイクル）
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsResidentTaxModalOpen(false)}
+                  className="hover:bg-white/20 p-1 rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-6">
+                {/* 一括設定セクション */}
+                <div className="bg-orange-50 border border-orange-200 rounded-xl p-4">
+                  <h3 className="text-xs font-black text-orange-700 mb-3 flex items-center gap-1">
+                    <TrendingUp size={14} /> 新年度分を一括で流し込む
+                  </h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500">
+                        6月支給分の額
+                      </label>
+                      <input
+                        type="number"
+                        id="bulk-june"
+                        placeholder="例: 15500"
+                        className="w-full border border-orange-200 rounded-lg px-3 py-2 outline-none focus:ring-2 ring-orange-300 font-mono font-bold text-orange-700"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500">
+                        7月〜翌5月の月額
+                      </label>
+                      <input
+                        type="number"
+                        id="bulk-rem"
+                        placeholder="例: 15000"
+                        className="w-full border border-orange-200 rounded-lg px-3 py-2 outline-none focus:ring-2 ring-orange-300 font-mono font-bold text-orange-700"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const jun = document.getElementById("bulk-june").value;
+                      const rem = document.getElementById("bulk-rem").value;
+                      if (!jun || !rem) return alert("金額を入力してください");
+                      handleSaveResidentTaxBulk(
+                        selectedEmployeeId,
+                        selectedYear,
+                        Number(jun),
+                        Number(rem)
+                      );
+                    }}
+                    className="w-full mt-3 bg-orange-600 text-white py-2 rounded-lg font-black text-xs hover:bg-orange-700 transition-colors shadow-sm"
+                  >
+                    上記の内容で12ヶ月分を一括更新する
+                  </button>
+                </div>
+
+                {/* 確認・個別編集セクション */}
+                <div className="space-y-3">
+                  <h3 className="text-xs font-black text-slate-500 flex items-center gap-1">
+                    <Search size={14} /> 現在の登録内容（直接修正も可能です）
+                  </h3>
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-100 text-slate-500 font-bold">
+                        <tr>
+                          <th className="p-2 border-b border-r w-1/2 text-center">
+                            支給月
+                          </th>
+                          <th className="p-2 border-b text-center">住民税額</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[
+                          { y: selectedYear, m: "06" },
+                          { y: selectedYear, m: "07" },
+                          { y: selectedYear, m: "08" },
+                          { y: selectedYear, m: "09" },
+                          { y: selectedYear, m: "10" },
+                          { y: selectedYear, m: "11" },
+                          { y: selectedYear, m: "12" },
+                          {
+                            y: `R${String(
+                              getYearNumber(selectedYear) + 1
+                            ).padStart(2, "0")}`,
+                            m: "01",
+                          },
+                          {
+                            y: `R${String(
+                              getYearNumber(selectedYear) + 1
+                            ).padStart(2, "0")}`,
+                            m: "02",
+                          },
+                          {
+                            y: `R${String(
+                              getYearNumber(selectedYear) + 1
+                            ).padStart(2, "0")}`,
+                            m: "03",
+                          },
+                          {
+                            y: `R${String(
+                              getYearNumber(selectedYear) + 1
+                            ).padStart(2, "0")}`,
+                            m: "04",
+                          },
+                          {
+                            y: `R${String(
+                              getYearNumber(selectedYear) + 1
+                            ).padStart(2, "0")}`,
+                            m: "05",
+                          },
+                        ].map((item, i) => {
+                          const currentVal =
+                            employees[selectedEmployeeId]?.data?.years?.[item.y]
+                              ?.monthly?.[item.m]?.residentTax || 0;
+                          return (
+                            <tr
+                              key={i}
+                              className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
+                            >
+                              <td className="p-2 border-r text-center font-bold text-slate-600 bg-slate-50/50">
+                                {item.y}年 {parseInt(item.m, 10)}月
+                              </td>
+                              <td className="p-1">
+                                <input
+                                  type="number"
+                                  value={currentVal || ""}
+                                  onChange={(e) =>
+                                    updateEmployeeMonthly(
+                                      selectedEmployeeId,
+                                      item.y,
+                                      item.m,
+                                      "residentTax",
+                                      Number(e.target.value)
+                                    )
+                                  }
+                                  className="w-full bg-transparent text-right pr-4 outline-none font-mono font-bold text-indigo-600 focus:bg-white"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-end">
+                <button
+                  onClick={() => setIsResidentTaxModalOpen(false)}
+                  className="bg-slate-800 text-white px-8 py-2 rounded-xl font-black text-sm hover:bg-slate-700 transition-all shadow-lg active:scale-95"
+                >
+                  確認終了
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       <style
         dangerouslySetInnerHTML={{
           __html: `

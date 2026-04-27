@@ -847,6 +847,7 @@ const createInitialEmployee = (
       healthIns: 1,
       pensionIns: 1,
       employmentIns: 1,
+      workersCompIns: 1, // ★追加: 労災保険（役員は0にする）
       // 【修正⑤】定義はsettingsにある前提なので空でOKだが、フォールバック用に保持する
       allowanceDefinitions: [],
       deductionDefinitions: [],
@@ -6203,8 +6204,9 @@ const App = () => {
         {activeTab === "aggregation" &&
           (() => {
             const isSantei = aggMode === "santei";
+            const isRoubou = aggMode === "roubou"; // ★追加: 労働保険モード
 
-            // --- 1. 源泉所得税 集計ロジック (santei以外の場合) ---
+            // --- 1. 源泉所得税 集計ロジック (santei, roubou以外の場合) ---
             let targetMonths = [];
             let periodText = "";
             if (aggMode === "monthly") {
@@ -6240,7 +6242,7 @@ const App = () => {
               };
             };
 
-            if (!isSantei) {
+            if (!isSantei && !isRoubou) {
               Object.values(employees).forEach((emp) => {
                 const yearData = emp.data?.years?.[selectedYear];
                 if (!yearData) return;
@@ -6377,6 +6379,128 @@ const App = () => {
                 .filter(Boolean);
             }
 
+            // --- 3. 労働保険 年度更新 集計ロジック ---
+            let roubouData = [];
+            let rTotalCount = 0,
+              rTotalAmount = 0,
+              eTotalCount = 0,
+              eTotalAmount = 0;
+
+            if (isRoubou) {
+              const nextYearStr = `R${String(
+                getYearNumber(selectedYear) + 1
+              ).padStart(2, "0")}`;
+
+              const monthsTemplate = [
+                { label: "4月", y: selectedYear, m: "04" },
+                { label: "5月", y: selectedYear, m: "05" },
+                { label: "6月", y: selectedYear, m: "06" },
+                { label: "7月", y: selectedYear, m: "07" },
+                { label: "8月", y: selectedYear, m: "08" },
+                { label: "9月", y: selectedYear, m: "09" },
+                { label: "10月", y: selectedYear, m: "10" },
+                { label: "11月", y: selectedYear, m: "11" },
+                { label: "12月", y: selectedYear, m: "12" },
+                { label: "1月", y: nextYearStr, m: "01" },
+                { label: "2月", y: nextYearStr, m: "02" },
+                { label: "3月", y: nextYearStr, m: "03" },
+              ];
+
+              roubouData = monthsTemplate.map((tmpl) => ({
+                ...tmpl,
+                rCount: 0,
+                rAmount: 0,
+                eCount: 0,
+                eAmount: 0,
+              }));
+              const bonusData = {
+                label: "賞与",
+                rCount: 0,
+                rAmount: 0,
+                eCount: 0,
+                eAmount: 0,
+              };
+
+              Object.values(employees).forEach((emp) => {
+                // マスターの加入フラグ判定
+                const hasWorkersComp = emp.master?.workersCompIns !== 0; // undefinedは1(対象)扱い
+                const hasEmploymentIns = emp.master?.employmentIns === 1;
+
+                const allowanceDefs =
+                  settings?.allowanceDefinitions?.length > 0
+                    ? settings.allowanceDefinitions
+                    : emp.master?.allowanceDefinitions || [];
+
+                // その月の労働保険・雇用保険の対象額を算出するヘルパー
+                const calculateRowGross = (row) => {
+                  if (!row) return { rGross: 0, eGross: 0 };
+                  const base = Number(row.basePay) || 0;
+                  let rAlw = 0;
+                  let eAlw = 0;
+                  allowanceDefs.forEach((def) => {
+                    const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+                    // 労災は「総支給額」ベース
+                    rAlw += amt;
+                    // 雇用保険は「雇用保険対象フラグ」がONの手当のみ
+                    if (def.isEmploymentIns) eAlw += amt;
+                  });
+                  return { rGross: base + rAlw, eGross: base + eAlw };
+                };
+
+                // 12ヶ月分のマトリクス集計
+                roubouData.forEach((rRow) => {
+                  const monthData =
+                    emp.data?.years?.[rRow.y]?.monthly?.[rRow.m];
+                  if (
+                    monthData &&
+                    (Number(monthData.basePay) > 0 ||
+                      Object.keys(monthData.allowanceAmounts || {}).length > 0)
+                  ) {
+                    const { rGross, eGross } = calculateRowGross(monthData);
+                    if (hasWorkersComp && rGross > 0) {
+                      rRow.rCount += 1;
+                      rRow.rAmount += rGross;
+                    }
+                    if (hasEmploymentIns && eGross > 0) {
+                      rRow.eCount += 1;
+                      rRow.eAmount += eGross;
+                    }
+                  }
+                });
+
+                // 賞与の集計
+                ["bonus", "bonus2"].forEach((bKey) => {
+                  const bData = emp.data?.years?.[selectedYear]?.[bKey];
+                  if (
+                    bData &&
+                    bData.payDate &&
+                    (Number(bData.basePay) > 0 ||
+                      Object.keys(bData.allowanceAmounts || {}).length > 0)
+                  ) {
+                    const { rGross, eGross } = calculateRowGross(bData);
+                    if (hasWorkersComp && rGross > 0) {
+                      bonusData.rCount += 1;
+                      bonusData.rAmount += rGross;
+                    }
+                    if (hasEmploymentIns && eGross > 0) {
+                      bonusData.eCount += 1;
+                      bonusData.eAmount += eGross;
+                    }
+                  }
+                });
+              });
+
+              roubouData.push(bonusData);
+
+              // 縦計（総合計）の算出
+              roubouData.forEach((row) => {
+                rTotalCount += row.rCount;
+                rTotalAmount += row.rAmount;
+                eTotalCount += row.eCount;
+                eTotalAmount += row.eAmount;
+              });
+            }
+
             return (
               <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
                 <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 max-w-5xl mx-auto mt-4 mb-20">
@@ -6385,16 +6509,22 @@ const App = () => {
                       <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
                         {isSantei ? (
                           <Users className="text-emerald-500" size={28} />
+                        ) : isRoubou ? (
+                          <TrendingUp className="text-teal-600" size={28} />
                         ) : (
                           <FileText className="text-rose-500" size={28} />
                         )}
                         {isSantei
                           ? "算定基礎届 シミュレーター"
+                          : isRoubou
+                          ? "労働保険 年度更新（概算・確定）"
                           : "源泉所得税 集計パネル"}
                       </h2>
                       <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
                         {isSantei
                           ? "Standard Remuneration Simulator"
+                          : isRoubou
+                          ? "Labor Insurance Declaration"
                           : "Tax Aggregation"}
                       </p>
                     </div>
@@ -6422,6 +6552,8 @@ const App = () => {
                     className={`flex flex-wrap items-center gap-4 mb-8 p-4 rounded-xl border ${
                       isSantei
                         ? "bg-emerald-50/50 border-emerald-100"
+                        : isRoubou
+                        ? "bg-teal-50/50 border-teal-100"
                         : "bg-rose-50/50 border-rose-100"
                     }`}
                   >
@@ -6468,6 +6600,16 @@ const App = () => {
                         }`}
                       >
                         算定基礎届 (4〜6月実績)
+                      </button>
+                      <button
+                        onClick={() => setAggMode("roubou")}
+                        className={`px-4 py-2 rounded-lg text-[11px] font-black transition-all shadow-sm border ${
+                          aggMode === "roubou"
+                            ? "bg-teal-600 text-white border-teal-600"
+                            : "bg-white text-slate-500 border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        労働保険 年度更新 (4月〜翌3月)
                       </button>
                     </div>
 
@@ -6676,6 +6818,132 @@ const App = () => {
                                 </td>
                               </tr>
                             )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : isRoubou ? (
+                    // 労働保険のUI
+                    <div className="bg-white border-2 border-teal-800 rounded-lg p-6 relative overflow-hidden">
+                      <div className="absolute top-0 left-0 bg-teal-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
+                        確定保険料 算定内訳
+                      </div>
+
+                      <div className="text-center mb-6 mt-4">
+                        <h3 className="text-xl font-black text-teal-800">
+                          {selectedYear}年度 労働保険 年度更新シミュレーション
+                        </h3>
+                        <p className="text-[10px] text-slate-400 mt-2">
+                          ※{selectedYear}年4月支給分 〜
+                          翌年3月支給分までの賃金を集計しています（年度をまたいだ自動集計）。
+                          <br />
+                          ※「労災保険」のチェックが外れている役員等は労災集計から、「雇用保険」のチェックが外れている社員は雇用集計から除外されます。
+                          <br />
+                          ※下の表をそのまま申告書（緑の用紙）に転記してご使用ください。
+                        </p>
+                      </div>
+
+                      <div className="overflow-x-auto px-4 pb-4">
+                        <table className="w-full text-xs border-collapse border-2 border-teal-800">
+                          <thead>
+                            <tr className="bg-teal-50 text-teal-900 font-black">
+                              <th
+                                className="border border-teal-800 p-2 text-center"
+                                rowSpan={2}
+                              >
+                                月別
+                              </th>
+                              <th
+                                className="border border-teal-800 p-2 text-center"
+                                colSpan={2}
+                              >
+                                労災保険分
+                              </th>
+                              <th
+                                className="border border-teal-800 p-2 text-center"
+                                colSpan={2}
+                              >
+                                雇用保険分
+                              </th>
+                            </tr>
+                            <tr className="bg-teal-100/50 text-teal-800 font-bold text-[10px]">
+                              <th className="border border-teal-800 p-1.5 text-center w-24">
+                                人員
+                              </th>
+                              <th className="border border-teal-800 p-1.5 text-center">
+                                賃金金額
+                              </th>
+                              <th className="border border-teal-800 p-1.5 text-center w-24">
+                                人員
+                              </th>
+                              <th className="border border-teal-800 p-1.5 text-center">
+                                賃金金額
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {roubouData.map((row, idx) => (
+                              <tr
+                                key={idx}
+                                className={
+                                  row.label === "賞与"
+                                    ? "bg-amber-50/50"
+                                    : "hover:bg-slate-50 transition-colors"
+                                }
+                              >
+                                <td className="border border-teal-800 p-2 text-center font-bold text-slate-700 bg-teal-50/30">
+                                  {row.label}
+                                </td>
+                                <td className="border border-teal-800 p-2 text-right font-mono text-slate-700">
+                                  {formatCurrency(row.rCount)}
+                                </td>
+                                <td className="border border-teal-800 p-2 text-right font-mono font-bold text-slate-800">
+                                  {formatCurrency(row.rAmount)}
+                                </td>
+                                <td className="border border-teal-800 p-2 text-right font-mono text-slate-700">
+                                  {formatCurrency(row.eCount)}
+                                </td>
+                                <td className="border border-teal-800 p-2 text-right font-mono font-bold text-slate-800">
+                                  {formatCurrency(row.eAmount)}
+                                </td>
+                              </tr>
+                            ))}
+                            <tr className="bg-teal-800 text-white font-black text-sm">
+                              <td className="border border-teal-800 p-3 text-center tracking-widest">
+                                合 計
+                              </td>
+                              <td className="border border-teal-800 p-3 text-right font-mono">
+                                {formatCurrency(rTotalCount)}
+                              </td>
+                              <td className="border border-teal-800 p-3 text-right font-mono text-amber-200">
+                                {formatCurrency(rTotalAmount)}
+                              </td>
+                              <td className="border border-teal-800 p-3 text-right font-mono">
+                                {formatCurrency(eTotalCount)}
+                              </td>
+                              <td className="border border-teal-800 p-3 text-right font-mono text-cyan-200">
+                                {formatCurrency(eTotalAmount)}
+                              </td>
+                            </tr>
+                            <tr className="bg-teal-900 text-white font-black text-xs">
+                              <td
+                                className="border border-teal-800 p-2 text-center tracking-widest"
+                                colSpan={2}
+                              >
+                                千円未満切捨て
+                              </td>
+                              <td className="border border-teal-800 p-2 text-right font-mono text-amber-400 text-lg">
+                                {formatCurrency(
+                                  Math.floor(rTotalAmount / 1000) * 1000
+                                )}
+                              </td>
+                              <td className="border border-teal-800 p-2 text-center"></td>
+                              <td className="border border-teal-800 p-2 text-right font-mono text-cyan-400 text-lg">
+                                {formatCurrency(
+                                  Math.floor(eTotalAmount / 1000) * 1000
+                                )}
+                              </td>
+                            </tr>
                           </tbody>
                         </table>
                       </div>
@@ -6921,9 +7189,9 @@ const App = () => {
                 {/* --- 保険加入状況 --- */}
                 <div className="col-span-2 space-y-2 mt-2 pt-4 border-t border-slate-200">
                   <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
-                    社会保険・雇用保険 加入状況
+                    社会保険・労働保険 加入状況
                   </label>
-                  <div className="flex flex-wrap gap-6 bg-slate-50 p-4 rounded border border-slate-200">
+                  <div className="flex flex-wrap gap-x-6 gap-y-3 bg-slate-50 p-4 rounded border border-slate-200">
                     <label className="flex items-center gap-2 cursor-pointer group">
                       <input
                         type="checkbox"
@@ -6964,7 +7232,7 @@ const App = () => {
                         厚生年金
                       </span>
                     </label>
-                    <label className="flex items-center gap-2 cursor-pointer group">
+                    <label className="flex items-center gap-2 cursor-pointer group border-l pl-6 border-slate-300">
                       <input
                         type="checkbox"
                         checked={editingMaster.employmentIns === 1}
@@ -6980,9 +7248,28 @@ const App = () => {
                         雇用保険
                       </span>
                     </label>
+                    <label className="flex items-center gap-2 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={editingMaster.workersCompIns !== 0} // 未設定時はtrue
+                        onChange={(e) =>
+                          setEditingMaster({
+                            ...editingMaster,
+                            workersCompIns: e.target.checked ? 1 : 0,
+                          })
+                        }
+                        className="w-4 h-4 text-amber-500 border-gray-300 rounded focus:ring-amber-500 cursor-pointer"
+                      />
+                      <span className="text-sm font-bold text-slate-700 group-hover:text-amber-600 transition-colors flex items-center gap-1">
+                        労災保険{" "}
+                        <span className="text-[10px] text-slate-400 font-normal">
+                          (役員等は外す)
+                        </span>
+                      </span>
+                    </label>
                   </div>
                   <p className="text-[10px] text-slate-400">
-                    ※チェックを外すと、その保険料は自動計算されず「0円」となります。
+                    ※チェックを外すと、給与計算や各種申告集計の対象から自動で除外されます。
                   </p>
                 </div>
               </div>
@@ -7036,61 +7323,6 @@ const App = () => {
           </div>
         </div>
       )}
-
-      {/* ＝＝＝ 給与明細プレビュー モーダル (一括印刷) ＝＝＝ */}
-      {isBulkPrintOpen &&
-        (() => {
-          const activeEmployees = Object.entries(employees).filter(
-            ([id, emp]) => emp.master?.status !== "retired"
-          );
-          return (
-            <div
-              id="modal-backdrop-bulk"
-              className="fixed inset-0 bg-slate-900/60 z-[100] flex justify-center items-start overflow-y-auto py-10 backdrop-blur-sm transition-opacity"
-            >
-              <div className="print-area w-[850px] relative print:w-full">
-                <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
-                  <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
-                    <div className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                      <span className="text-indigo-600">一括印刷</span>
-                      <span className="text-slate-500 text-xs">
-                        ({selectedYear}年度 {parseInt(selectedListMonth, 10)}
-                        月支給分)
-                      </span>
-                      <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs">
-                        対象 {activeEmployees.length}名
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => window.print()}
-                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors disabled:opacity-50"
-                      disabled={activeEmployees.length === 0}
-                    >
-                      <Printer size={16} /> 印刷する
-                    </button>
-                    <button
-                      onClick={() => setIsBulkPrintOpen(false)}
-                      className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
-                    >
-                      <X size={16} /> 閉じる
-                    </button>
-                  </div>
-                </div>
-                <div className="space-y-8 print:space-y-0">
-                  {activeEmployees.length > 0 ? (
-                    activeEmployees.map(([id, emp]) =>
-                      renderPayslip(id, emp, selectedListMonth)
-                    )
-                  ) : (
-                    <div className="bg-white p-10 text-center text-slate-500 rounded-lg shadow no-print font-bold">
-                      印刷対象の従業員がいません。
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })()}
 
       {/* ＝＝＝ 給与明細プレビュー モーダル (一括印刷) ＝＝＝ */}
       {isBulkPrintOpen &&

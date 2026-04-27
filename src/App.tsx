@@ -902,6 +902,9 @@ const App = () => {
   const [isLedgerPrintOpen, setIsLedgerPrintOpen] = useState(false); // ★追加: 賃金台帳の印刷モーダル状態
   const [isResidentTaxModalOpen, setIsResidentTaxModalOpen] = useState(false); // ★追加: 住民税管理モーダル状態
 
+  const [aggMode, setAggMode] = useState("special1"); // ★追加: 集計モード (monthly / special1 / special2)
+  const [aggMonth, setAggMonth] = useState("01"); // ★追加: 集計対象月 (毎月納付の場合)
+
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
   }, [employees, settings]);
@@ -1738,6 +1741,7 @@ const App = () => {
         bonus2: defaultSums,
         bonusTotal: defaultSums,
         bonusResults: defaultSums,
+        getsuhenAlerts: {},
       };
 
     const allowanceDefs =
@@ -1816,6 +1820,79 @@ const App = () => {
       sums.residentTax += Number(row.residentTax) || 0;
       sums.netPay += monthlyResult.netPay || 0;
     });
+
+    // ★追加: 月額変更（随時改定）のアラート判定ロジック
+    const getsuhenAlerts = {};
+    const table =
+      settings?.standardRewardTable?.length > 0
+        ? settings.standardRewardTable
+        : DEFAULT_STD_REWARD_TABLE;
+
+    for (let i = 3; i < MONTHS.length; i++) {
+      const m1 = MONTHS[i - 3];
+      const m2 = MONTHS[i - 2];
+      const m3 = MONTHS[i - 1];
+      const targetM = MONTHS[i]; // 4ヶ月目（アラートを出す月）
+
+      // 社会保険の対象となる報酬（基本給＋社保対象手当）を計算するヘルパー
+      const getSocialGross = (m) => {
+        const r = currentYearData.monthly[m] || {};
+        let alw = 0;
+        allowanceDefs.forEach((d) => {
+          if (d.isSocialIns) alw += Number(r.allowanceAmounts?.[d.id]) || 0;
+        });
+        return (Number(r.basePay) || 0) + alw;
+      };
+
+      const sg1 = getSocialGross(m1);
+      const sg2 = getSocialGross(m2);
+      const sg3 = getSocialGross(m3);
+
+      // 3ヶ月とも給与実績がある場合のみチェック
+      if (sg1 > 0 && sg2 > 0 && sg3 > 0) {
+        const d1 = currentYearData.monthly[m1]?.workingDays;
+        const d2 = currentYearData.monthly[m2]?.workingDays;
+        const d3 = currentYearData.monthly[m3]?.workingDays;
+        // 支払基礎日数が未入力、または17日以上であれば月変の対象とする
+        const isDaysOk = (d) => !d || Number(d) >= 17;
+
+        if (isDaysOk(d1) && isDaysOk(d2) && isDaysOk(d3)) {
+          const avg = Math.floor((sg1 + sg2 + sg3) / 3);
+          const newGradeRow = table.find(
+            (r) =>
+              avg >= Number(r.min) &&
+              (r.max === Infinity || avg < Number(r.max))
+          );
+
+          // 現在適用されている標準報酬月額（M-1の実際の値）
+          const currentStd =
+            Number(currentYearData.monthly[m3]?.stdAmount) ||
+            monthlyResults[m3]?.estStdAmount ||
+            0;
+          const currentGradeRow = table.find(
+            (r) =>
+              currentStd >= Number(r.min) &&
+              (r.max === Infinity || currentStd < Number(r.max))
+          );
+
+          // 2等級以上の差が出ているか判定
+          if (newGradeRow && currentGradeRow) {
+            const diff = Math.abs(
+              Number(newGradeRow.grade) - Number(currentGradeRow.grade)
+            );
+            if (diff >= 2) {
+              getsuhenAlerts[targetM] = {
+                diff,
+                avg,
+                oldGrade: currentGradeRow.grade,
+                newGrade: newGradeRow.grade,
+                upDown: newGradeRow.grade > currentGradeRow.grade ? "⤴" : "⤵",
+              };
+            }
+          }
+        }
+      }
+    }
 
     const calcBonus = (b) => {
       if (!b) return { ...defaultSums };
@@ -2370,6 +2447,16 @@ const App = () => {
             }`}
           >
             <TableIcon size={18} /> 源泉徴収税額表
+          </button>
+          <button
+            onClick={() => setActiveTab("aggregation")}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
+              activeTab === "aggregation"
+                ? "bg-rose-600 text-white shadow-lg"
+                : "text-slate-400 hover:bg-slate-800 hover:text-white"
+            }`}
+          >
+            <FileText size={18} /> 集計・申告
           </button>
         </nav>
 
@@ -4351,6 +4438,48 @@ const App = () => {
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                           </tr>
 
+                          {/* ▼ 追加: 月額変更（随時改定）アラート行 ▼ */}
+                          <tr className="bg-rose-50/30">
+                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-rose-50/90 font-bold flex justify-between items-center text-[11px] text-rose-600 border-l-4 border-l-rose-400">
+                              月変(随時改定)アラート{" "}
+                              <span className="text-[8px] bg-rose-100 text-rose-500 px-1 border border-rose-200 rounded font-normal">
+                                自動判定
+                              </span>
+                            </td>
+                            {MONTHS.map((m) => {
+                              const alert = results.getsuhenAlerts?.[m];
+                              return (
+                                <td
+                                  key={m}
+                                  className={`border border-gray-300 p-0.5 text-center align-middle relative ${
+                                    alert ? "bg-rose-100/50" : "bg-white"
+                                  }`}
+                                >
+                                  {alert ? (
+                                    <div className="flex flex-col items-center justify-center p-0.5 animate-pulse">
+                                      <span className="text-[9px] font-black text-rose-600 leading-none">
+                                        ⚠️月変対象
+                                      </span>
+                                      <span className="text-[8px] text-rose-500 font-bold mt-0.5">
+                                        {alert.oldGrade}級{alert.upDown}
+                                        {alert.newGrade}級
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-300 text-[10px]">
+                                      -
+                                    </span>
+                                  )}
+                                </td>
+                              );
+                            })}
+                            <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[270px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[190px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-[100px] z-25 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                            <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
+                          </tr>
+
                           <tr className="bg-rose-50/50">
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-rose-50/50 font-bold text-rose-600 flex justify-between items-center text-[11px]">
                               介護保険 加入有無{" "}
@@ -6069,6 +6198,548 @@ const App = () => {
             </div>
           </div>
         )}
+
+        {/* --- 集計・申告 独立画面 --- */}
+        {activeTab === "aggregation" &&
+          (() => {
+            const isSantei = aggMode === "santei";
+
+            // --- 1. 源泉所得税 集計ロジック (santei以外の場合) ---
+            let targetMonths = [];
+            let periodText = "";
+            if (aggMode === "monthly") {
+              targetMonths = [aggMonth];
+              periodText = `${parseInt(aggMonth, 10)}月支給分`;
+            } else if (aggMode === "special1") {
+              targetMonths = ["01", "02", "03", "04", "05", "06"];
+              periodText = "1月〜6月支給分 (納期の特例：7月10日納付)";
+            } else if (aggMode === "special2") {
+              targetMonths = ["07", "08", "09", "10", "11", "12"];
+              periodText = "7月〜12月支給分 (納期の特例：翌年1月20日納付)";
+            } else if (isSantei) {
+              periodText = "4月〜6月支給分実績 (定時決定・算定基礎届)";
+            }
+
+            let totalHeadcount = 0;
+            let totalGrossPay = 0;
+            let totalIncomeTax = 0;
+
+            // 賞与の簡易集計ヘルパー
+            const getBonusAggregation = (empData, bonusKey) => {
+              const b = empData?.years?.[selectedYear]?.[bonusKey];
+              if (!b || !b.payDate) return null;
+              const mStr = b.payDate.split("-")[1]; // YYYY-MM-DD から MM を抽出
+              let tAllowances = 0;
+              Object.values(b.allowanceAmounts || {}).forEach(
+                (v) => (tAllowances += Number(v) || 0)
+              );
+              return {
+                monthStr: mStr,
+                gross: (Number(b.basePay) || 0) + tAllowances,
+                tax: Number(b.incomeTax) || 0,
+              };
+            };
+
+            if (!isSantei) {
+              Object.values(employees).forEach((emp) => {
+                const yearData = emp.data?.years?.[selectedYear];
+                if (!yearData) return;
+
+                targetMonths.forEach((m) => {
+                  const row = yearData.monthly[m];
+                  if (
+                    row &&
+                    (Number(row.basePay) > 0 ||
+                      Object.values(row.allowanceAmounts || {}).some(
+                        (v) => Number(v) > 0
+                      ))
+                  ) {
+                    const res = calculateMonthlyResult(
+                      emp.master,
+                      row,
+                      settings,
+                      m
+                    );
+                    totalHeadcount += 1;
+                    totalGrossPay += res.grossPay;
+                    totalIncomeTax += res.incomeTax;
+                  }
+                });
+
+                const b1 = getBonusAggregation(emp.data, "bonus");
+                if (b1 && targetMonths.includes(b1.monthStr) && b1.gross > 0) {
+                  totalHeadcount += 1;
+                  totalGrossPay += b1.gross;
+                  totalIncomeTax += b1.tax;
+                }
+                const b2 = getBonusAggregation(emp.data, "bonus2");
+                if (b2 && targetMonths.includes(b2.monthStr) && b2.gross > 0) {
+                  totalHeadcount += 1;
+                  totalGrossPay += b2.gross;
+                  totalIncomeTax += b2.tax;
+                }
+              });
+            }
+
+            // --- 2. 算定基礎届 集計ロジック ---
+            let santeiData = [];
+            if (isSantei) {
+              santeiData = Object.entries(employees)
+                .filter(([id, emp]) => emp.master?.status !== "retired") // 在籍者のみ
+                .map(([id, emp]) => {
+                  const yearData = emp.data?.years?.[selectedYear];
+                  if (!yearData) return null;
+
+                  const allowanceDefs =
+                    settings?.allowanceDefinitions?.length > 0
+                      ? settings.allowanceDefinitions
+                      : emp.master?.allowanceDefinitions || [];
+                  const table =
+                    settings?.standardRewardTable?.length > 0
+                      ? settings.standardRewardTable
+                      : DEFAULT_STD_REWARD_TABLE;
+
+                  const getMonthData = (m) => {
+                    const row = yearData.monthly[m] || {};
+                    const days = Number(row.workingDays) || 0;
+                    let socialGross = 0;
+                    // 基本給か手当が入力されていれば計算
+                    if (
+                      row.basePay !== undefined ||
+                      Object.keys(row.allowanceAmounts || {}).length > 0
+                    ) {
+                      socialGross += Number(row.basePay) || 0;
+                      allowanceDefs.forEach((def) => {
+                        if (def.isSocialIns)
+                          socialGross +=
+                            Number(row.allowanceAmounts?.[def.id]) || 0;
+                      });
+                    }
+                    return { days, socialGross, isTarget: days >= 17 };
+                  };
+
+                  const apr = getMonthData("04");
+                  const may = getMonthData("05");
+                  const jun = getMonthData("06");
+
+                  let validMonthsCount = 0;
+                  let totalSocialGross = 0;
+                  if (apr.isTarget) {
+                    validMonthsCount++;
+                    totalSocialGross += apr.socialGross;
+                  }
+                  if (may.isTarget) {
+                    validMonthsCount++;
+                    totalSocialGross += may.socialGross;
+                  }
+                  if (jun.isTarget) {
+                    validMonthsCount++;
+                    totalSocialGross += jun.socialGross;
+                  }
+
+                  const average =
+                    validMonthsCount > 0
+                      ? Math.floor(totalSocialGross / validMonthsCount)
+                      : 0;
+                  const newGradeRow = table.find(
+                    (r) =>
+                      average >= Number(r.min) &&
+                      (r.max === Infinity || average < Number(r.max))
+                  );
+
+                  const currentStd =
+                    Number(yearData.monthly["06"]?.stdAmount) || 0;
+                  const currentGradeRow =
+                    currentStd > 0
+                      ? table.find(
+                          (r) =>
+                            currentStd >= Number(r.min) &&
+                            (r.max === Infinity || currentStd < Number(r.max))
+                        )
+                      : null;
+
+                  return {
+                    id,
+                    code: emp.master?.employeeCode || "-",
+                    name: emp.master?.name || "未設定",
+                    apr,
+                    may,
+                    jun,
+                    validMonthsCount,
+                    totalSocialGross,
+                    average,
+                    newStd: newGradeRow ? newGradeRow.monthlyAmount : 0,
+                    newGrade: newGradeRow ? newGradeRow.grade : "-",
+                    currentStd,
+                    currentGrade: currentGradeRow ? currentGradeRow.grade : "-",
+                  };
+                })
+                .filter(Boolean);
+            }
+
+            return (
+              <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
+                <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 max-w-5xl mx-auto mt-4 mb-20">
+                  <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-8">
+                    <div>
+                      <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                        {isSantei ? (
+                          <Users className="text-emerald-500" size={28} />
+                        ) : (
+                          <FileText className="text-rose-500" size={28} />
+                        )}
+                        {isSantei
+                          ? "算定基礎届 シミュレーター"
+                          : "源泉所得税 集計パネル"}
+                      </h2>
+                      <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
+                        {isSantei
+                          ? "Standard Remuneration Simulator"
+                          : "Tax Aggregation"}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 shadow-sm">
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                        対象年度:
+                      </span>
+                      <select
+                        value={selectedYear || ""}
+                        onChange={(e) => setSelectedYear(e.target.value)}
+                        className="bg-transparent border-none outline-none text-lg font-black text-slate-800 cursor-pointer"
+                      >
+                        {yearsList.map((y) => (
+                          <option key={y} value={y}>
+                            {y}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* 集計条件の選択 */}
+                  <div
+                    className={`flex flex-wrap items-center gap-4 mb-8 p-4 rounded-xl border ${
+                      isSantei
+                        ? "bg-emerald-50/50 border-emerald-100"
+                        : "bg-rose-50/50 border-rose-100"
+                    }`}
+                  >
+                    <div className="flex gap-2 border-r border-slate-300 pr-4 mr-2">
+                      <button
+                        onClick={() => setAggMode("special1")}
+                        className={`px-4 py-2 rounded-lg text-[11px] font-black transition-all shadow-sm border ${
+                          aggMode === "special1"
+                            ? "bg-rose-600 text-white border-rose-600"
+                            : "bg-white text-slate-500 border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        納期の特例（1〜6月）
+                      </button>
+                      <button
+                        onClick={() => setAggMode("special2")}
+                        className={`px-4 py-2 rounded-lg text-[11px] font-black transition-all shadow-sm border ${
+                          aggMode === "special2"
+                            ? "bg-rose-600 text-white border-rose-600"
+                            : "bg-white text-slate-500 border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        納期の特例（7〜12月）
+                      </button>
+                      <button
+                        onClick={() => setAggMode("monthly")}
+                        className={`px-4 py-2 rounded-lg text-[11px] font-black transition-all shadow-sm border ${
+                          aggMode === "monthly"
+                            ? "bg-slate-700 text-white border-slate-700"
+                            : "bg-white text-slate-500 border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        毎月納付 (所得税)
+                      </button>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setAggMode("santei")}
+                        className={`px-4 py-2 rounded-lg text-[11px] font-black transition-all shadow-sm border ${
+                          aggMode === "santei"
+                            ? "bg-emerald-600 text-white border-emerald-600"
+                            : "bg-white text-slate-500 border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        算定基礎届 (4〜6月実績)
+                      </button>
+                    </div>
+
+                    {aggMode === "monthly" && (
+                      <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg border border-slate-300 shadow-sm ml-auto">
+                        <span className="text-[10px] font-bold text-slate-500">
+                          対象月:
+                        </span>
+                        <select
+                          value={aggMonth}
+                          onChange={(e) => setAggMonth(e.target.value)}
+                          className="bg-transparent border-none outline-none text-xs font-black text-slate-800 cursor-pointer"
+                        >
+                          {MONTHS.map((m) => (
+                            <option key={m} value={m}>
+                              {parseInt(m, 10)}月支給分
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* === 結果パネル === */}
+                  {isSantei ? (
+                    // 算定基礎シミュレーターのUI
+                    <div className="bg-white border-2 border-emerald-800 rounded-lg p-6 relative overflow-hidden">
+                      <div className="absolute top-0 left-0 bg-emerald-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
+                        算定基礎 判定結果一覧
+                      </div>
+
+                      <div className="text-center mb-6 mt-4">
+                        <h3 className="text-xl font-black text-emerald-800">
+                          {selectedYear}年度 定時決定シミュレーション
+                        </h3>
+                        <p className="text-[10px] text-slate-400 mt-2">
+                          ※4月・5月・6月支給分の社会保険対象額を抽出し、支払基礎日数17日以上の月のみで平均を算出しています。
+                          <br />
+                          ※算定された「新等級・新月額」は、手動で9月支給分以降の「実際の標準報酬月額」へ転記して使用してください。
+                        </p>
+                      </div>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-emerald-50 text-emerald-800 font-black whitespace-nowrap">
+                              <th className="border border-emerald-200 p-2 min-w-[120px]">
+                                社員コード / 氏名
+                              </th>
+                              <th className="border border-emerald-200 p-2 min-w-[100px]">
+                                4月支給
+                                <br />
+                                <span className="font-normal text-[9px] text-emerald-600">
+                                  日数 / 報酬額
+                                </span>
+                              </th>
+                              <th className="border border-emerald-200 p-2 min-w-[100px]">
+                                5月支給
+                                <br />
+                                <span className="font-normal text-[9px] text-emerald-600">
+                                  日数 / 報酬額
+                                </span>
+                              </th>
+                              <th className="border border-emerald-200 p-2 min-w-[100px]">
+                                6月支給
+                                <br />
+                                <span className="font-normal text-[9px] text-emerald-600">
+                                  日数 / 報酬額
+                                </span>
+                              </th>
+                              <th className="border border-emerald-200 p-2 bg-emerald-100 min-w-[110px]">
+                                総計 / 平均額
+                              </th>
+                              <th className="border border-emerald-200 p-2 min-w-[110px]">
+                                従前の標準報酬
+                                <br />
+                                <span className="font-normal text-[9px] text-emerald-600">
+                                  等級 / 月額
+                                </span>
+                              </th>
+                              <th className="border border-emerald-200 p-2 bg-rose-50 text-rose-700 min-w-[110px]">
+                                算定後の標準報酬
+                                <br />
+                                <span className="font-normal text-[9px] text-rose-500">
+                                  新等級 / 新月額
+                                </span>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {santeiData.map((d) => (
+                              <tr
+                                key={d.id}
+                                className="border-b border-emerald-100 hover:bg-slate-50 text-center transition-colors"
+                              >
+                                <td className="p-2 border-r border-emerald-100 text-left bg-white">
+                                  <div className="font-mono text-slate-400 text-[10px]">
+                                    {d.code}
+                                  </div>
+                                  <div className="font-bold text-slate-700 truncate">
+                                    {d.name}
+                                  </div>
+                                </td>
+                                <td className="p-2 border-r border-emerald-100 bg-white">
+                                  <div
+                                    className={`font-bold ${
+                                      d.apr.isTarget
+                                        ? "text-slate-600"
+                                        : "text-red-400 line-through"
+                                    }`}
+                                  >
+                                    {d.apr.days}日
+                                  </div>
+                                  <div
+                                    className={`font-mono ${
+                                      d.apr.isTarget
+                                        ? "text-slate-800"
+                                        : "text-slate-300"
+                                    }`}
+                                  >
+                                    {formatCurrency(d.apr.socialGross)}
+                                  </div>
+                                </td>
+                                <td className="p-2 border-r border-emerald-100 bg-white">
+                                  <div
+                                    className={`font-bold ${
+                                      d.may.isTarget
+                                        ? "text-slate-600"
+                                        : "text-red-400 line-through"
+                                    }`}
+                                  >
+                                    {d.may.days}日
+                                  </div>
+                                  <div
+                                    className={`font-mono ${
+                                      d.may.isTarget
+                                        ? "text-slate-800"
+                                        : "text-slate-300"
+                                    }`}
+                                  >
+                                    {formatCurrency(d.may.socialGross)}
+                                  </div>
+                                </td>
+                                <td className="p-2 border-r border-emerald-100 bg-white">
+                                  <div
+                                    className={`font-bold ${
+                                      d.jun.isTarget
+                                        ? "text-slate-600"
+                                        : "text-red-400 line-through"
+                                    }`}
+                                  >
+                                    {d.jun.days}日
+                                  </div>
+                                  <div
+                                    className={`font-mono ${
+                                      d.jun.isTarget
+                                        ? "text-slate-800"
+                                        : "text-slate-300"
+                                    }`}
+                                  >
+                                    {formatCurrency(d.jun.socialGross)}
+                                  </div>
+                                </td>
+                                <td className="p-2 border-r border-emerald-100 bg-emerald-50/50">
+                                  <div className="font-bold text-slate-500 text-[10px]">
+                                    計: {formatCurrency(d.totalSocialGross)}{" "}
+                                    <span className="text-[9px]">
+                                      ({d.validMonthsCount}ヶ月)
+                                    </span>
+                                  </div>
+                                  <div className="font-black text-emerald-700 font-mono mt-0.5 text-sm">
+                                    平: {formatCurrency(d.average)}
+                                  </div>
+                                </td>
+                                <td className="p-2 border-r border-emerald-100 bg-white">
+                                  <div className="font-bold text-slate-400 text-[10px]">
+                                    {d.currentGrade}級
+                                  </div>
+                                  <div className="font-mono font-bold text-slate-500">
+                                    {formatCurrency(d.currentStd)}
+                                  </div>
+                                </td>
+                                <td className="p-2 bg-rose-50/50 relative">
+                                  {d.currentGrade !== d.newGrade &&
+                                    d.validMonthsCount > 0 && (
+                                      <div className="absolute top-0 right-0 p-0.5 px-1 bg-rose-500 text-white text-[8px] font-black rounded-bl-sm">
+                                        改定
+                                      </div>
+                                    )}
+                                  <div className="font-black text-rose-500 text-[10px]">
+                                    {d.newGrade}級
+                                  </div>
+                                  <div className="font-black font-mono text-rose-700 text-sm">
+                                    {formatCurrency(d.newStd)}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                            {santeiData.length === 0 && (
+                              <tr>
+                                <td
+                                  colSpan={7}
+                                  className="p-8 text-center text-slate-400 font-bold"
+                                >
+                                  対象となるデータがありません
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    // 所得税 集計パネルのUI
+                    <div className="bg-white border-2 border-slate-800 rounded-lg p-8 relative">
+                      <div className="absolute top-0 left-0 bg-slate-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
+                        納付書 転記用データ
+                      </div>
+
+                      <div className="text-center mb-8 mt-2">
+                        <h3 className="text-xl font-black text-slate-800">
+                          {selectedYear}年度
+                        </h3>
+                        <p className="text-sm font-bold text-slate-500 mt-1">
+                          {periodText}
+                        </p>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          ※この期間に支給日が設定されている給与・賞与の合算値です
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-0 border-t-2 border-l-2 border-slate-800 text-slate-800">
+                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col">
+                          <div className="bg-slate-100 text-center py-2 font-black text-sm border-b-2 border-slate-800">
+                            延べ人員
+                          </div>
+                          <div className="flex-1 flex items-center justify-center p-6 text-3xl font-mono font-black tracking-wider">
+                            {totalHeadcount}{" "}
+                            <span className="text-base font-bold ml-1 text-slate-500 font-sans tracking-normal">
+                              人
+                            </span>
+                          </div>
+                        </div>
+                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col bg-blue-50/30">
+                          <div className="bg-blue-100 text-blue-900 text-center py-2 font-black text-sm border-b-2 border-slate-800">
+                            総支給額
+                          </div>
+                          <div className="flex-1 flex items-center justify-center p-6 text-3xl font-mono font-black text-blue-700 tracking-wider">
+                            <span className="text-lg font-bold mr-1 text-blue-400">
+                              ¥
+                            </span>
+                            {formatCurrency(totalGrossPay)}
+                          </div>
+                        </div>
+                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col bg-rose-50/30">
+                          <div className="bg-rose-100 text-rose-900 text-center py-2 font-black text-sm border-b-2 border-slate-800">
+                            税額 (所得税)
+                          </div>
+                          <div className="flex-1 flex items-center justify-center p-6 text-4xl font-mono font-black text-rose-600 tracking-wider">
+                            <span className="text-xl font-bold mr-1 text-rose-400">
+                              ¥
+                            </span>
+                            {formatCurrency(totalIncomeTax)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
       </main>
 
       {/* ＝＝＝ 社員マスター編集 モーダル ＝＝＝ */}

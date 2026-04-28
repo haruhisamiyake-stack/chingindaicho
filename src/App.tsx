@@ -129,6 +129,8 @@ const DEFAULT_STD_REWARD_TABLE = [
   { grade: 50, min: 1295000, max: 99999999, monthlyAmount: 1390000 },
 ];
 
+let globalTaxTables = {}; // ★追加：税額表のグローバル参照用
+
 const DEFAULT_SETTINGS = {
   companyName: "株式会社サンプル",
   companyAddress: "",
@@ -137,6 +139,7 @@ const DEFAULT_SETTINGS = {
   closingDay: "末",
   paymentDay: "翌月15",
   editableYear: "R08",
+  taxCalcMethod: "taxTable", // ★追加：所得税計算方式 (taxTable or densan)
   allowanceDefinitions: [
     {
       id: "extra",
@@ -156,6 +159,59 @@ const DEFAULT_SETTINGS = {
   deductionDefinitions: [{ id: "union", name: "組合費" }],
   rateSchedules: DEFAULT_RATE_SCHEDULES,
   standardRewardTable: DEFAULT_STD_REWARD_TABLE,
+};
+
+// --- 税額表CSVパーサー（新規追加） ---
+const parseTaxTableCsv = (csvText) => {
+  const lines = csvText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) throw new Error("データがありません");
+
+  const firstLineCols = lines[0].split(",");
+  let startIndex = 0;
+  if (isNaN(Number(firstLineCols[2]))) {
+    startIndex = 1;
+  }
+
+  const rows = [];
+  for (let i = startIndex; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    if (cols.length < 14) continue;
+
+    const min = Number(cols[2]);
+    const maxStr = cols[3].toLowerCase();
+    const max =
+      maxStr === "infinity" || maxStr === "" || maxStr === "以上"
+        ? Infinity
+        : Number(cols[3]);
+
+    const kou = [
+      Number(cols[4]),
+      Number(cols[5]),
+      Number(cols[6]),
+      Number(cols[7]),
+      Number(cols[8]),
+      Number(cols[9]),
+      Number(cols[10]),
+      Number(cols[11]),
+    ];
+
+    const otsu_type = cols[12];
+    const otsu_value = Number(cols[13]);
+
+    if (isNaN(min)) continue;
+
+    rows.push({
+      min,
+      max,
+      kou,
+      otsu: { type: otsu_type, value: otsu_value },
+    });
+  }
+  if (rows.length === 0) throw new Error("有効なデータ行がありませんでした");
+  return rows;
 };
 
 // --- 年度管理ロジック ---
@@ -728,110 +784,111 @@ const calculateIncomeTax = (
   dependents,
   isOtsu,
   requireExact = false,
-  master = null
+  master = null,
+  settings = null,
+  yearStr = null
 ) => {
   const log = [];
+  const method = settings?.taxCalcMethod || "taxTable";
 
-  // --- 乙欄 ---
+  if ((method === "densan" || requireExact) && !isOtsu) {
+    log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
+    const densanResult = calculateIncomeTaxByDensanReiwa8({
+      taxableAfterSocial,
+      master,
+      dependents,
+    });
+    if (densanResult && densanResult.log) log.push(...densanResult.log);
+    return { tax: densanResult.tax, warning: densanResult.warning, log };
+  }
+
+  const tableKey = `${yearStr}_monthly`;
+  const currentTable = globalTaxTables[tableKey];
+
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    log.push(`[所得税計算] ${yearStr}年度の月額表が未登録です`);
+    return {
+      tax: 0,
+      warning: "税額表未登録のため要確認",
+      log,
+    };
+  }
+
+  const row = currentTable.rows.find(
+    (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
+  );
+
+  if (!row) {
+    log.push(`[所得税計算] 課税対象額が税額表の範囲外です`);
+    return { tax: 0, warning: "税額表の範囲外です", log };
+  }
+
   if (isOtsu) {
-    if (taxableAfterSocial < 105000) {
+    if (row.otsu.type === "rate") {
+      const tax = Math.floor(taxableAfterSocial * row.otsu.value);
       log.push(
-        `[所得税計算] 乙欄適用: 105,000円未満のため ${formatCurrency(
+        `[所得税計算] 乙欄適用(税額表): ${formatCurrency(
           taxableAfterSocial
-        )} × 3.063%`
+        )} × ${row.otsu.value}`
       );
-      return {
-        tax: Math.floor(taxableAfterSocial * 0.03063),
-        warning: null,
-        log,
-      };
+      return { tax, warning: null, log };
     } else {
-      log.push(`[所得税計算] 乙欄適用: 105,000円以上は自動計算未対応`);
-      return {
-        tax: null,
-        warning:
-          "乙欄で105,000円以上の正式な計算式が未設定のため、手入力で税額を設定してください。",
-        log,
-      };
+      log.push(`[所得税計算] 乙欄適用(税額表): 固定額 ${row.otsu.value}`);
+      return { tax: row.otsu.value, warning: null, log };
     }
+  } else {
+    const depCount = Math.min(Math.max(0, dependents), 7);
+    const tax = row.kou[depCount] || 0;
+    log.push(
+      `[所得税計算] 甲欄適用(税額表): 扶養${depCount}人枠 -> ${formatCurrency(
+        tax
+      )}円`
+    );
+    return { tax, warning: null, log };
   }
-
-  // --- 甲欄 ---
-  log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
-  const densanResult = calculateIncomeTaxByDensanReiwa8({
-    taxableAfterSocial,
-    master,
-    dependents,
-  });
-
-  if (densanResult && densanResult.log) {
-    log.push(...densanResult.log);
-  }
-
-  return {
-    tax: densanResult.tax,
-    warning: densanResult.warning,
-    log,
-  };
 };
 
-const getBonusTaxRate = (lastMonthSalaryAfterSocial, dependents, isOtsu) => {
+const getBonusTaxRate = (
+  lastMonthSalaryAfterSocial,
+  dependents,
+  isOtsu,
+  yearStr
+) => {
   const log = [];
-  let warning = null;
+  const tableKey = `${yearStr}_bonus`;
+  const currentTable = globalTaxTables[tableKey];
+
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    const warning = "税額表未登録のため要確認";
+    log.push(`[賞与税率] ${warning}`);
+    return { rate: 0, warning, log };
+  }
+
+  const row = currentTable.rows.find(
+    (r) =>
+      lastMonthSalaryAfterSocial >= r.min && lastMonthSalaryAfterSocial < r.max
+  );
+
+  if (!row) {
+    return { rate: 0, warning: "賞与算出率表の範囲外です", log };
+  }
 
   if (isOtsu) {
-    let rate = 0;
-    if (lastMonthSalaryAfterSocial < 68000) rate = 0.03063;
-    else if (lastMonthSalaryAfterSocial < 79000) rate = 0.04084;
-    else rate = 0.2042;
+    const rate = row.otsu.type === "rate" ? row.otsu.value : 0;
+    return { rate, warning: null, log };
+  } else {
+    const depCount = Math.min(Math.max(0, dependents), 7);
+    const rate = row.kou[depCount] || 0;
     return { rate, warning: null, log };
   }
-
-  let effectiveDep = dependents;
-  if (dependents >= 4) {
-    effectiveDep = 3;
-    warning =
-      "賞与算出率表が扶養4人以上に未設定のため、3人扱いで仮計算しています。正しい税率や税額を手入力で修正してください。";
-    log.push(`※ 扶養${dependents}人ですが、算出率表未対応のため3人として参照`);
-  }
-
-  const dep = Math.max(0, effectiveDep);
-  const table = [
-    { rate: 0.4084, min: [1560000, 1600000, 1640000, 1680000] },
-    { rate: 0.39819, min: [1350000, 1390000, 1430000, 1470000] },
-    { rate: 0.38798, min: [1150000, 1190000, 1230000, 1270000] },
-    { rate: 0.36756, min: [1000000, 1040000, 1080000, 1120000] },
-    { rate: 0.34714, min: [950000, 990000, 1030000, 1070000] },
-    { rate: 0.32672, min: [900000, 940000, 980000, 1020000] },
-    { rate: 0.3063, min: [850000, 890000, 930000, 970000] },
-    { rate: 0.28588, min: [810000, 850000, 890000, 930000] },
-    { rate: 0.26546, min: [750000, 790000, 830000, 870000] },
-    { rate: 0.24504, min: [700000, 740000, 780000, 820000] },
-    { rate: 0.22462, min: [650000, 690000, 730000, 770000] },
-    { rate: 0.2042, min: [600000, 640000, 680000, 720000] },
-    { rate: 0.18378, min: [550000, 590000, 630000, 670000] },
-    { rate: 0.16336, min: [500000, 540000, 580000, 620000] },
-    { rate: 0.14294, min: [450000, 490000, 530000, 570000] },
-    { rate: 0.12252, min: [400000, 440000, 480000, 520000] },
-    { rate: 0.1021, min: [350000, 390000, 430000, 470000] },
-    { rate: 0.08168, min: [300000, 340000, 380000, 420000] },
-    { rate: 0.06126, min: [252000, 292000, 332000, 372000] },
-    { rate: 0.04084, min: [79000, 114000, 160000, 200000] },
-    { rate: 0.02042, min: [68000, 100000, 140000, 180000] },
-  ];
-
-  for (let i = 0; i < table.length; i++) {
-    if (lastMonthSalaryAfterSocial >= table[i].min[dep]) {
-      return { rate: table[i].rate, warning, log };
-    }
-  }
-  return { rate: 0, warning, log };
 };
 
 const calculateBonusIncomeTax = (
   bonusAfterSocial,
   lastMonthSalaryAfterSocial,
-  master
+  master,
+  settings,
+  yearStr
 ) => {
   const dependents = master?.dependents || 0;
   const isOtsu = master?.taxType === 1;
@@ -852,7 +909,15 @@ const calculateBonusIncomeTax = (
   if (lastMonthSalaryAfterSocial <= 0) {
     log.push(`- 前月給与なし計算方式を適用 (1/${divisor} 計算)`);
     const sixth = Math.floor(bonusAfterSocial / divisor);
-    const result = calculateIncomeTax(sixth, dependents, isOtsu, true, master);
+    const result = calculateIncomeTax(
+      sixth,
+      dependents,
+      isOtsu,
+      true,
+      master,
+      settings,
+      yearStr
+    );
 
     const taxAmount =
       typeof result === "object" && result !== null && result.tax !== undefined
@@ -895,14 +960,18 @@ const calculateBonusIncomeTax = (
       dependents,
       isOtsu,
       true,
-      master
+      master,
+      settings,
+      yearStr
     );
     const resultLastMonth = calculateIncomeTax(
       lastMonthSalaryAfterSocial,
       dependents,
       isOtsu,
       true,
-      master
+      master,
+      settings,
+      yearStr
     );
 
     const taxBaseAmt =
@@ -969,7 +1038,8 @@ const calculateBonusIncomeTax = (
   const rateInfo = getBonusTaxRate(
     lastMonthSalaryAfterSocial,
     dependents,
-    isOtsu
+    isOtsu,
+    yearStr
   );
 
   if (rateInfo.log && rateInfo.log.length > 0) {
@@ -1149,7 +1219,9 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr) => {
     master.dependents,
     master.taxType === 1,
     false,
-    master
+    master,
+    settings,
+    yearStr
   );
   const incomeTax =
     typeof incomeTaxResult === "object" &&
@@ -1383,7 +1455,9 @@ const calculateBonusResult = ({
   const taxResult = calculateBonusIncomeTax(
     bonusAfterSocial,
     lastMonthSalaryAfterSocial,
-    master
+    master,
+    settings,
+    yearStr
   );
 
   if (taxResult.log) calcLog.push(...taxResult.log);
@@ -1561,6 +1635,84 @@ const App = () => {
 
   const [logModalData, setLogModalData] = useState(null); // ★追加: 計算ログモーダル用の状態
   const [checkModalData, setCheckModalData] = useState(null); // ★追加: 月次チェックモーダル用の状態
+
+  // ★ 新規追加ステート（税額表インポート用）
+  const [taxTables, setTaxTables] = useState({});
+  const [taxImportYear, setTaxImportYear] = useState("R08");
+  const [taxImportType, setTaxImportType] = useState("monthly");
+  const [taxImportFile, setTaxImportFile] = useState(null);
+  const [taxImportPreview, setTaxImportPreview] = useState(null);
+  const [taxImportError, setTaxImportError] = useState("");
+  const [isTaxImporting, setIsTaxImporting] = useState(false);
+
+  const handleTaxCsvChange = (e) => {
+    const file = e.target.files[0];
+    setTaxImportFile(file);
+    setTaxImportPreview(null);
+    setTaxImportError("");
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const rows = parseTaxTableCsv(event.target.result);
+        setTaxImportPreview({
+          year: taxImportYear,
+          type: taxImportType,
+          rows,
+        });
+      } catch (err) {
+        setTaxImportError(err.message);
+      }
+    };
+    reader.onerror = () =>
+      setTaxImportError("ファイルの読み込みに失敗しました");
+    reader.readAsText(file);
+  };
+
+  const handleExecuteTaxImport = async () => {
+    if (!taxImportPreview || !db || !userId) return;
+    setIsTaxImporting(true);
+    setTaxImportError("");
+    try {
+      const docId = `${taxImportPreview.year}_${taxImportPreview.type}`;
+      const docRef = doc(
+        db,
+        `artifacts/${appId}/users/${userId}/taxTables/${docId}`
+      );
+      await setDoc(docRef, {
+        year: taxImportPreview.year,
+        type: taxImportPreview.type,
+        importedAt: new Date().toISOString(),
+        rows: taxImportPreview.rows,
+      });
+      setTaxImportPreview(null);
+      setTaxImportFile(null);
+      const fileInput = document.getElementById("tax-csv-input");
+      if (fileInput) fileInput.value = "";
+      alert("税額表をインポートしました");
+    } catch (err) {
+      setTaxImportError("保存に失敗しました: " + err.message);
+    } finally {
+      setIsTaxImporting(false);
+    }
+  };
+
+  const handleDeleteTaxTable = async (docId) => {
+    if (
+      !window.confirm(
+        "この税額表を削除しますか？\n削除すると該当年度の税計算が0円になる場合があります。"
+      )
+    )
+      return;
+    try {
+      await deleteDoc(
+        doc(db, `artifacts/${appId}/users/${userId}/taxTables/${docId}`)
+      );
+    } catch (err) {
+      alert("削除に失敗しました");
+    }
+  };
 
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
@@ -1760,6 +1912,30 @@ const App = () => {
       }
     );
 
+    return () => unsubscribe();
+  }, [isAuthReady, userId, db]);
+
+  // ★ 追加：税額表データの取得
+  useEffect(() => {
+    if (!isAuthReady || !userId || !db) return;
+    const colRef = collection(
+      db,
+      `artifacts/${appId}/users/${userId}/taxTables`
+    );
+    const unsubscribe = onSnapshot(
+      colRef,
+      (snap) => {
+        const tables = {};
+        snap.forEach((doc) => {
+          tables[doc.id] = doc.data();
+        });
+        globalTaxTables = tables; // 計算ロジック用にグローバル参照を更新
+        setTaxTables(tables);
+      },
+      (err) => {
+        console.error(err);
+      }
+    );
     return () => unsubscribe();
   }, [isAuthReady, userId, db]);
 

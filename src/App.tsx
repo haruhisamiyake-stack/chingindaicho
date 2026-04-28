@@ -953,6 +953,14 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr) => {
       ? incomeTaxResult.tax
       : incomeTaxResult;
 
+  // ★追加：所得税計算から返される警告を取得
+  const taxWarning =
+    typeof incomeTaxResult === "object" &&
+    incomeTaxResult !== null &&
+    incomeTaxResult.warning !== undefined
+      ? incomeTaxResult.warning
+      : null;
+
   if (
     typeof incomeTaxResult === "object" &&
     incomeTaxResult !== null &&
@@ -1013,6 +1021,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr) => {
     childCare: ins.childCare,
     employment,
     incomeTax,
+    taxWarning, // ★追加：UI側に警告を渡す
     netPay,
     socialTotal,
     estStdAmount: estStdAmount,

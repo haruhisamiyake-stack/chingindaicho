@@ -187,7 +187,7 @@ const parseCSVLine = (line) => {
 };
 
 // --- 税額表CSVパーサー（バリデーション強化版） ---
-const parseTaxTableCsv = (csvText) => {
+const parseTaxTableCsv = (csvText, importType = "monthly") => {
   const lines = csvText
     .split("\n")
     .map((l) => l.trim())
@@ -196,7 +196,7 @@ const parseTaxTableCsv = (csvText) => {
 
   const firstLineCols = parseCSVLine(lines[0]);
   let startIndex = 0;
-  if (isNaN(Number(firstLineCols[2]))) {
+  if (isNaN(Number(firstLineCols[2])) && isNaN(Number(firstLineCols[1]))) {
     startIndex = 1; // ヘッダー行をスキップ
   }
 
@@ -205,56 +205,112 @@ const parseTaxTableCsv = (csvText) => {
     const rowNum = i + 1;
     const cols = parseCSVLine(lines[i]);
 
-    if (cols.length < 14) {
-      throw new Error(
-        `【行 ${rowNum}】列数が不足しています（14列必要ですが ${cols.length}列です）`
-      );
-    }
-
-    const min = Number(cols[2]);
-    if (isNaN(min))
-      throw new Error(`【行 ${rowNum}】「以上(min)」の値が数値ではありません`);
-
-    const maxStr = cols[3].toLowerCase();
-    const max =
-      maxStr === "infinity" || maxStr === "" || maxStr === "以上"
-        ? 999999999
-        : Number(cols[3]);
-    if (isNaN(max))
-      throw new Error(`【行 ${rowNum}】「未満(max)」の値が数値ではありません`);
-
-    if (min >= max)
-      throw new Error(
-        `【行 ${rowNum}】以上(${min}) が 未満(${max}) より大きくなっています`
-      );
-
-    const kou = [];
-    for (let j = 0; j <= 7; j++) {
-      const val = Number(cols[4 + j]);
-      if (isNaN(val))
+    if (importType === "bonus_nta") {
+      if (cols.length < 20) {
         throw new Error(
-          `【行 ${rowNum}】甲欄(扶養${j}人) の値が数値ではありません`
+          `【行 ${rowNum}】列数が不足しています（20列必要ですが ${cols.length}列です）`
         );
-      kou.push(val);
+      }
+      const rate = Number(cols[1]) / 100;
+      if (isNaN(rate))
+        throw new Error(`【行 ${rowNum}】「rate」の値が数値ではありません`);
+
+      const kouRanges = [];
+      for (let j = 0; j <= 7; j++) {
+        const minStr = cols[2 + j * 2];
+        const maxStr = cols[3 + j * 2];
+        const min = minStr && minStr !== "" ? Number(minStr) * 1000 : 0;
+        let max = 999999999;
+        if (
+          maxStr &&
+          maxStr.toLowerCase() !== "infinity" &&
+          maxStr !== "以上" &&
+          maxStr !== ""
+        ) {
+          max = Number(maxStr) * 1000;
+        }
+        if (isNaN(min) || isNaN(max))
+          throw new Error(`【行 ${rowNum}】甲欄${j}人の値が数値ではありません`);
+        kouRanges.push({ min, max });
+      }
+
+      const otsuMinStr = cols[18];
+      const otsuMaxStr = cols[19];
+      let otsuRange = null;
+      if (otsuMinStr !== undefined && otsuMinStr !== "") {
+        const min = Number(otsuMinStr) * 1000;
+        let max = 999999999;
+        if (
+          otsuMaxStr &&
+          otsuMaxStr.toLowerCase() !== "infinity" &&
+          otsuMaxStr !== "以上" &&
+          otsuMaxStr !== ""
+        ) {
+          max = Number(otsuMaxStr) * 1000;
+        }
+        if (isNaN(min) || isNaN(max))
+          throw new Error(`【行 ${rowNum}】乙欄の値が数値ではありません`);
+        otsuRange = { min, max };
+      }
+
+      rows.push({ rate, kouRanges, otsuRange });
+    } else {
+      // 月額表・日額表用ロジック
+      if (cols.length < 14) {
+        throw new Error(
+          `【行 ${rowNum}】列数が不足しています（14列必要ですが ${cols.length}列です）`
+        );
+      }
+
+      const min = Number(cols[2]);
+      if (isNaN(min))
+        throw new Error(
+          `【行 ${rowNum}】「以上(min)」の値が数値ではありません`
+        );
+
+      const maxStr = cols[3].toLowerCase();
+      const max =
+        maxStr === "infinity" || maxStr === "" || maxStr === "以上"
+          ? 999999999
+          : Number(cols[3]);
+      if (isNaN(max))
+        throw new Error(
+          `【行 ${rowNum}】「未満(max)」の値が数値ではありません`
+        );
+
+      if (min >= max)
+        throw new Error(
+          `【行 ${rowNum}】以上(${min}) が 未満(${max}) より大きくなっています`
+        );
+
+      const kou = [];
+      for (let j = 0; j <= 7; j++) {
+        const val = Number(cols[4 + j]);
+        if (isNaN(val))
+          throw new Error(
+            `【行 ${rowNum}】甲欄(扶養${j}人) の値が数値ではありません`
+          );
+        kou.push(val);
+      }
+
+      const otsu_type = cols[12].trim();
+      if (otsu_type !== "rate" && otsu_type !== "fixed") {
+        throw new Error(
+          `【行 ${rowNum}】乙欄の種類(otsu_type)は 'rate' または 'fixed' にしてください`
+        );
+      }
+
+      const otsu_value = Number(cols[13]);
+      if (isNaN(otsu_value))
+        throw new Error(`【行 ${rowNum}】乙欄の値が数値ではありません`);
+
+      rows.push({
+        min,
+        max,
+        kou,
+        otsu: { type: otsu_type, value: otsu_value },
+      });
     }
-
-    const otsu_type = cols[12].trim();
-    if (otsu_type !== "rate" && otsu_type !== "fixed") {
-      throw new Error(
-        `【行 ${rowNum}】乙欄の種類(otsu_type)は 'rate' または 'fixed' にしてください`
-      );
-    }
-
-    const otsu_value = Number(cols[13]);
-    if (isNaN(otsu_value))
-      throw new Error(`【行 ${rowNum}】乙欄の値が数値ではありません`);
-
-    rows.push({
-      min,
-      max,
-      kou,
-      otsu: { type: otsu_type, value: otsu_value },
-    });
   }
   if (rows.length === 0) throw new Error("有効なデータ行がありませんでした");
   return rows;
@@ -603,7 +659,7 @@ const getBonusTaxRate = (
   yearStr
 ) => {
   const log = [];
-  const tableKey = `${yearStr}_bonus`;
+  const tableKey = `${yearStr}_bonus_nta`;
   const currentTable = globalTaxTables[tableKey];
 
   if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
@@ -612,23 +668,35 @@ const getBonusTaxRate = (
     return { rate: 0, warning, log };
   }
 
-  const row = currentTable.rows.find(
-    (r) =>
-      lastMonthSalaryAfterSocial >= r.min && lastMonthSalaryAfterSocial < r.max
-  );
-
-  if (!row) {
-    return { rate: 0, warning: "賞与算出率表の範囲外です", log };
-  }
+  const depCount = Math.min(Math.max(0, dependents), 7);
+  let targetRate = null;
 
   if (isOtsu) {
-    const rate = row.otsu.type === "rate" ? row.otsu.value : 0;
-    return { rate, warning: null, log };
+    const row = currentTable.rows.find(
+      (r) =>
+        r.otsuRange &&
+        lastMonthSalaryAfterSocial >= r.otsuRange.min &&
+        lastMonthSalaryAfterSocial < r.otsuRange.max
+    );
+    if (row) targetRate = row.rate;
   } else {
-    const depCount = Math.min(Math.max(0, dependents), 7);
-    const rate = row.kou[depCount] || 0;
-    return { rate, warning: null, log };
+    const row = currentTable.rows.find(
+      (r) =>
+        lastMonthSalaryAfterSocial >= r.kouRanges[depCount].min &&
+        lastMonthSalaryAfterSocial < r.kouRanges[depCount].max
+    );
+    if (row) targetRate = row.rate;
   }
+
+  if (targetRate === null) {
+    return {
+      rate: 0,
+      warning: "賞与算出率表の範囲外です",
+      log: ["[賞与税率] 該当する賞与算出率が見つかりません"],
+    };
+  }
+
+  return { rate: targetRate, warning: null, log };
 };
 
 const calculateBonusIncomeTax = (
@@ -1411,7 +1479,7 @@ const App = () => {
         stats[t.year] = { monthly: null, bonus: null, lastUpdated: null };
       }
       if (t.type === "monthly") stats[t.year].monthly = t.rows.length;
-      if (t.type === "bonus") stats[t.year].bonus = t.rows.length;
+      if (t.type === "bonus_nta") stats[t.year].bonus = t.rows.length;
 
       if (t.importedAt) {
         const dt = new Date(t.importedAt);
@@ -1433,7 +1501,10 @@ const App = () => {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const rows = parseTaxTableCsv(event.target.result);
+        if (taxImportType !== "monthly" && taxImportType !== "bonus_nta") {
+          throw new Error("無効なインポート形式です");
+        }
+        const rows = parseTaxTableCsv(event.target.result, taxImportType);
         setTaxImportPreview({
           year: taxImportYear,
           type: taxImportType,
@@ -1494,19 +1565,25 @@ const App = () => {
 
   const handleDownloadTemplate = (type) => {
     const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
-    const header =
-      "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
+    let header = "";
     let rows = "";
 
     if (type === "monthly") {
+      header =
+        "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
       rows += `${taxImportYear},monthly,0,105000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
       rows += `${taxImportYear},monthly,105000,107000,170,0,0,0,0,0,0,0,fixed,3800\n`;
       rows += `${taxImportYear},monthly,107000,109000,280,0,0,0,0,0,0,0,fixed,3800\n`;
       rows += `${taxImportYear},monthly,109000,111000,380,0,0,0,0,0,0,0,fixed,3900\n`;
-    } else if (type === "bonus") {
-      rows += `${taxImportYear},bonus,0,68000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
-      rows += `${taxImportYear},bonus,68000,79000,0.02042,0,0,0,0,0,0,0,rate,0.04084\n`;
-      rows += `${taxImportYear},bonus,79000,252000,0.04084,0.02042,0,0,0,0,0,0,rate,0.2042\n`;
+    } else if (type === "bonus_nta") {
+      header =
+        "year,rate,kou0_min,kou0_max,kou1_min,kou1_max,kou2_min,kou2_max,kou3_min,kou3_max,kou4_min,kou4_max,kou5_min,kou5_max,kou6_min,kou6_max,kou7_min,kou7_max,otsu_min,otsu_max\n";
+      rows += `${taxImportYear},0.000,0,82,0,107,0,143,0,181,0,218,0,251,0,284,0,317,,\n`;
+      rows += `${taxImportYear},2.042,82,94,107,250,143,276,181,300,218,300,251,304,284,343,317,383,,\n`;
+      rows += `${taxImportYear},4.084,94,260,250,289,276,321,300,354,300,387,304,412,343,438,383,463,,\n`;
+      rows += `${taxImportYear},10.210,342,372,373,401,400,426,424,452,452,477,479,503,505,527,529,552,0,224\n`;
+      rows += `${taxImportYear},20.420,605,684,621,705,636,728,651,751,666,774,681,798,697,821,708,845,224,295\n`;
+      rows += `${taxImportYear},45.945,3495,以上,3527,以上,3559,以上,3590,以上,3622,以上,3654,以上,3685,以上,3717,以上,1118,以上\n`;
     }
 
     const csvContent = header + rows;
@@ -7011,9 +7088,13 @@ const App = () => {
                           }}
                           className="w-full bg-white border border-slate-300 rounded px-3 py-2 text-sm outline-none focus:border-orange-500 font-bold"
                         >
-                          <option value="monthly">月額表</option>
-                          <option value="daily">日額表</option>
-                          <option value="bonus">賞与算出率表</option>
+                                                   {" "}
+                          <option value="monthly">月額表</option>               
+                                   {" "}
+                          <option value="bonus_nta">
+                            賞与表（税務署形式）
+                          </option>
+                                                 {" "}
                         </select>
                       </div>
                     </div>
@@ -7059,61 +7140,146 @@ const App = () => {
 
                     {taxImportPreview && (
                       <div className="bg-white border border-slate-200 rounded p-3 mt-4 shadow-sm">
+                                               {" "}
                         <div className="text-xs font-bold text-slate-700 mb-2">
-                          プレビュー ({taxImportPreview.year}{" "}
-                          {taxImportPreview.type}) :{" "}
-                          {taxImportPreview.rows.length}件のデータ
+                                                    プレビュー (
+                          {taxImportPreview.year}                          {" "}
+                          {taxImportPreview.type === "bonus_nta"
+                            ? "賞与表(税務署形式)"
+                            : taxImportPreview.type}
+                          ) :                          {" "}
+                          {taxImportPreview.rows.length}件のデータ              
+                                   {" "}
                         </div>
+                                               {" "}
                         <div className="overflow-x-auto max-h-40 border border-slate-100 rounded custom-scrollbar">
+                                                   {" "}
                           <table className="w-full text-[10px] text-right whitespace-nowrap">
+                                                       {" "}
                             <thead className="bg-slate-100 sticky top-0">
-                              <tr>
-                                <th className="p-1 border-b">以上</th>
-                                <th className="p-1 border-b">未満</th>
-                                <th className="p-1 border-b">甲0</th>
-                                <th className="p-1 border-b">乙</th>
-                              </tr>
+                                                           {" "}
+                              {taxImportPreview.type === "bonus_nta" ? (
+                                <tr>
+                                                                   {" "}
+                                  <th className="p-1 border-b">税率</th>       
+                                                           {" "}
+                                  <th className="p-1 border-b">甲0(min)</th>   
+                                                               {" "}
+                                  <th className="p-1 border-b">甲0(max)</th>   
+                                                               {" "}
+                                  <th className="p-1 border-b">乙(min)</th>     
+                                                           {" "}
+                                </tr>
+                              ) : (
+                                <tr>
+                                                                   {" "}
+                                  <th className="p-1 border-b">以上</th>       
+                                                           {" "}
+                                  <th className="p-1 border-b">未満</th>       
+                                                           {" "}
+                                  <th className="p-1 border-b">甲0</th>         
+                                                         {" "}
+                                  <th className="p-1 border-b">乙</th>         
+                                                       {" "}
+                                </tr>
+                              )}
+                                                         {" "}
                             </thead>
+                                                       {" "}
                             <tbody>
+                                                           {" "}
                               {taxImportPreview.rows.slice(0, 5).map((r, i) => (
                                 <tr key={i}>
-                                  <td className="p-1 border-b">{r.min}</td>
-                                  <td className="p-1 border-b">
-                                    {r.max >= 999999999 ? "以上" : r.max}
-                                  </td>
-                                  <td className="p-1 border-b">{r.kou[0]}</td>
-                                  <td className="p-1 border-b">
-                                    {r.otsu.type === "rate"
-                                      ? r.otsu.value
-                                      : r.otsu.value}
-                                  </td>
+                                                                   {" "}
+                                  {taxImportPreview.type === "bonus_nta" ? (
+                                    <>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                        {(r.rate * 100).toFixed(3)}%
+                                      </td>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                        {r.kouRanges[0].min}
+                                      </td>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                        {r.kouRanges[0].max >= 999999999
+                                          ? "以上"
+                                          : r.kouRanges[0].max}
+                                      </td>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                        {r.otsuRange ? r.otsuRange.min : "-"}
+                                      </td>
+                                                                         {" "}
+                                    </>
+                                  ) : (
+                                    <>
+                                                                           {" "}
+                                      <td className="p-1 border-b">{r.min}</td> 
+                                                                         {" "}
+                                      <td className="p-1 border-b">
+                                                                               {" "}
+                                        {r.max >= 999999999 ? "以上" : r.max}   
+                                                                         {" "}
+                                      </td>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                        {r.kou[0]}
+                                      </td>
+                                                                           {" "}
+                                      <td className="p-1 border-b">
+                                                                               {" "}
+                                        {r.otsu.type === "rate"
+                                          ? r.otsu.value
+                                          : r.otsu.value}
+                                                                             {" "}
+                                      </td>
+                                                                         {" "}
+                                    </>
+                                  )}
+                                                                 {" "}
                                 </tr>
                               ))}
+                                                           {" "}
                               {taxImportPreview.rows.length > 5 && (
                                 <tr>
+                                                                   {" "}
                                   <td
                                     colSpan={4}
                                     className="p-1 text-center text-slate-400 font-bold bg-slate-50"
                                   >
-                                    他 {taxImportPreview.rows.length - 5}
-                                    件のデータ
+                                                                        他{" "}
+                                    {taxImportPreview.rows.length - 5}         
+                                                              件のデータ        
+                                                             {" "}
                                   </td>
+                                                                 {" "}
                                 </tr>
                               )}
+                                                         {" "}
                             </tbody>
+                                                     {" "}
                           </table>
+                                                 {" "}
                         </div>
+                                               {" "}
                         <div className="mt-3 flex justify-end">
+                                                   {" "}
                           <button
                             onClick={handleExecuteTaxImport}
                             disabled={isTaxImporting}
                             className="px-4 py-2 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded disabled:opacity-50 transition-colors shadow-sm"
                           >
+                                                       {" "}
                             {isTaxImporting
                               ? "保存中..."
                               : "この内容で保存する"}
+                                                     {" "}
                           </button>
+                                                 {" "}
                         </div>
+                                             {" "}
                       </div>
                     )}
 
@@ -7572,89 +7738,168 @@ const App = () => {
                 </div>
               </div>
             </div>
-
-            {/* --- 詳細表示モーダル --- */}
+            {/* --- 詳細表示モーダル --- */}           {" "}
             {viewingTaxTableId && taxTables[viewingTaxTableId] && (
               <div
                 className="fixed inset-0 bg-slate-900/60 z-[200] flex justify-center items-center backdrop-blur-sm p-4 transition-opacity"
                 onClick={() => setViewingTaxTableId(null)}
               >
+                               {" "}
                 <div
                   className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[85vh]"
                   onClick={(e) => e.stopPropagation()}
                 >
+                                   {" "}
                   <div className="bg-blue-600 p-4 text-white flex justify-between items-center">
+                                       {" "}
                     <h2 className="font-black text-sm flex items-center gap-2">
-                      <TableIcon size={18} /> 税額表詳細データ
+                                            <TableIcon size={18} />{" "}
+                      税額表詳細データ                    {" "}
                     </h2>
+                                       {" "}
                     <button
                       onClick={() => setViewingTaxTableId(null)}
                       className="hover:bg-blue-700 p-1 rounded-full transition-colors"
                     >
-                      <X size={20} />
+                                            <X size={20} />                   {" "}
                     </button>
+                                     {" "}
                   </div>
-
+                                   {" "}
                   <div className="p-6 overflow-y-auto">
+                                       {" "}
                     <div className="flex flex-wrap gap-4 mb-6 text-sm font-bold bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
+                                           {" "}
                       <div className="flex gap-2 items-center">
-                        <span className="text-slate-400">年度:</span>{" "}
+                                               {" "}
+                        <span className="text-slate-400">年度:</span>          
+                                     {" "}
                         <span className="text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
-                          {taxTables[viewingTaxTableId].year}
+                                                   {" "}
+                          {taxTables[viewingTaxTableId].year}                   
+                             {" "}
                         </span>
+                                             {" "}
                       </div>
+                                           {" "}
                       <div className="flex gap-2 items-center">
-                        <span className="text-slate-400">種類:</span>{" "}
+                                               {" "}
+                        <span className="text-slate-400">種類:</span>          
+                                     {" "}
                         <span className="text-slate-700 uppercase">
-                          {taxTables[viewingTaxTableId].type}
+                                                   {" "}
+                          {taxTables[viewingTaxTableId].type === "bonus_nta"
+                            ? "賞与表(税務署形式)"
+                            : taxTables[viewingTaxTableId].type}
+                                                 {" "}
                         </span>
+                                             {" "}
                       </div>
+                                           {" "}
                       <div className="flex gap-2 items-center">
-                        <span className="text-slate-400">登録日時:</span>{" "}
+                                               {" "}
+                        <span className="text-slate-400">登録日時:</span>      
+                                         {" "}
                         <span className="font-mono text-slate-700">
+                                                   {" "}
                           {taxTables[viewingTaxTableId].importedAt
                             ? new Date(
                                 taxTables[viewingTaxTableId].importedAt
                               ).toLocaleString("ja-JP")
                             : "-"}
+                                                 {" "}
                         </span>
+                                             {" "}
                       </div>
+                                           {" "}
                       <div className="flex gap-2 items-center">
-                        <span className="text-slate-400">行数:</span>{" "}
+                                               {" "}
+                        <span className="text-slate-400">行数:</span>          
+                                     {" "}
                         <span className="font-mono text-slate-700">
-                          {taxTables[viewingTaxTableId].rows.length} 行
+                                                   {" "}
+                          {taxTables[viewingTaxTableId].rows.length} 行        
+                                         {" "}
                         </span>
+                                             {" "}
                       </div>
+                                         {" "}
                     </div>
-
+                                       {" "}
                     <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar">
+                                           {" "}
                       <table className="w-full text-xs text-right whitespace-nowrap bg-white">
+                                               {" "}
                         <thead className="bg-slate-800 text-white sticky top-0">
-                          <tr>
-                            <th className="p-3 border-r border-slate-700 text-center">
-                              以上 (min)
-                            </th>
-                            <th className="p-3 border-r border-slate-700 text-center">
-                              未満 (max)
-                            </th>
-                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
-                              扶養0人
-                            </th>
-                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
-                              扶養1人
-                            </th>
-                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
-                              扶養2人
-                            </th>
-                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
-                              扶養3人
-                            </th>
-                            <th className="p-3 text-center bg-amber-600 text-amber-50">
-                              乙欄
-                            </th>
-                          </tr>
+                                                   {" "}
+                          {taxTables[viewingTaxTableId].type === "bonus_nta" ? (
+                            <tr>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                税率
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲0(min)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲0(max)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲1(min)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲1(max)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                乙(min)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 text-center">乙(max)</th>     
+                                                   {" "}
+                            </tr>
+                          ) : (
+                            <tr>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                以上 (min)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                未満 (max)
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養0人
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養1人
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養2人
+                              </th>
+                                                           {" "}
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養3人
+                              </th>
+                                                           {" "}
+                              <th className="p-3 text-center bg-amber-600 text-amber-50">
+                                乙欄
+                              </th>
+                                                         {" "}
+                            </tr>
+                          )}
+                                                 {" "}
                         </thead>
+                                               {" "}
                         <tbody>
+                                                   {" "}
                           {taxTables[viewingTaxTableId].rows
                             .slice(0, 10)
                             .map((r, i) => (
@@ -7662,48 +7907,114 @@ const App = () => {
                                 key={i}
                                 className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
                               >
-                                <td className="p-2 border-r font-mono text-slate-600">
-                                  {r.min}
-                                </td>
-                                <td className="p-2 border-r font-mono font-bold text-slate-800">
-                                  {r.max >= 999999999 ? "以上" : r.max}
-                                </td>
-                                <td className="p-2 border-r font-mono">
-                                  {r.kou[0]}
-                                </td>
-                                <td className="p-2 border-r font-mono">
-                                  {r.kou[1]}
-                                </td>
-                                <td className="p-2 border-r font-mono">
-                                  {r.kou[2]}
-                                </td>
-                                <td className="p-2 border-r font-mono">
-                                  {r.kou[3]}
-                                </td>
-                                <td className="p-2 font-mono font-bold text-amber-700 bg-amber-50/30">
-                                  {r.otsu.type === "rate"
-                                    ? `${(r.otsu.value * 100).toFixed(3)}%`
-                                    : r.otsu.value}
-                                </td>
+                                                               {" "}
+                                {taxTables[viewingTaxTableId].type ===
+                                "bonus_nta" ? (
+                                  <>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {(r.rate * 100).toFixed(3)}%
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[0].min}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[0].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[0].max}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[1].min}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[1].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[1].max}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-600 bg-amber-50/30">
+                                      {r.otsuRange ? r.otsuRange.min : "-"}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 font-mono text-slate-800 bg-amber-50/30">
+                                      {r.otsuRange
+                                        ? r.otsuRange.max >= 999999999
+                                          ? "以上"
+                                          : r.otsuRange.max
+                                        : "-"}
+                                    </td>
+                                                                     {" "}
+                                  </>
+                                ) : (
+                                  <>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.min}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono font-bold text-slate-800">
+                                      {r.max >= 999999999 ? "以上" : r.max}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou[0]}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou[1]}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou[2]}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou[3]}
+                                    </td>
+                                                                       {" "}
+                                    <td className="p-2 font-mono font-bold text-amber-700 bg-amber-50/30">
+                                                                           {" "}
+                                      {r.otsu.type === "rate"
+                                        ? `${(r.otsu.value * 100).toFixed(3)}%`
+                                        : r.otsu.value}
+                                                                         {" "}
+                                    </td>
+                                                                     {" "}
+                                  </>
+                                )}
+                                                             {" "}
                               </tr>
                             ))}
+                                                 {" "}
                         </tbody>
+                                             {" "}
                       </table>
+                                         {" "}
                     </div>
+                                       {" "}
                     {taxTables[viewingTaxTableId].rows.length > 10 && (
                       <div className="mt-3 text-center text-xs font-bold text-slate-400 bg-slate-50 py-2 rounded">
-                        ※ 先頭10行のみプレビュー表示しています
+                                                ※
+                        先頭10行のみプレビュー表示しています                    
+                         {" "}
                       </div>
                     )}
+                                     {" "}
                   </div>
-
+                                   {" "}
                   <div className="p-4 bg-gray-50 flex justify-end border-t border-gray-200">
+                                       {" "}
                     <button
                       onClick={() => setViewingTaxTableId(null)}
                       className="px-6 py-2 text-sm font-bold text-slate-600 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg transition-colors shadow-sm"
                     >
-                      閉じる
+                                            閉じる                    {" "}
                     </button>
+                                     {" "}
                   </div>
                 </div>
               </div>

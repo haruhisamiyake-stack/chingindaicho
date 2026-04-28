@@ -1445,14 +1445,12 @@ const App = () => {
       alert("削除に失敗しました");
     }
   };
+
   const handleDownloadTemplate = (type) => {
-    // 文字化け対策の UTF-8 BOM
-    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
-    const header =
-      "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
+    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+    const header = "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
     let rows = "";
 
-    // 選択中の対象年度を反映
     if (type === "monthly") {
       rows += `${taxImportYear},monthly,0,105000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
       rows += `${taxImportYear},monthly,105000,107000,170,0,0,0,0,0,0,0,fixed,3800\n`;
@@ -1465,9 +1463,7 @@ const App = () => {
     }
 
     const csvContent = header + rows;
-    const blob = new Blob([bom, csvContent], {
-      type: "text/csv;charset=utf-8;",
-    });
+    const blob = new Blob([bom, csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1477,6 +1473,7 @@ const App = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
   }, [employees, settings]);

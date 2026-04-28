@@ -7393,18 +7393,33 @@ const App = () => {
                             </tr>
                           </thead>
                           <tbody>
-                          <tbody>
                             {table.rows.map((r, i) => (
-                              <tr key={i} className="hover:bg-slate-50 border-b border-slate-100">
-                                <td className="p-2 border-r text-slate-500">{r.min}</td>
-                                <td className="p-2 border-r text-slate-700 font-bold">{r.max >= 999999999 ? "以上" : r.max}</td>
+                              <tr
+                                key={i}
+                                className="hover:bg-slate-50 border-b border-slate-100"
+                              >
+                                <td className="p-2 border-r text-slate-500">
+                                  {r.min}
+                                </td>
+                                <td className="p-2 border-r text-slate-700 font-bold">
+                                  {r.max >= 999999999 ? "以上" : r.max}
+                                </td>
                                 {r.kou.map((k, ki) => (
-                                  <td key={ki} className={`p-2 border-r ${k === 0 ? "text-slate-300" : "font-bold text-slate-700"}`}>
+                                  <td
+                                    key={ki}
+                                    className={`p-2 border-r ${
+                                      k === 0
+                                        ? "text-slate-300"
+                                        : "font-bold text-slate-700"
+                                    }`}
+                                  >
                                     {k}
                                   </td>
                                 ))}
                                 <td className="p-2 bg-amber-50/30 font-bold text-amber-700">
-                                  {r.otsu.type === "rate" ? r.otsu.value : r.otsu.value}
+                                  {r.otsu.type === "rate"
+                                    ? r.otsu.value
+                                    : r.otsu.value}
                                 </td>
                               </tr>
                             ))}

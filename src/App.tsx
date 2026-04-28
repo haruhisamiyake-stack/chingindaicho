@@ -6293,6 +6293,7 @@ const App = () => {
                                 key={def.id}
                                 className="border border-slate-200 p-1 bg-white"
                               >
+                                                               {" "}
                                 <input
                                   disabled={isDisabled}
                                   type="number"
@@ -6336,7 +6337,7 @@ const App = () => {
                                         empId,
                                         selectedYear,
                                         selectedListMonth,
-                                        "deductionAmounts",
+                                        "deductionAmounts", // ★修正：ここを「deductionAmounts」に直しました
                                         def.id,
                                         Number(e.target.value)
                                       );
@@ -6348,6 +6349,7 @@ const App = () => {
                                       : ""
                                   }`}
                                 />
+                                                             {" "}
                               </td>
                             );
                           })}

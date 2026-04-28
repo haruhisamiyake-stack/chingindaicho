@@ -161,6 +161,31 @@ const DEFAULT_SETTINGS = {
   standardRewardTable: DEFAULT_STD_REWARD_TABLE,
 };
 
+// --- CSV行パース関数（ダブルクォート・エスケープ対応） ---
+const parseCSVLine = (line) => {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++; // 次のクォートをスキップ
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  result.push(current);
+  return result.map((s) => s.trim());
+};
+
 // --- 税額表CSVパーサー（バリデーション強化版） ---
 const parseTaxTableCsv = (csvText) => {
   const lines = csvText
@@ -169,7 +194,7 @@ const parseTaxTableCsv = (csvText) => {
     .filter((l) => l.length > 0);
   if (lines.length === 0) throw new Error("データがありません");
 
-  const firstLineCols = lines[0].split(",");
+  const firstLineCols = parseCSVLine(lines[0]);
   let startIndex = 0;
   if (isNaN(Number(firstLineCols[2]))) {
     startIndex = 1; // ヘッダー行をスキップ
@@ -178,7 +203,7 @@ const parseTaxTableCsv = (csvText) => {
   const rows = [];
   for (let i = startIndex; i < lines.length; i++) {
     const rowNum = i + 1;
-    const cols = lines[i].split(",");
+    const cols = parseCSVLine(lines[i]);
 
     if (cols.length < 14) {
       throw new Error(
@@ -1376,6 +1401,27 @@ const App = () => {
   const [taxImportPreview, setTaxImportPreview] = useState(null);
   const [taxImportError, setTaxImportError] = useState("");
   const [isTaxImporting, setIsTaxImporting] = useState(false);
+  const [viewingTaxTableId, setViewingTaxTableId] = useState(null); // ★詳細表示用モーダルステート
+
+  // ★追加: 年度別比較用データの集計
+  const taxYearStats = useMemo(() => {
+    const stats = {};
+    Object.values(taxTables).forEach((t) => {
+      if (!stats[t.year]) {
+        stats[t.year] = { monthly: null, bonus: null, lastUpdated: null };
+      }
+      if (t.type === "monthly") stats[t.year].monthly = t.rows.length;
+      if (t.type === "bonus") stats[t.year].bonus = t.rows.length;
+
+      if (t.importedAt) {
+        const dt = new Date(t.importedAt);
+        if (!stats[t.year].lastUpdated || dt > stats[t.year].lastUpdated) {
+          stats[t.year].lastUpdated = dt;
+        }
+      }
+    });
+    return stats;
+  }, [taxTables]);
 
   const handleTaxCsvChange = (e) => {
     const file = e.target.files[0];
@@ -1447,8 +1493,9 @@ const App = () => {
   };
 
   const handleDownloadTemplate = (type) => {
-    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-    const header = "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const header =
+      "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
     let rows = "";
 
     if (type === "monthly") {
@@ -1463,7 +1510,9 @@ const App = () => {
     }
 
     const csvContent = header + rows;
-    const blob = new Blob([bom, csvContent], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([bom, csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -7357,17 +7406,29 @@ const App = () => {
         )}
 
         {activeTab === "taxTable" && (
-          <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+          <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto relative">
+            <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 max-w-4xl mx-auto mt-4 mb-20">
               <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-6">
                 <div>
-                  <h2 className="text-2xl font-black text-slate-800">
+                  <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                    <TableIcon className="text-blue-500" size={24} />
                     登録済みの源泉徴収税額表
                   </h2>
                   <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
                     Withholding Tax Tables
                   </p>
                 </div>
+              </div>
+
+              <div className="bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-lg mb-8 shadow-sm">
+                <p className="font-bold flex items-center gap-2 mb-1">
+                  <ShieldCheck size={16} /> 重要なお知らせ
+                </p>
+                <p className="text-xs font-bold ml-6">
+                  税額表未登録の場合、所得税は0円となり要確認警告が表示されます。
+                  <br />
+                  実運用前に必ず対象年度の「月額表」「賞与算出率表」を登録してください。
+                </p>
               </div>
 
               {Object.keys(taxTables).length === 0 ? (
@@ -7382,103 +7443,269 @@ const App = () => {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-8">
+                <div className="space-y-4">
                   {Object.entries(taxTables).map(([docId, table]) => (
                     <div
                       key={docId}
-                      className="border border-slate-200 rounded-lg overflow-hidden shadow-sm"
+                      className="flex justify-between items-center bg-white border border-slate-200 rounded-lg p-3 shadow-sm hover:border-blue-300 transition-colors"
                     >
-                      <div className="bg-slate-800 text-white px-4 py-3 font-bold flex justify-between items-center">
-                        <div className="flex items-center gap-2">
-                          <span className="bg-indigo-500 px-2 py-1 rounded text-xs">
-                            {table.year}
-                          </span>
-                          <span className="bg-emerald-500 px-2 py-1 rounded text-xs uppercase tracking-wider">
-                            {table.type}
-                          </span>
-                        </div>
-                        <div className="text-xs text-slate-300 font-mono">
-                          データ件数: {table.rows.length}件
-                        </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-sm font-black text-white bg-blue-600 px-3 py-1 rounded shadow-sm">
+                          {table.year}
+                        </span>
+                        <span className="text-xs text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-100 font-bold uppercase tracking-wider">
+                          {table.type === "monthly"
+                            ? "月額表"
+                            : table.type === "bonus"
+                            ? "賞与算出率表"
+                            : table.type}
+                        </span>
+                        <span className="text-xs text-slate-500 font-bold">
+                          {table.rows?.length || 0} 行
+                        </span>
                       </div>
-                      <div className="overflow-x-auto max-h-[400px] custom-scrollbar">
-                        <table className="w-full text-[10px] text-right whitespace-nowrap bg-white">
-                          <thead className="bg-slate-100 sticky top-0 shadow-sm z-10">
-                            <tr className="text-slate-600">
-                              <th className="p-2 border-b border-r text-center w-24">
-                                以上
-                              </th>
-                              <th className="p-2 border-b border-r text-center w-24">
-                                未満
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲0
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲1
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲2
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲3
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲4
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲5
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲6
-                              </th>
-                              <th className="p-2 border-b border-r text-center">
-                                甲7
-                              </th>
-                              <th className="p-2 border-b text-center bg-amber-50">
-                                乙
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {table.rows.map((r, i) => (
-                              <tr
-                                key={i}
-                                className="hover:bg-slate-50 border-b border-slate-100"
-                              >
-                                <td className="p-2 border-r text-slate-500">
-                                  {r.min}
-                                </td>
-                                <td className="p-2 border-r text-slate-700 font-bold">
-                                  {r.max >= 999999999 ? "以上" : r.max}
-                                </td>
-                                {r.kou.map((k, ki) => (
-                                  <td
-                                    key={ki}
-                                    className={`p-2 border-r ${
-                                      k === 0
-                                        ? "text-slate-300"
-                                        : "font-bold text-slate-700"
-                                    }`}
-                                  >
-                                    {k}
-                                  </td>
-                                ))}
-                                <td className="p-2 bg-amber-50/30 font-bold text-amber-700">
-                                  {r.otsu.type === "rate"
-                                    ? r.otsu.value
-                                    : r.otsu.value}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setViewingTaxTableId(docId)}
+                          className="px-4 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded transition-colors"
+                        >
+                          詳細を確認
+                        </button>
+                        <button
+                          onClick={() => handleDeleteTaxTable(docId)}
+                          className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded transition-colors"
+                          title="削除"
+                        >
+                          <Trash2 size={16} />
+                        </button>
                       </div>
                     </div>
                   ))}
                 </div>
               )}
+
+              {/* --- 年度別比較テーブル --- */}
+              <div className="mt-10 border-t-2 border-slate-100 pt-8">
+                <h4 className="text-sm font-black text-slate-700 mb-4 flex items-center gap-2">
+                  <Database size={18} className="text-indigo-500" /> 年度別
+                  登録状況チェック表
+                </h4>
+                <div className="overflow-x-auto rounded-lg border border-slate-200 shadow-sm">
+                  <table className="w-full text-xs text-left whitespace-nowrap bg-white">
+                    <thead className="bg-slate-800 text-white">
+                      <tr>
+                        <th className="p-3 border-b border-slate-700 font-black">
+                          年度
+                        </th>
+                        <th className="p-3 border-b border-slate-700 font-bold text-center">
+                          月額表
+                        </th>
+                        <th className="p-3 border-b border-slate-700 font-bold text-center">
+                          賞与表
+                        </th>
+                        <th className="p-3 border-b border-slate-700 font-bold text-right">
+                          行数 (合算)
+                        </th>
+                        <th className="p-3 border-b border-slate-700 font-bold pl-6">
+                          最終登録日時
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.keys(taxYearStats).length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={5}
+                            className="p-6 text-center text-slate-400 font-bold bg-slate-50"
+                          >
+                            データがありません
+                          </td>
+                        </tr>
+                      ) : (
+                        Object.entries(taxYearStats)
+                          .sort()
+                          .map(([year, stat]) => (
+                            <tr
+                              key={year}
+                              className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
+                            >
+                              <td className="p-3 font-black text-slate-800 text-sm">
+                                {year}
+                              </td>
+                              <td className="p-3 text-center">
+                                {stat.monthly ? (
+                                  <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded font-bold border border-emerald-200">
+                                    あり
+                                  </span>
+                                ) : (
+                                  <span className="bg-red-100 text-red-600 px-3 py-1 rounded font-bold border border-red-200">
+                                    未登録
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3 text-center">
+                                {stat.bonus ? (
+                                  <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded font-bold border border-emerald-200">
+                                    あり
+                                  </span>
+                                ) : (
+                                  <span className="bg-red-100 text-red-600 px-3 py-1 rounded font-bold border border-red-200">
+                                    未登録
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3 text-right font-mono text-slate-600">
+                                {(stat.monthly || 0) + (stat.bonus || 0)} 行
+                              </td>
+                              <td className="p-3 font-mono text-slate-500 pl-6">
+                                {stat.lastUpdated
+                                  ? stat.lastUpdated.toLocaleString("ja-JP")
+                                  : "-"}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
+
+            {/* --- 詳細表示モーダル --- */}
+            {viewingTaxTableId && taxTables[viewingTaxTableId] && (
+              <div
+                className="fixed inset-0 bg-slate-900/60 z-[200] flex justify-center items-center backdrop-blur-sm p-4 transition-opacity"
+                onClick={() => setViewingTaxTableId(null)}
+              >
+                <div
+                  className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[85vh]"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="bg-blue-600 p-4 text-white flex justify-between items-center">
+                    <h2 className="font-black text-sm flex items-center gap-2">
+                      <TableIcon size={18} /> 税額表詳細データ
+                    </h2>
+                    <button
+                      onClick={() => setViewingTaxTableId(null)}
+                      className="hover:bg-blue-700 p-1 rounded-full transition-colors"
+                    >
+                      <X size={20} />
+                    </button>
+                  </div>
+
+                  <div className="p-6 overflow-y-auto">
+                    <div className="flex flex-wrap gap-4 mb-6 text-sm font-bold bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
+                      <div className="flex gap-2 items-center">
+                        <span className="text-slate-400">年度:</span>{" "}
+                        <span className="text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
+                          {taxTables[viewingTaxTableId].year}
+                        </span>
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <span className="text-slate-400">種類:</span>{" "}
+                        <span className="text-slate-700 uppercase">
+                          {taxTables[viewingTaxTableId].type}
+                        </span>
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <span className="text-slate-400">登録日時:</span>{" "}
+                        <span className="font-mono text-slate-700">
+                          {taxTables[viewingTaxTableId].importedAt
+                            ? new Date(
+                                taxTables[viewingTaxTableId].importedAt
+                              ).toLocaleString("ja-JP")
+                            : "-"}
+                        </span>
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <span className="text-slate-400">行数:</span>{" "}
+                        <span className="font-mono text-slate-700">
+                          {taxTables[viewingTaxTableId].rows.length} 行
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar">
+                      <table className="w-full text-xs text-right whitespace-nowrap bg-white">
+                        <thead className="bg-slate-800 text-white sticky top-0">
+                          <tr>
+                            <th className="p-3 border-r border-slate-700 text-center">
+                              以上 (min)
+                            </th>
+                            <th className="p-3 border-r border-slate-700 text-center">
+                              未満 (max)
+                            </th>
+                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                              扶養0人
+                            </th>
+                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                              扶養1人
+                            </th>
+                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                              扶養2人
+                            </th>
+                            <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                              扶養3人
+                            </th>
+                            <th className="p-3 text-center bg-amber-600 text-amber-50">
+                              乙欄
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {taxTables[viewingTaxTableId].rows
+                            .slice(0, 10)
+                            .map((r, i) => (
+                              <tr
+                                key={i}
+                                className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
+                              >
+                                <td className="p-2 border-r font-mono text-slate-600">
+                                  {r.min}
+                                </td>
+                                <td className="p-2 border-r font-mono font-bold text-slate-800">
+                                  {r.max >= 999999999 ? "以上" : r.max}
+                                </td>
+                                <td className="p-2 border-r font-mono">
+                                  {r.kou[0]}
+                                </td>
+                                <td className="p-2 border-r font-mono">
+                                  {r.kou[1]}
+                                </td>
+                                <td className="p-2 border-r font-mono">
+                                  {r.kou[2]}
+                                </td>
+                                <td className="p-2 border-r font-mono">
+                                  {r.kou[3]}
+                                </td>
+                                <td className="p-2 font-mono font-bold text-amber-700 bg-amber-50/30">
+                                  {r.otsu.type === "rate"
+                                    ? `${(r.otsu.value * 100).toFixed(3)}%`
+                                    : r.otsu.value}
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {taxTables[viewingTaxTableId].rows.length > 10 && (
+                      <div className="mt-3 text-center text-xs font-bold text-slate-400 bg-slate-50 py-2 rounded">
+                        ※ 先頭10行のみプレビュー表示しています
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="p-4 bg-gray-50 flex justify-end border-t border-gray-200">
+                    <button
+                      onClick={() => setViewingTaxTableId(null)}
+                      className="px-6 py-2 text-sm font-bold text-slate-600 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg transition-colors shadow-sm"
+                    >
+                      閉じる
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

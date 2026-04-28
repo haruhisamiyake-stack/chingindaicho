@@ -731,58 +731,71 @@ const calculateIncomeTax = (
   master = null
 ) => {
   const log = [];
+
+  // --- 乙欄 ---
   if (isOtsu) {
-    if (requireExact)
+    if (taxableAfterSocial < 105000) {
+      log.push(
+        `[所得税計算] 乙欄適用: 105,000円未満のため ${formatCurrency(
+          taxableAfterSocial
+        )} × 3.063%`
+      );
+      return {
+        tax: Math.floor(taxableAfterSocial * 0.03063),
+        warning: null,
+        log,
+      };
+    } else {
+      log.push(`[所得税計算] 乙欄適用: 105,000円以上は自動計算未対応`);
       return {
         tax: null,
-        warning: null,
-        log: ["[所得税計算] 乙欄のため自動計算不可"],
+        warning:
+          "乙欄で105,000円以上の正式な計算式が未設定のため、手入力で税額を設定してください。",
+        log,
       };
-    log.push(`[所得税計算] 乙欄適用 (3.063%)`);
-    return {
-      tax: Math.floor(taxableAfterSocial * 0.03063),
-      warning: null,
-      log,
-    };
+    }
   }
 
-  if (requireExact && !isOtsu) {
-    return calculateIncomeTaxByDensanReiwa8({
-      taxableAfterSocial,
-      master,
-      dependents,
-    });
+  // --- 甲欄 ---
+  log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
+  const densanResult = calculateIncomeTaxByDensanReiwa8({
+    taxableAfterSocial,
+    master,
+    dependents,
+  });
+
+  if (densanResult && densanResult.log) {
+    log.push(...densanResult.log);
   }
 
-  const row = TAX_TABLE_REIWA8.find(
-    (r) =>
-      taxableAfterSocial >= r.min &&
-      (r.max === Infinity || taxableAfterSocial < r.max)
-  );
-  if (row) {
-    const depCount = Math.min(Math.max(0, dependents), 7);
-    log.push(`[所得税計算] 月額表(甲欄)を参照: 扶養${depCount}人枠`);
-    return { tax: row.rates[depCount], warning: null, log };
-  }
-  if (taxableAfterSocial < 105000) {
-    log.push(`[所得税計算] 月額表(甲欄): 105,000円未満のため0円`);
-    return { tax: 0, warning: null, log };
-  }
-  if (requireExact)
-    return { tax: null, warning: null, log: ["[所得税計算] 自動計算不可"] };
-
-  const taxBase = Math.max(0, taxableAfterSocial - dependents * 33000);
-  log.push(`[所得税計算] 月額表超過のため簡易計算適用`);
-  return { tax: Math.floor(taxBase * 0.05), warning: null, log };
+  return {
+    tax: densanResult.tax,
+    warning: densanResult.warning,
+    log,
+  };
 };
 
 const getBonusTaxRate = (lastMonthSalaryAfterSocial, dependents, isOtsu) => {
+  const log = [];
+  let warning = null;
+
   if (isOtsu) {
-    if (lastMonthSalaryAfterSocial < 68000) return 0.03063;
-    if (lastMonthSalaryAfterSocial < 79000) return 0.04084;
-    return 0.2042;
+    let rate = 0;
+    if (lastMonthSalaryAfterSocial < 68000) rate = 0.03063;
+    else if (lastMonthSalaryAfterSocial < 79000) rate = 0.04084;
+    else rate = 0.2042;
+    return { rate, warning: null, log };
   }
-  const dep = Math.min(Math.max(0, dependents), 3);
+
+  let effectiveDep = dependents;
+  if (dependents >= 4) {
+    effectiveDep = 3;
+    warning =
+      "賞与算出率表が扶養4人以上に未設定のため、3人扱いで仮計算しています。正しい税率や税額を手入力で修正してください。";
+    log.push(`※ 扶養${dependents}人ですが、算出率表未対応のため3人として参照`);
+  }
+
+  const dep = Math.max(0, effectiveDep);
   const table = [
     { rate: 0.4084, min: [1560000, 1600000, 1640000, 1680000] },
     { rate: 0.39819, min: [1350000, 1390000, 1430000, 1470000] },
@@ -806,12 +819,13 @@ const getBonusTaxRate = (lastMonthSalaryAfterSocial, dependents, isOtsu) => {
     { rate: 0.04084, min: [79000, 114000, 160000, 200000] },
     { rate: 0.02042, min: [68000, 100000, 140000, 180000] },
   ];
+
   for (let i = 0; i < table.length; i++) {
     if (lastMonthSalaryAfterSocial >= table[i].min[dep]) {
-      return table[i].rate;
+      return { rate: table[i].rate, warning, log };
     }
   }
-  return 0;
+  return { rate: 0, warning, log };
 };
 
 const calculateBonusIncomeTax = (
@@ -952,19 +966,24 @@ const calculateBonusIncomeTax = (
   }
 
   log.push(`- 通常の賞与乗出計算方式を適用`);
-  const bonusTaxRate = getBonusTaxRate(
+  const rateInfo = getBonusTaxRate(
     lastMonthSalaryAfterSocial,
     dependents,
     isOtsu
   );
-  log.push(`  -> 適用税率: ${(bonusTaxRate * 100).toFixed(3)}%`);
-  const tax = Math.floor(bonusAfterSocial * bonusTaxRate);
+
+  if (rateInfo.log && rateInfo.log.length > 0) {
+    log.push(...rateInfo.log.map((l) => `  ${l}`));
+  }
+
+  log.push(`  -> 適用税率: ${(rateInfo.rate * 100).toFixed(3)}%`);
+  const tax = Math.floor(bonusAfterSocial * rateInfo.rate);
   log.push(`  -> 算出税額: ${formatCurrency(tax)}円`);
 
   return {
     tax,
-    warning: null,
-    manualRequired: false,
+    warning: rateInfo.warning,
+    manualRequired: rateInfo.warning !== null,
     log,
   };
 };

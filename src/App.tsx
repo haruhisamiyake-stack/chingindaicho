@@ -161,7 +161,7 @@ const DEFAULT_SETTINGS = {
   standardRewardTable: DEFAULT_STD_REWARD_TABLE,
 };
 
-// --- 税額表CSVパーサー（新規追加） ---
+// --- 税額表CSVパーサー（バリデーション強化版） ---
 const parseTaxTableCsv = (csvText) => {
   const lines = csvText
     .split("\n")
@@ -172,36 +172,57 @@ const parseTaxTableCsv = (csvText) => {
   const firstLineCols = lines[0].split(",");
   let startIndex = 0;
   if (isNaN(Number(firstLineCols[2]))) {
-    startIndex = 1;
+    startIndex = 1; // ヘッダー行をスキップ
   }
 
   const rows = [];
   for (let i = startIndex; i < lines.length; i++) {
+    const rowNum = i + 1;
     const cols = lines[i].split(",");
-    if (cols.length < 14) continue;
+
+    if (cols.length < 14) {
+      throw new Error(
+        `【行 ${rowNum}】列数が不足しています（14列必要ですが ${cols.length}列です）`
+      );
+    }
 
     const min = Number(cols[2]);
+    if (isNaN(min))
+      throw new Error(`【行 ${rowNum}】「以上(min)」の値が数値ではありません`);
+
     const maxStr = cols[3].toLowerCase();
     const max =
       maxStr === "infinity" || maxStr === "" || maxStr === "以上"
         ? Infinity
         : Number(cols[3]);
+    if (isNaN(max))
+      throw new Error(`【行 ${rowNum}】「未満(max)」の値が数値ではありません`);
 
-    const kou = [
-      Number(cols[4]),
-      Number(cols[5]),
-      Number(cols[6]),
-      Number(cols[7]),
-      Number(cols[8]),
-      Number(cols[9]),
-      Number(cols[10]),
-      Number(cols[11]),
-    ];
+    if (min >= max)
+      throw new Error(
+        `【行 ${rowNum}】以上(${min}) が 未満(${max}) より大きくなっています`
+      );
 
-    const otsu_type = cols[12];
+    const kou = [];
+    for (let j = 0; j <= 7; j++) {
+      const val = Number(cols[4 + j]);
+      if (isNaN(val))
+        throw new Error(
+          `【行 ${rowNum}】甲欄(扶養${j}人) の値が数値ではありません`
+        );
+      kou.push(val);
+    }
+
+    const otsu_type = cols[12].trim();
+    if (otsu_type !== "rate" && otsu_type !== "fixed") {
+      throw new Error(
+        `【行 ${rowNum}】乙欄の種類(otsu_type)は 'rate' または 'fixed' にしてください`
+      );
+    }
+
     const otsu_value = Number(cols[13]);
-
-    if (isNaN(min)) continue;
+    if (isNaN(otsu_value))
+      throw new Error(`【行 ${rowNum}】乙欄の値が数値ではありません`);
 
     rows.push({
       min,
@@ -389,304 +410,6 @@ const getNursingAlert = (dobStr, yearStr, mStr) => {
   );
   return nursing ? nursing.label : null;
 };
-
-// --- 源泉徴収税額表データ (令和8年分 抜粋) ---
-const TAX_TABLE_REIWA8 = [
-  { min: 0, max: 105000, rates: [0, 0, 0, 0, 0, 0, 0, 0], otsu: "3.063%" },
-  { min: 105000, max: 107000, rates: [170, 0, 0, 0, 0, 0, 0, 0], otsu: 3800 },
-  { min: 107000, max: 109000, rates: [280, 0, 0, 0, 0, 0, 0, 0], otsu: 3800 },
-  { min: 109000, max: 111000, rates: [380, 0, 0, 0, 0, 0, 0, 0], otsu: 3900 },
-  { min: 111000, max: 113000, rates: [490, 0, 0, 0, 0, 0, 0, 0], otsu: 4000 },
-  { min: 113000, max: 115000, rates: [590, 0, 0, 0, 0, 0, 0, 0], otsu: 4100 },
-  { min: 115000, max: 117000, rates: [690, 0, 0, 0, 0, 0, 0, 0], otsu: 4100 },
-  { min: 117000, max: 119000, rates: [790, 0, 0, 0, 0, 0, 0, 0], otsu: 4200 },
-  { min: 119000, max: 121000, rates: [890, 0, 0, 0, 0, 0, 0, 0], otsu: 4300 },
-  { min: 121000, max: 123000, rates: [990, 0, 0, 0, 0, 0, 0, 0], otsu: 4400 },
-  { min: 123000, max: 125000, rates: [1090, 0, 0, 0, 0, 0, 0, 0], otsu: 4400 },
-  { min: 125000, max: 127000, rates: [1190, 0, 0, 0, 0, 0, 0, 0], otsu: 4500 },
-  { min: 127000, max: 129000, rates: [1300, 0, 0, 0, 0, 0, 0, 0], otsu: 4600 },
-  { min: 129000, max: 131000, rates: [1400, 0, 0, 0, 0, 0, 0, 0], otsu: 4700 },
-  { min: 131000, max: 133000, rates: [1500, 0, 0, 0, 0, 0, 0, 0], otsu: 4700 },
-  { min: 133000, max: 135000, rates: [1600, 0, 0, 0, 0, 0, 0, 0], otsu: 4800 },
-  { min: 135000, max: 137000, rates: [1710, 0, 0, 0, 0, 0, 0, 0], otsu: 4900 },
-  { min: 137000, max: 139000, rates: [1810, 0, 0, 0, 0, 0, 0, 0], otsu: 5000 },
-  {
-    min: 139000,
-    max: 141000,
-    rates: [1910, 290, 0, 0, 0, 0, 0, 0],
-    otsu: 5000,
-  },
-  {
-    min: 141000,
-    max: 143000,
-    rates: [2010, 400, 0, 0, 0, 0, 0, 0],
-    otsu: 5100,
-  },
-  {
-    min: 143000,
-    max: 145000,
-    rates: [2110, 500, 0, 0, 0, 0, 0, 0],
-    otsu: 5200,
-  },
-  {
-    min: 145000,
-    max: 147000,
-    rates: [2220, 600, 0, 0, 0, 0, 0, 0],
-    otsu: 7700,
-  },
-  {
-    min: 147000,
-    max: 149000,
-    rates: [2320, 700, 0, 0, 0, 0, 0, 0],
-    otsu: 7800,
-  },
-  {
-    min: 149000,
-    max: 151000,
-    rates: [2420, 810, 0, 0, 0, 0, 0, 0],
-    otsu: 7900,
-  },
-  {
-    min: 151000,
-    max: 153000,
-    rates: [2520, 910, 0, 0, 0, 0, 0, 0],
-    otsu: 8000,
-  },
-  {
-    min: 153000,
-    max: 155000,
-    rates: [2620, 1010, 0, 0, 0, 0, 0, 0],
-    otsu: 8100,
-  },
-  {
-    min: 155000,
-    max: 157000,
-    rates: [2730, 1110, 0, 0, 0, 0, 0, 0],
-    otsu: 8200,
-  },
-  {
-    min: 157000,
-    max: 159000,
-    rates: [2830, 1210, 0, 0, 0, 0, 0, 0],
-    otsu: 8300,
-  },
-  {
-    min: 159000,
-    max: 161000,
-    rates: [2930, 1320, 0, 0, 0, 0, 0, 0],
-    otsu: 8400,
-  },
-  {
-    min: 161000,
-    max: 163000,
-    rates: [3030, 1420, 0, 0, 0, 0, 0, 0],
-    otsu: 8500,
-  },
-  {
-    min: 163000,
-    max: 165000,
-    rates: [3130, 1520, 0, 0, 0, 0, 0, 0],
-    otsu: 8600,
-  },
-  {
-    min: 165000,
-    max: 167000,
-    rates: [3240, 1620, 0, 0, 0, 0, 0, 0],
-    otsu: 10700,
-  },
-  {
-    min: 167000,
-    max: 169000,
-    rates: [3340, 1720, 100, 0, 0, 0, 0, 0],
-    otsu: 10900,
-  },
-  {
-    min: 169000,
-    max: 171000,
-    rates: [3440, 1830, 200, 0, 0, 0, 0, 0],
-    otsu: 11000,
-  },
-  {
-    min: 171000,
-    max: 173000,
-    rates: [3540, 1930, 310, 0, 0, 0, 0, 0],
-    otsu: 11200,
-  },
-  {
-    min: 173000,
-    max: 175000,
-    rates: [3640, 2030, 410, 0, 0, 0, 0, 0],
-    otsu: 11400,
-  },
-  {
-    min: 175000,
-    max: 177000,
-    rates: [3750, 2130, 510, 0, 0, 0, 0, 0],
-    otsu: 11500,
-  },
-  {
-    min: 177000,
-    max: 179000,
-    rates: [3850, 2230, 610, 0, 0, 0, 0, 0],
-    otsu: 11700,
-  },
-  {
-    min: 179000,
-    max: 181000,
-    rates: [3950, 2330, 720, 0, 0, 0, 0, 0],
-    otsu: 11900,
-  },
-  {
-    min: 181000,
-    max: 183000,
-    rates: [4050, 2440, 820, 0, 0, 0, 0, 0],
-    otsu: 12000,
-  },
-  {
-    min: 183000,
-    max: 185000,
-    rates: [4150, 2540, 920, 0, 0, 0, 0, 0],
-    otsu: 12200,
-  },
-  {
-    min: 185000,
-    max: 187000,
-    rates: [4260, 2640, 1020, 0, 0, 0, 0, 0],
-    otsu: 14700,
-  },
-  {
-    min: 187000,
-    max: 189000,
-    rates: [4360, 2740, 1120, 0, 0, 0, 0, 0],
-    otsu: 14900,
-  },
-  {
-    min: 189000,
-    max: 191000,
-    rates: [4460, 2840, 1230, 0, 0, 0, 0, 0],
-    otsu: 15100,
-  },
-  {
-    min: 191000,
-    max: 193000,
-    rates: [4560, 2940, 1330, 0, 0, 0, 0, 0],
-    otsu: 15300,
-  },
-  {
-    min: 193000,
-    max: 195000,
-    rates: [4660, 3050, 1430, 0, 0, 0, 0, 0],
-    otsu: 15500,
-  },
-  {
-    min: 195000,
-    max: 197000,
-    rates: [4770, 3150, 1530, 0, 0, 0, 0, 0],
-    otsu: 15700,
-  },
-  {
-    min: 197000,
-    max: 199000,
-    rates: [4870, 3250, 1630, 10, 0, 0, 0, 0],
-    otsu: 15900,
-  },
-  {
-    min: 199000,
-    max: 201000,
-    rates: [4970, 3350, 1740, 120, 0, 0, 0, 0],
-    otsu: 16100,
-  },
-  {
-    min: 201000,
-    max: 203000,
-    rates: [5070, 3450, 1840, 220, 0, 0, 0, 0],
-    otsu: 16300,
-  },
-  {
-    min: 203000,
-    max: 205000,
-    rates: [5180, 3550, 1940, 320, 0, 0, 0, 0],
-    otsu: 16500,
-  },
-  {
-    min: 205000,
-    max: 207000,
-    rates: [5280, 3660, 2040, 420, 0, 0, 0, 0],
-    otsu: 16700,
-  },
-  {
-    min: 207000,
-    max: 209000,
-    rates: [5380, 3760, 2140, 530, 0, 0, 0, 0],
-    otsu: 20000,
-  },
-  {
-    min: 209000,
-    max: 211000,
-    rates: [5480, 3860, 2240, 630, 0, 0, 0, 0],
-    otsu: 20300,
-  },
-  {
-    min: 211000,
-    max: 213000,
-    rates: [5580, 3960, 2350, 730, 0, 0, 0, 0],
-    otsu: 20600,
-  },
-  {
-    min: 213000,
-    max: 215000,
-    rates: [5690, 4060, 2450, 830, 0, 0, 0, 0],
-    otsu: 20900,
-  },
-  {
-    min: 215000,
-    max: 217000,
-    rates: [5790, 4160, 2550, 930, 0, 0, 0, 0],
-    otsu: 21200,
-  },
-  {
-    min: 217000,
-    max: 219000,
-    rates: [5890, 4260, 2650, 1030, 0, 0, 0, 0],
-    otsu: 21500,
-  },
-  {
-    min: 219000,
-    max: 221000,
-    rates: [5990, 4370, 2750, 1140, 0, 0, 0, 0],
-    otsu: 21800,
-  },
-  {
-    min: 221000,
-    max: 223000,
-    rates: [6090, 4470, 2850, 1240, 0, 0, 0, 0],
-    otsu: 22100,
-  },
-  {
-    min: 223000,
-    max: 225000,
-    rates: [6200, 4570, 2950, 1340, 0, 0, 0, 0],
-    otsu: 22400,
-  },
-  {
-    min: 225000,
-    max: 227000,
-    rates: [6300, 4670, 3050, 1440, 0, 0, 0, 0],
-    otsu: 22700,
-  },
-  {
-    min: 227000,
-    max: 229000,
-    rates: [6400, 4770, 3160, 1540, 0, 0, 0, 0],
-    otsu: 23000,
-  },
-  {
-    min: 229000,
-    max: 231000,
-    rates: [6500, 4880, 3260, 1640, 0, 0, 0, 0],
-    otsu: 23300,
-  },
-];
 
 // ----------------------------------------------------
 // 【電算機特例】源泉徴収税額の計算（令和8年分想定）
@@ -6679,6 +6402,43 @@ const App = () => {
                         className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 outline-none focus:border-orange-500 focus:ring-2 ring-orange-200 transition-all text-slate-800 min-h-[100px]"
                       />
                     </div>
+
+                    <div className="space-y-2 mt-4 pt-4 border-t border-slate-200">
+                      <label className="text-xs font-bold text-slate-500 uppercase">
+                        所得税計算方式
+                      </label>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            checked={
+                              settings.taxCalcMethod === "taxTable" ||
+                              !settings.taxCalcMethod
+                            }
+                            onChange={() =>
+                              handleSettingChange("taxCalcMethod", "taxTable")
+                            }
+                            className="text-orange-500 focus:ring-orange-500"
+                          />
+                          <span className="text-sm font-bold text-slate-700">
+                            源泉徴収税額表を使用 (推奨)
+                          </span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            checked={settings.taxCalcMethod === "densan"}
+                            onChange={() =>
+                              handleSettingChange("taxCalcMethod", "densan")
+                            }
+                            className="text-orange-500 focus:ring-orange-500"
+                          />
+                          <span className="text-sm font-bold text-slate-700">
+                            電算機計算の特例を使用
+                          </span>
+                        </label>
+                      </div>
+                    </div>
                   </div>
                 </section>
 
@@ -6867,7 +6627,6 @@ const App = () => {
                     支給・控除項目設定
                   </h3>
 
-                  {/* 【明示文】手当・控除が全社共通設定である旨を表示 */}
                   <div className="bg-indigo-50 border border-indigo-200 text-indigo-700 p-3 rounded-lg mb-4 text-xs font-bold">
                     <p className="flex items-center gap-1 mb-1">
                       <Info size={14} /> 手当・控除は全社員共通設定です。
@@ -6937,7 +6696,6 @@ const App = () => {
                               </div>
                               <div className="flex items-center gap-4 bg-slate-50 px-4 py-2 rounded border border-slate-200">
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
                                   <input
                                     type="checkbox"
                                     checked={def.isTaxable === true}
@@ -6958,7 +6716,6 @@ const App = () => {
                                   </span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
                                   <input
                                     type="checkbox"
                                     checked={def.isSocialIns === true}
@@ -6980,7 +6737,6 @@ const App = () => {
                                   </span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer group">
-                                  {/* 【修正】 !== false から === true へ変更（未設定はfalse） */}
                                   <input
                                     type="checkbox"
                                     checked={def.isEmploymentIns === true}
@@ -7123,7 +6879,177 @@ const App = () => {
                   </div>
                 </section>
 
-                {/* 5. バックアップ管理 */}
+                {/* 5. 源泉徴収税額表管理 */}
+                <section>
+                  <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
+                    源泉徴収税額表管理
+                  </h3>
+                  <div className="bg-slate-50 p-5 rounded-lg border border-slate-200 space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">
+                          対象年度
+                        </label>
+                        <select
+                          value={taxImportYear}
+                          onChange={(e) => {
+                            setTaxImportYear(e.target.value);
+                            setTaxImportPreview(null);
+                            setTaxImportError("");
+                          }}
+                          className="w-full bg-white border border-slate-300 rounded px-3 py-2 text-sm outline-none focus:border-orange-500 font-bold"
+                        >
+                          {Array.from(
+                            new Set(["R08", "R09", "R10", ...yearsList])
+                          )
+                            .sort()
+                            .map((y) => (
+                              <option key={y} value={y}>
+                                {y}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">
+                          種類
+                        </label>
+                        <select
+                          value={taxImportType}
+                          onChange={(e) => {
+                            setTaxImportType(e.target.value);
+                            setTaxImportPreview(null);
+                            setTaxImportError("");
+                          }}
+                          className="w-full bg-white border border-slate-300 rounded px-3 py-2 text-sm outline-none focus:border-orange-500 font-bold"
+                        >
+                          <option value="monthly">月額表</option>
+                          <option value="daily">日額表</option>
+                          <option value="bonus">賞与算出率表</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500">
+                        CSVファイル選択
+                      </label>
+                      <input
+                        type="file"
+                        id="tax-csv-input"
+                        accept=".csv"
+                        onChange={handleTaxCsvChange}
+                        className="block w-full text-xs text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 cursor-pointer bg-white border border-slate-200 rounded"
+                      />
+                    </div>
+
+                    {taxImportError && (
+                      <div className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 p-2 rounded">
+                        {taxImportError}
+                      </div>
+                    )}
+
+                    {taxImportPreview && (
+                      <div className="bg-white border border-slate-200 rounded p-3 mt-4 shadow-sm">
+                        <div className="text-xs font-bold text-slate-700 mb-2">
+                          プレビュー ({taxImportPreview.year}{" "}
+                          {taxImportPreview.type}) :{" "}
+                          {taxImportPreview.rows.length}件のデータ
+                        </div>
+                        <div className="overflow-x-auto max-h-40 border border-slate-100 rounded custom-scrollbar">
+                          <table className="w-full text-[10px] text-right whitespace-nowrap">
+                            <thead className="bg-slate-100 sticky top-0">
+                              <tr>
+                                <th className="p-1 border-b">以上</th>
+                                <th className="p-1 border-b">未満</th>
+                                <th className="p-1 border-b">甲0</th>
+                                <th className="p-1 border-b">乙</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {taxImportPreview.rows.slice(0, 5).map((r, i) => (
+                                <tr key={i}>
+                                  <td className="p-1 border-b">{r.min}</td>
+                                  <td className="p-1 border-b">
+                                    {r.max === Infinity ? "以上" : r.max}
+                                  </td>
+                                  <td className="p-1 border-b">{r.kou[0]}</td>
+                                  <td className="p-1 border-b">
+                                    {r.otsu.type === "rate"
+                                      ? r.otsu.value
+                                      : r.otsu.value}
+                                  </td>
+                                </tr>
+                              ))}
+                              {taxImportPreview.rows.length > 5 && (
+                                <tr>
+                                  <td
+                                    colSpan={4}
+                                    className="p-1 text-center text-slate-400 font-bold bg-slate-50"
+                                  >
+                                    ...他 {taxImportPreview.rows.length - 5}
+                                    件のデータ
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="mt-3 flex justify-end">
+                          <button
+                            onClick={handleExecuteTaxImport}
+                            disabled={isTaxImporting}
+                            className="px-4 py-2 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded disabled:opacity-50 transition-colors shadow-sm"
+                          >
+                            {isTaxImporting
+                              ? "保存中..."
+                              : "この内容で保存する"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mt-6 border-t border-slate-200 pt-4">
+                      <h4 className="text-xs font-bold text-slate-600 mb-3">
+                        登録済みの税額表一覧
+                      </h4>
+                      {Object.keys(taxTables).length === 0 ? (
+                        <p className="text-[10px] text-slate-400 font-bold bg-white p-3 rounded border border-slate-100 text-center">
+                          登録されている税額表はありません。
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {Object.entries(taxTables).map(([docId, table]) => (
+                            <div
+                              key={docId}
+                              className="flex justify-between items-center bg-white border border-slate-200 rounded p-2 shadow-sm"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                  {table.year}
+                                </span>
+                                <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-100 font-bold uppercase tracking-wider">
+                                  {table.type}
+                                </span>
+                                <span className="text-[9px] text-slate-400 font-mono">
+                                  ({table.rows?.length || 0}行)
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => handleDeleteTaxTable(docId)}
+                                className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded transition-colors"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {/* 6. バックアップ管理 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
                     バックアップ管理

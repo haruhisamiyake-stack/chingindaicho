@@ -2965,7 +2965,6 @@ const App = () => {
                 <span>雇用保険料</span>
                 <span>{formatCurrency(calcResult.employment)}</span>
               </div>
-              {/* ここに支援金を挿入 */}
               {calcResult.childCare > 0 && (
                 <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
                   <span>子ども・子育て支援金</span>
@@ -3004,7 +3003,8 @@ const App = () => {
             <div className="text-[10px] text-slate-500 p-2 border border-slate-300 rounded min-h-[48px] whitespace-pre-wrap">
               {settings.memo || "備考："}
             </div>
-            {isBonus && calcResult.taxWarning && (
+            {/* ★修正1：月次でも taxWarning があれば表示する */}
+            {calcResult.taxWarning && (
               <div className="text-xs text-red-700 font-bold bg-red-50 border border-red-200 rounded p-2 mt-2">
                 ⚠️ {calcResult.taxWarning}
               </div>
@@ -5940,7 +5940,7 @@ const App = () => {
                           </td>
                           <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">
                             <div>{formatCurrency(calcResult.incomeTax)}</div>
-                            {isBonusList && calcResult.taxWarning && (
+                            {calcResult.taxWarning && (
                               <div
                                 className="text-[9px] text-red-600 mt-0.5 leading-none"
                                 title={calcResult.taxWarning}
@@ -6144,7 +6144,7 @@ const App = () => {
                           </td>
                           <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">
                             <div>{formatCurrency(calcResult.incomeTax)}</div>
-                            {isBonusList && calcResult.taxWarning && (
+                            {calcResult.taxWarning && (
                               <div
                                 className="text-[9px] text-red-600 mt-0.5 leading-none"
                                 title={calcResult.taxWarning}
@@ -7300,92 +7300,127 @@ const App = () => {
         )}
 
         {activeTab === "taxTable" && (
-          <div className="p-6 max-w-[2100px] mx-auto h-full">
+          <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
               <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-6">
                 <div>
                   <h2 className="text-2xl font-black text-slate-800">
-                    給与所得の源泉徴収税額表（令和８年分）
+                    登録済みの源泉徴収税額表
                   </h2>
                   <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
-                    Withholding Tax Table 2026
+                    Withholding Tax Tables
                   </p>
                 </div>
-                <div className="bg-blue-50 text-blue-700 px-4 py-1.5 rounded-lg border border-blue-100 font-black text-xs flex items-center gap-2">
-                  <Info size={14} /> 月額表
+              </div>
+
+              {Object.keys(taxTables).length === 0 ? (
+                <div className="p-10 text-center text-slate-400 font-bold bg-slate-50 rounded-lg border border-slate-200">
+                  <TableIcon
+                    size={48}
+                    className="mx-auto mb-4 text-slate-300"
+                  />
+                  <p>登録されている税額表がありません。</p>
+                  <p className="text-xs mt-2">
+                    共通設定の「源泉徴収税額表管理」からCSVをインポートしてください。
+                  </p>
                 </div>
-              </div>
-              <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-inner">
-                <table className="w-full border-collapse bg-white">
-                  <thead>
-                    <tr className="bg-slate-800 text-white text-[10px]">
-                      <th colSpan={2} className="border border-slate-700 p-3">
-                        その月の社会保険料等控除後の給与金額
-                      </th>
-                      <th
-                        colSpan={8}
-                        className="border border-slate-700 p-2 text-center border-l-2"
-                      >
-                        甲（扶養親族等の数）
-                      </th>
-                      <th className="border border-slate-700 p-2 text-center bg-slate-900 border-l-4">
-                        乙
-                      </th>
-                    </tr>
-                    <tr className="bg-slate-50 text-slate-500 text-[10px] font-black uppercase">
-                      <th className="border border-slate-200 p-2 w-28">
-                        円以上
-                      </th>
-                      <th className="border border-slate-200 p-2 w-28">
-                        円未満
-                      </th>
-                      {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-                        <th
-                          key={i}
-                          className="border border-slate-200 p-2 w-20 bg-white text-slate-800 border-l-2"
-                        >
-                          {i}人
-                        </th>
-                      ))}
-                      <th className="border border-slate-200 p-2 w-24 bg-slate-100 text-slate-800 border-l-4">
-                        税額
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-xs font-mono text-center">
-                    {TAX_TABLE_REIWA8.map((row, idx) => (
-                      <tr
-                        key={idx}
-                        className="hover:bg-slate-50 border-b border-slate-100"
-                      >
-                        <td className="p-2 text-right bg-slate-50/50 border-r">
-                          {formatCurrency(row.min)}
-                        </td>
-                        <td className="p-2 text-right border-r">
-                          {row.max === Infinity
-                            ? "以上"
-                            : formatCurrency(row.max)}
-                        </td>
-                        {row.rates.map((rate, i) => (
-                          <td
-                            key={i}
-                            className={`p-2 text-right border-l-2 ${
-                              rate === 0 ? "text-slate-200" : "font-bold"
-                            }`}
-                          >
-                            {formatCurrency(rate)}
-                          </td>
-                        ))}
-                        <td className="p-2 text-right bg-slate-100/50 font-black border-l-4">
-                          {typeof row.otsu === "number"
-                            ? formatCurrency(row.otsu)
-                            : row.otsu}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              ) : (
+                <div className="space-y-8">
+                  {Object.entries(taxTables).map(([docId, table]) => (
+                    <div
+                      key={docId}
+                      className="border border-slate-200 rounded-lg overflow-hidden shadow-sm"
+                    >
+                      <div className="bg-slate-800 text-white px-4 py-3 font-bold flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-indigo-500 px-2 py-1 rounded text-xs">
+                            {table.year}
+                          </span>
+                          <span className="bg-emerald-500 px-2 py-1 rounded text-xs uppercase tracking-wider">
+                            {table.type}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-300 font-mono">
+                          データ件数: {table.rows.length}件
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto max-h-[400px] custom-scrollbar">
+                        <table className="w-full text-[10px] text-right whitespace-nowrap bg-white">
+                          <thead className="bg-slate-100 sticky top-0 shadow-sm z-10">
+                            <tr className="text-slate-600">
+                              <th className="p-2 border-b border-r text-center w-24">
+                                以上
+                              </th>
+                              <th className="p-2 border-b border-r text-center w-24">
+                                未満
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲0
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲1
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲2
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲3
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲4
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲5
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲6
+                              </th>
+                              <th className="p-2 border-b border-r text-center">
+                                甲7
+                              </th>
+                              <th className="p-2 border-b text-center bg-amber-50">
+                                乙
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {table.rows.map((r, i) => (
+                              <tr
+                                key={i}
+                                className="hover:bg-slate-50 border-b border-slate-100"
+                              >
+                                <td className="p-2 border-r text-slate-500">
+                                  {r.min}
+                                </td>
+                                <td className="p-2 border-r text-slate-700 font-bold">
+                                  {r.max === Infinity ? "以上" : r.max}
+                                </td>
+                                {r.kou.map((k, ki) => (
+                                  <td
+                                    key={ki}
+                                    className={`p-2 border-r ${
+                                      k === 0
+                                        ? "text-slate-300"
+                                        : "font-bold text-slate-700"
+                                    }`}
+                                  >
+                                    {k}
+                                  </td>
+                                ))}
+                                <td className="p-2 bg-amber-50/30 font-bold text-amber-700">
+                                  {r.otsu.type === "rate"
+                                    ? r.otsu.value
+                                    : r.otsu.value}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -193,7 +193,7 @@ const parseTaxTableCsv = (csvText) => {
     const maxStr = cols[3].toLowerCase();
     const max =
       maxStr === "infinity" || maxStr === "" || maxStr === "以上"
-        ? Infinity
+        ? 999999999
         : Number(cols[3]);
     if (isNaN(max))
       throw new Error(`【行 ${rowNum}】「未満(max)」の値が数値ではありません`);
@@ -6980,7 +6980,7 @@ const App = () => {
                                 <tr key={i}>
                                   <td className="p-1 border-b">{r.min}</td>
                                   <td className="p-1 border-b">
-                                    {r.max === Infinity ? "以上" : r.max}
+                                    {r.max >= 999999999 ? "以上" : r.max}
                                   </td>
                                   <td className="p-1 border-b">{r.kou[0]}</td>
                                   <td className="p-1 border-b">
@@ -6996,7 +6996,7 @@ const App = () => {
                                     colSpan={4}
                                     className="p-1 text-center text-slate-400 font-bold bg-slate-50"
                                   >
-                                    ...他 {taxImportPreview.rows.length - 5}
+                                    他 {taxImportPreview.rows.length - 5}
                                     件のデータ
                                   </td>
                                 </tr>
@@ -7393,33 +7393,18 @@ const App = () => {
                             </tr>
                           </thead>
                           <tbody>
+                          <tbody>
                             {table.rows.map((r, i) => (
-                              <tr
-                                key={i}
-                                className="hover:bg-slate-50 border-b border-slate-100"
-                              >
-                                <td className="p-2 border-r text-slate-500">
-                                  {r.min}
-                                </td>
-                                <td className="p-2 border-r text-slate-700 font-bold">
-                                  {r.max === Infinity ? "以上" : r.max}
-                                </td>
+                              <tr key={i} className="hover:bg-slate-50 border-b border-slate-100">
+                                <td className="p-2 border-r text-slate-500">{r.min}</td>
+                                <td className="p-2 border-r text-slate-700 font-bold">{r.max >= 999999999 ? "以上" : r.max}</td>
                                 {r.kou.map((k, ki) => (
-                                  <td
-                                    key={ki}
-                                    className={`p-2 border-r ${
-                                      k === 0
-                                        ? "text-slate-300"
-                                        : "font-bold text-slate-700"
-                                    }`}
-                                  >
+                                  <td key={ki} className={`p-2 border-r ${k === 0 ? "text-slate-300" : "font-bold text-slate-700"}`}>
                                     {k}
                                   </td>
                                 ))}
                                 <td className="p-2 bg-amber-50/30 font-bold text-amber-700">
-                                  {r.otsu.type === "rate"
-                                    ? r.otsu.value
-                                    : r.otsu.value}
+                                  {r.otsu.type === "rate" ? r.otsu.value : r.otsu.value}
                                 </td>
                               </tr>
                             ))}

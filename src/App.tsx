@@ -1445,7 +1445,38 @@ const App = () => {
       alert("削除に失敗しました");
     }
   };
+  const handleDownloadTemplate = (type) => {
+    // 文字化け対策の UTF-8 BOM
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const header =
+      "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
+    let rows = "";
 
+    // 選択中の対象年度を反映
+    if (type === "monthly") {
+      rows += `${taxImportYear},monthly,0,105000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
+      rows += `${taxImportYear},monthly,105000,107000,170,0,0,0,0,0,0,0,fixed,3800\n`;
+      rows += `${taxImportYear},monthly,107000,109000,280,0,0,0,0,0,0,0,fixed,3800\n`;
+      rows += `${taxImportYear},monthly,109000,111000,380,0,0,0,0,0,0,0,fixed,3900\n`;
+    } else if (type === "bonus") {
+      rows += `${taxImportYear},bonus,0,68000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
+      rows += `${taxImportYear},bonus,68000,79000,0.02042,0,0,0,0,0,0,0,rate,0.04084\n`;
+      rows += `${taxImportYear},bonus,79000,252000,0.04084,0.02042,0,0,0,0,0,0,rate,0.2042\n`;
+    }
+
+    const csvContent = header + rows;
+    const blob = new Blob([bom, csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `withholding_${type}_template_${taxImportYear}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const yearsList = useMemo(() => {
     return buildYearsList(employees, settings);
   }, [employees, settings]);
@@ -6936,6 +6967,26 @@ const App = () => {
                           <option value="daily">日額表</option>
                           <option value="bonus">賞与算出率表</option>
                         </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 border-b border-slate-200 pb-4">
+                      <label className="text-xs font-bold text-slate-500 block mb-1">
+                        CSVテンプレートのダウンロード
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleDownloadTemplate("monthly")}
+                          className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 rounded transition-colors shadow-sm"
+                        >
+                          <Download size={14} /> 月額表テンプレート
+                        </button>
+                        <button
+                          onClick={() => handleDownloadTemplate("bonus")}
+                          className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 rounded transition-colors shadow-sm"
+                        >
+                          <Download size={14} /> 賞与算出率表テンプレート
+                        </button>
                       </div>
                     </div>
 

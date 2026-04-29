@@ -3212,7 +3212,7 @@ const App = () => {
             <Calculator className="text-emerald-400" size={24} /> PAYROLL
           </h1>
           <p className="text-[10px] text-slate-400 mt-1 ml-8">
-            クラウド賃金台帳システム
+            クラウド賃金台帳システム2
           </p>
         </div>
 

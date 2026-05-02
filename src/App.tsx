@@ -3780,7 +3780,20 @@ const App = () => {
             <p className="text-xs text-slate-400 mt-1 ml-10">税理士法人アストラスト</p>
           </div>
           <div className="flex items-center gap-4">
-            <div className="text-slate-300 text-xs font-bold font-mono bg-slate-800 px-4 py-2 rounded-lg border border-slate-700">
+            <button
+              onClick={() => setActiveTab("taxTable")}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
+            >
+              <TableIcon size={16} /> 源泉徴収税額表
+            </button>
+            <button
+              onClick={() => setActiveTab("stdRewardTable")}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
+            >
+              <Database size={16} /> 標準報酬月額表
+            </button>
+            <div className="w-px h-6 bg-slate-700 mx-2"></div>
+            <div className="text-slate-400 text-[10px] font-bold font-mono">
               ORG ID: {userId?.substring(0, 10) || "..."}
             </div>
           </div>
@@ -3877,16 +3890,6 @@ const App = () => {
 
         <nav className="p-4 space-y-2 border-b border-slate-800">
           <button
-            onClick={() => setActiveTab("portal")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "portal"
-                ? "bg-blue-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Building size={18} /> 顧問先ポータル
-          </button>
-          <button
             onClick={() => setActiveTab("ledger")}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
               activeTab === "ledger"
@@ -3924,27 +3927,7 @@ const App = () => {
                 : "text-slate-400 hover:bg-slate-800 hover:text-white"
             }`}
           >
-            <Settings size={18} /> 共通設定
-          </button>
-          <button
-            onClick={() => setActiveTab("stdRewardTable")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "stdRewardTable"
-                ? "bg-indigo-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Database size={18} /> 標準報酬月額表
-          </button>
-          <button
-            onClick={() => setActiveTab("taxTable")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "taxTable"
-                ? "bg-blue-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <TableIcon size={18} /> 源泉徴収税額表
+            <Settings size={18} /> 会社個別設定
           </button>
           <button
             onClick={() => setActiveTab("aggregation")}
@@ -8300,19 +8283,29 @@ const App = () => {
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 max-w-4xl mx-auto mt-4 mb-20">
               <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-6">
-                <div>
-                  <h2 className="text-xl font-black text-slate-800 flex items-center gap-2">
-                    <Database className="text-indigo-500" size={24} />{" "}
-                    標準報酬月額表
-                  </h2>
-                  <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
-                    Standard Remuneration Table
-                  </p>
+                <div className="flex items-center gap-6">
+                  <button
+                    onClick={() => setActiveTab("portal")}
+                    className="p-2 rounded-full hover:bg-slate-100 text-slate-500 transition-colors"
+                    title="ポータルへ戻る"
+                  >
+                    <X size={24} />
+                  </button>
+                  <div>
+                    <h2 className="text-xl font-black text-slate-800 flex items-center gap-2">
+                      <Database className="text-indigo-500" size={24} />{" "}
+                      事務所マスタ：標準報酬月額表
+                    </h2>
+                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
+                      Standard Remuneration Table
+                    </p>
+                  </div>
                 </div>
                 <div className="bg-indigo-50 text-indigo-700 px-4 py-1.5 rounded-lg border border-indigo-100 font-black text-xs flex items-center gap-2">
-                  <Info size={14} /> 月額表
+                  <Info size={14} /> 全顧問先共通設定
                 </div>
               </div>
+
               <p className="text-xs text-slate-500 mb-4">
                 ※この表で設定した標準報酬月額は、賃金台帳の「想定報酬月額」の自動算出に使用されます。
                 <br />
@@ -8437,19 +8430,27 @@ const App = () => {
             </div>
           </div>
         )}
-
         {activeTab === "taxTable" && (
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto relative">
             <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 max-w-4xl mx-auto mt-4 mb-20">
               <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-6">
-                <div>
-                  <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-                    <TableIcon className="text-blue-500" size={24} />
-                    登録済みの源泉徴収税額表
-                  </h2>
-                  <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
-                    Withholding Tax Tables
-                  </p>
+                <div className="flex items-center gap-6">
+                  <button
+                    onClick={() => setActiveTab("portal")}
+                    className="p-2 rounded-full hover:bg-slate-100 text-slate-500 transition-colors"
+                    title="ポータルへ戻る"
+                  >
+                    <X size={24} />
+                  </button>
+                  <div>
+                    <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                      <TableIcon className="text-blue-500" size={24} />
+                      事務所マスタ：源泉徴収税額表
+                    </h2>
+                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
+                      Withholding Tax Tables (Global)
+                    </p>
+                  </div>
                 </div>
               </div>
 

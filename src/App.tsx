@@ -143,20 +143,20 @@ const DEFAULT_SETTINGS = {
   allowanceDefinitions: [
     {
       id: "extra",
-      name: "役付手当",
+      name: "残業手当",
       isTaxable: true,
       isSocialIns: true,
       isEmploymentIns: true,
     },
     {
       id: "commute",
-      name: "通勤交通費",
+      name: "通勤手当",
       isTaxable: false,
       isSocialIns: true,
       isEmploymentIns: true,
     },
   ],
-  deductionDefinitions: [{ id: "union", name: "組合費" }],
+  deductionDefinitions: [{ id: "union", name: "その他" }],
   rateSchedules: DEFAULT_RATE_SCHEDULES,
   standardRewardTable: DEFAULT_STD_REWARD_TABLE,
 };
@@ -225,6 +225,7 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
           maxStr &&
           maxStr.toLowerCase() !== "infinity" &&
           maxStr !== "以上" &&
+          maxStr !== "千円以上" &&
           maxStr !== ""
         ) {
           max = Number(maxStr) * 1000;
@@ -244,6 +245,7 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
           otsuMaxStr &&
           otsuMaxStr.toLowerCase() !== "infinity" &&
           otsuMaxStr !== "以上" &&
+          otsuMaxStr !== "千円以上" &&
           otsuMaxStr !== ""
         ) {
           max = Number(otsuMaxStr) * 1000;
@@ -270,7 +272,7 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
 
       const maxStr = cols[3].toLowerCase();
       const max =
-        maxStr === "infinity" || maxStr === "" || maxStr === "以上"
+        maxStr === "infinity" || maxStr === "" || maxStr === "以上" || maxStr === "千円以上"
           ? 999999999
           : Number(cols[3]);
       if (isNaN(max))
@@ -622,10 +624,27 @@ const calculateIncomeTax = (
     (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
   );
 
+  // ★ここから修正：税額表の範囲外だった場合のフォールバック（自動切替）処理
   if (!row) {
-    log.push(`[所得税計算] 課税対象額が税額表の範囲外です`);
-    return { tax: 0, warning: "税額表の範囲外です", log };
+    if (!isOtsu) {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲を超えています。自動的に電算機計算(甲欄)へ切り替えます。`);
+      const densanResult = calculateIncomeTaxByDensanReiwa8({
+        taxableAfterSocial,
+        master,
+        dependents,
+      });
+      if (densanResult && densanResult.log) log.push(...densanResult.log);
+      return { 
+        tax: densanResult.tax, 
+        warning: "税額表の上限を超えたため、電算機特例で自動計算しました", 
+        log 
+      };
+    } else {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲外です(乙欄)`);
+      return { tax: 0, warning: "乙欄で税額表の上限を超えています。手動で計算・入力してください", log };
+    }
   }
+  // ★ここまで
 
   if (isOtsu) {
     if (row.otsu.type === "rate") {
@@ -1471,6 +1490,7 @@ const App = () => {
   const [isTaxImporting, setIsTaxImporting] = useState(false);
   const [viewingTaxTableId, setViewingTaxTableId] = useState(null); // ★詳細表示用モーダルステート
 
+  
   // ★追加: 年度別比較用データの集計
   const taxYearStats = useMemo(() => {
     const stats = {};
@@ -1565,28 +1585,43 @@ const App = () => {
 
   const handleDownloadTemplate = (type) => {
     const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
-    let header = "";
-    let rows = "";
+    let csvContent = "";
 
     if (type === "monthly") {
-      header =
+      let header =
         "year,type,min,max,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7,otsu_type,otsu_value\n";
-      rows += `${taxImportYear},monthly,0,105000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
+      let rows = `${taxImportYear},monthly,0,105000,0,0,0,0,0,0,0,0,rate,0.03063\n`;
       rows += `${taxImportYear},monthly,105000,107000,170,0,0,0,0,0,0,0,fixed,3800\n`;
       rows += `${taxImportYear},monthly,107000,109000,280,0,0,0,0,0,0,0,fixed,3800\n`;
       rows += `${taxImportYear},monthly,109000,111000,380,0,0,0,0,0,0,0,fixed,3900\n`;
+      csvContent = header + rows;
     } else if (type === "bonus_nta") {
-      header =
-        "year,rate,kou0_min,kou0_max,kou1_min,kou1_max,kou2_min,kou2_max,kou3_min,kou3_max,kou4_min,kou4_max,kou5_min,kou5_max,kou6_min,kou6_max,kou7_min,kou7_max,otsu_min,otsu_max\n";
-      rows += `${taxImportYear},0.000,0,82,0,107,0,143,0,181,0,218,0,251,0,284,0,317,,\n`;
-      rows += `${taxImportYear},2.042,82,94,107,250,143,276,181,300,218,300,251,304,284,343,317,383,,\n`;
-      rows += `${taxImportYear},4.084,94,260,250,289,276,321,300,354,300,387,304,412,343,438,383,463,,\n`;
-      rows += `${taxImportYear},10.210,342,372,373,401,400,426,424,452,452,477,479,503,505,527,529,552,0,224\n`;
-      rows += `${taxImportYear},20.420,605,684,621,705,636,728,651,751,666,774,681,798,697,821,708,845,224,295\n`;
-      rows += `${taxImportYear},45.945,3495,以上,3527,以上,3559,以上,3590,以上,3622,以上,3654,以上,3685,以上,3717,以上,1118,以上\n`;
+      const BONUS_NTA_TEMPLATE = `年度,賞与の金額に乗ずべき率,扶養0人_以上,扶養0人_未満,扶養1人_以上,扶養1人_未満,扶養2人_以上,扶養2人_未満,扶養3人_以上,扶養3人_未満,扶養4人_以上,扶養4人_未満,扶養5人_以上,扶養5人_未満,扶養6人_以上,扶養6人_未満,扶養7人以上_以上,扶養7人以上_未満,乙_以上,乙_未満
+${taxImportYear},0.000,0,82,0,107,0,143,0,181,0,218,0,251,0,284,0,317,,
+${taxImportYear},2.042,82,94,107,250,143,276,181,300,218,300,251,304,284,343,317,383,,
+${taxImportYear},4.084,94,260,250,289,276,321,300,354,300,387,304,412,343,438,383,463,,
+${taxImportYear},6.126,260,309,289,346,321,377,354,405,387,431,412,457,438,483,463,508,,
+${taxImportYear},8.168,309,342,346,373,377,400,405,424,431,452,457,479,483,505,508,529,,
+${taxImportYear},10.210,342,372,373,401,400,426,424,452,452,477,479,503,505,527,529,552,0,224
+${taxImportYear},12.252,372,402,401,430,426,457,452,484,477,509,503,531,527,553,552,578,,
+${taxImportYear},14.294,402,433,430,463,457,492,484,517,509,540,531,564,553,589,578,614,,
+${taxImportYear},16.336,433,520,463,520,492,525,517,550,540,577,564,604,589,630,614,657,,
+${taxImportYear},18.378,520,605,520,621,525,636,550,651,577,666,604,681,630,697,657,708,,
+${taxImportYear},20.420,605,684,621,705,636,728,651,751,666,774,681,798,697,821,708,845,224,295
+${taxImportYear},22.462,684,715,705,739,728,764,751,788,774,813,798,838,821,862,845,887,,
+${taxImportYear},24.504,715,752,739,778,764,804,788,830,813,856,838,881,862,907,887,933,,
+${taxImportYear},26.546,752,795,778,821,804,848,830,876,856,903,881,930,907,957,933,985,,
+${taxImportYear},28.588,795,854,821,882,848,910,876,938,903,966,930,994,957,1022,985,1051,,
+${taxImportYear},30.630,854,922,882,952,910,983,938,1013,966,1044,994,1074,1022,1104,1051,1135,295,527
+${taxImportYear},32.672,922,1318,952,1342,983,1367,1013,1391,1044,1416,1074,1440,1104,1464,1135,1489,,
+${taxImportYear},35.735,1318,1521,1342,1526,1367,1526,1391,1538,1416,1555,1440,1555,1464,1555,1489,1583,,
+${taxImportYear},38.798,1521,2621,1526,2645,1526,2669,1538,2693,1555,2716,1555,2740,1555,2764,1583,2788,527,1118
+${taxImportYear},41.861,2621,3495,2645,3527,2669,3559,2693,3590,2716,3622,2740,3654,2764,3685,2788,3717,,
+${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,3590,千円以上,3622,千円以上,3654,千円以上,3685,千円以上,3717,千円以上,1118,千円以上`;
+
+      csvContent = BONUS_NTA_TEMPLATE;
     }
 
-    const csvContent = header + rows;
     const blob = new Blob([bom, csvContent], {
       type: "text/csv;charset=utf-8;",
     });
@@ -1600,8 +1635,124 @@ const App = () => {
     URL.revokeObjectURL(url);
   };
 
-  const yearsList = useMemo(() => {
-    return buildYearsList(employees, settings);
+  // --- 賞与算出率表（税務署形式）のUI操作ハンドラ ---
+  const handleLoadBonusNtaSample = () => {
+    if (hasUnsavedBonusChanges && !window.confirm("未保存の変更がありますが、サンプルで上書きしますか？")) return;
+    setBonusNtaTableData(JSON.parse(JSON.stringify(R08_BONUS_NTA_SAMPLE)));
+    setBonusNtaError("");
+    setHasUnsavedBonusChanges(true);
+  };
+
+  const handleLoadBonusNtaDb = () => {
+    if (hasUnsavedBonusChanges && !window.confirm("未保存の変更がありますが、登録済みデータで上書きしますか？")) return;
+    const tableKey = `${bonusNtaYear}_bonus_nta`;
+    const table = taxTables[tableKey];
+    if (table && table.rows && table.rows.length > 0) {
+      const uiData = table.rows.map(r => {
+        const formatVal = (v) => {
+           if (v >= 999999999) return "千円以上";
+           return String(v / 1000);
+        };
+        const res = {
+          rate: (r.rate * 100).toFixed(3),
+          otsu_min: r.otsuRange ? formatVal(r.otsuRange.min) : "",
+          otsu_max: r.otsuRange ? formatVal(r.otsuRange.max) : "",
+        };
+        r.kouRanges.forEach((kou, j) => {
+           res[`kou_${j}_min`] = String(kou.min / 1000);
+           res[`kou_${j}_max`] = formatVal(kou.max);
+        });
+        return res;
+      });
+      while (uiData.length < 21) {
+         uiData.push(createEmptyBonusNtaTable()[0]);
+      }
+      setBonusNtaTableData(uiData.slice(0, 21));
+      setBonusNtaError("");
+      setHasUnsavedBonusChanges(false);
+      alert(`${bonusNtaYear}年度の登録済みデータを読み込みました`);
+    } else {
+      alert(`${bonusNtaYear}年度の賞与算出率表は登録されていません`);
+    }
+  };
+
+  const handleClearBonusNta = () => {
+    if (!window.confirm("表の入力内容をすべてクリアしますか？")) return;
+    setBonusNtaTableData(createEmptyBonusNtaTable());
+    setBonusNtaError("");
+    setHasUnsavedBonusChanges(true);
+  };
+
+  const handleChangeBonusNtaCell = (rowIndex, field, val) => {
+    const newData = [...bonusNtaTableData];
+    newData[rowIndex] = { ...newData[rowIndex], [field]: val };
+    setBonusNtaTableData(newData);
+    setHasUnsavedBonusChanges(true);
+  };
+
+  const handleSaveBonusNta = async () => {
+    setBonusNtaError("");
+    try {
+      if (bonusNtaTableData.length !== 21) throw new Error("行数が21行ではありません");
+
+      const formattedRows = bonusNtaTableData.map((row, index) => {
+        const rowNum = index + 1;
+        const rate = Number(row.rate) / 100;
+        if (isNaN(rate) || row.rate === "") throw new Error(`【${rowNum}行目】税率が未入力か、正しくありません`);
+
+        const parseVal = (val) => {
+          if (val === "" || val === undefined || val === null) return null;
+          if (val === "以上" || val === "千円以上" || String(val).toLowerCase() === "infinity") return 999999999;
+          const num = Number(val);
+          if (isNaN(num)) throw new Error(`【${rowNum}行目】数値以外の文字が含まれています (${val})`);
+          return num * 1000;
+        };
+
+        const kouRanges = [];
+        for (let j = 0; j <= 7; j++) {
+          const minVal = parseVal(row[`kou_${j}_min`]) || 0;
+          const maxVal = parseVal(row[`kou_${j}_max`]);
+          const finalMax = maxVal === null ? 999999999 : maxVal;
+          
+          if (minVal >= finalMax) throw new Error(`【${rowNum}行目 扶養${j}人】以上 が 未満 を超えています`);
+          
+          kouRanges.push({ min: minVal, max: finalMax });
+        }
+
+        let otsuRange = null;
+        const oMin = parseVal(row.otsu_min);
+        const oMax = parseVal(row.otsu_max);
+        
+        if (oMin !== null || oMax !== null) {
+          const finalOMin = oMin || 0;
+          const finalOMax = oMax === null ? 999999999 : oMax;
+          if (finalOMin >= finalOMax) throw new Error(`【${rowNum}行目 乙欄】以上 が 未満 を超えています`);
+          otsuRange = { min: finalOMin, max: finalOMax };
+        }
+
+        return { rate, kouRanges, otsuRange };
+      });
+
+      if (!window.confirm(`${bonusNtaYear}年度の賞与算出率表として保存します。よろしいですか？`)) return;
+
+      const docId = `${bonusNtaYear}_bonus_nta`;
+      const docRef = doc(db, `artifacts/${appId}/users/${userId}/taxTables/${docId}`);
+      await setDoc(docRef, {
+        year: bonusNtaYear,
+        type: "bonus_nta",
+        importedAt: new Date().toISOString(),
+        rows: formattedRows,
+      });
+
+      setHasUnsavedBonusChanges(false);
+      alert("賞与算出率表を保存しました");
+    } catch (err) {
+      setBonusNtaError(err.message);
+    }
+  };
+
+  const yearsList = useMemo(() => {
+    return buildYearsList(employees, settings);
   }, [employees, settings]);
 
   useEffect(() => {
@@ -6572,7 +6723,7 @@ const App = () => {
                       <label className="text-xs font-bold text-slate-500 uppercase">
                         所得税計算方式
                       </label>
-                      <div className="flex gap-4">
+                      <div className="flex flex-col gap-3">
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
                             type="radio"
@@ -6587,6 +6738,9 @@ const App = () => {
                           />
                           <span className="text-sm font-bold text-slate-700">
                             源泉徴収税額表を使用 (推奨)
+                            <span className="text-[10px] text-slate-500 font-normal ml-2">
+                              ※表の上限超過時は自動で電算機計算に切り替わります
+                            </span>
                           </span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
@@ -6599,7 +6753,10 @@ const App = () => {
                             className="text-orange-500 focus:ring-orange-500"
                           />
                           <span className="text-sm font-bold text-slate-700">
-                            電算機計算の特例を使用
+                            すべて電算機計算の特例を使用
+                            <span className="text-[10px] text-slate-500 font-normal ml-2">
+                              ※税額表CSVは使用せず、全社員を数式で計算します
+                            </span>
                           </span>
                         </label>
                       </div>
@@ -7110,8 +7267,7 @@ const App = () => {
                         >
                           <Download size={14} /> 月額表テンプレート
                         </button>
-                        <button
-                          onClick={() => handleDownloadTemplate("bonus")}
+                        <button　onClick={() => handleDownloadTemplate("bonus_nta")}
                           className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 rounded transition-colors shadow-sm"
                         >
                           <Download size={14} /> 賞与算出率表テンプレート
@@ -7826,11 +7982,11 @@ const App = () => {
                                          {" "}
                     </div>
                                        {" "}
-                    <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar">
-                                           {" "}
-                      <table className="w-full text-xs text-right whitespace-nowrap bg-white">
-                                               {" "}
-                        <thead className="bg-slate-800 text-white sticky top-0">
+                    <div className="max-h-[50vh] overflow-y-auto overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar">
+                                           {" "}
+                      <table className="w-full text-xs text-right whitespace-nowrap bg-white relative">
+                                               {" "}
+                        <thead className="bg-slate-800 text-white sticky top-0 z-10">
                                                    {" "}
                           {taxTables[viewingTaxTableId].type === "bonus_nta" ? (
                             <tr>
@@ -7899,14 +8055,13 @@ const App = () => {
                         </thead>
                                                {" "}
                         <tbody>
-                                                   {" "}
-                          {taxTables[viewingTaxTableId].rows
-                            .slice(0, 10)
-                            .map((r, i) => (
-                              <tr
-                                key={i}
-                                className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
-                              >
+                                                   {" "}
+                          {taxTables[viewingTaxTableId].rows
+                            .map((r, i) => (
+                              <tr
+                                key={i}
+                                className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
+                              >
                                                                {" "}
                                 {taxTables[viewingTaxTableId].type ===
                                 "bonus_nta" ? (
@@ -7993,20 +8148,12 @@ const App = () => {
                         </tbody>
                                              {" "}
                       </table>
-                                         {" "}
-                    </div>
-                                       {" "}
-                    {taxTables[viewingTaxTableId].rows.length > 10 && (
-                      <div className="mt-3 text-center text-xs font-bold text-slate-400 bg-slate-50 py-2 rounded">
-                                                ※
-                        先頭10行のみプレビュー表示しています                    
-                         {" "}
-                      </div>
-                    )}
-                                     {" "}
-                  </div>
-                                   {" "}
-                  <div className="p-4 bg-gray-50 flex justify-end border-t border-gray-200">
+                                         {" "}
+                    </div>
+                                       {" "}
+                  </div>
+                                   {" "}
+                  <div className="p-4 bg-gray-50 flex justify-end border-t border-gray-200">
                                        {" "}
                     <button
                       onClick={() => setViewingTaxTableId(null)}

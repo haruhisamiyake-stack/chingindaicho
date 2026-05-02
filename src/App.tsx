@@ -336,6 +336,20 @@ const buildYearsList = (employees, settings) => {
       yearSet.add(year);
     });
   });
+
+  // ▼▼▼ ここから追加：常に「次の年度」を選択肢に出すロジック ▼▼▼
+  let maxYearNum = 8; // 最低R08を基準とする
+  yearSet.forEach(y => {
+    const num = Number(String(y).replace("R", ""));
+    if (!isNaN(num) && num > maxYearNum) {
+      maxYearNum = num;
+    }
+  });
+  // 最大年度の次の年（例：R08ならR09）を追加
+  const nextYear = `R${String(maxYearNum + 1).padStart(2, "0")}`;
+  yearSet.add(nextYear);
+  // ▲▲▲ ここまで追加 ▲▲▲
+
   return Array.from(yearSet).sort((a, b) => {
     const aNum = Number(String(a).replace("R", ""));
     const bNum = Number(String(b).replace("R", ""));
@@ -1025,6 +1039,57 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       : master.socialIns === 1;
   const hasEmployment = master.employmentIns === 1;
 
+  const employment = hasEmployment
+    ? Math.floor(employmentInsGross * (eRate / 1000))
+    : 0;
+
+  const stdAmountMissing = (hasHealth || hasPension) && stdAmount === 0;
+  if (stdAmountMissing) {
+   calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算をブロックします。`);
+   const residentTax = Number(row.residentTax) || 0;
+   let totalCustomDeds = 0;
+   deductionDefs.forEach((def) => {
+    const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+    totalCustomDeds += amt;
+   });
+   const socialTotal = employment;
+   const totalDeductions = socialTotal + residentTax + totalCustomDeds;
+   const netPay = grossPay - totalDeductions;
+   return {
+    ...row,
+    grossPay,
+    health: 0,
+    pension: 0,
+    nursing: 0,
+    childCare: 0,
+    employment,
+    incomeTax: null,
+    taxWarning: "標準報酬月額が未入力です",
+    isBlocking: true,
+    netPay,
+    socialTotal,
+    estStdAmount,
+    totalCustomDeds,
+    totalDeductions,
+    calcLog,
+   };
+  }
+
+  if (stdAmount > 0 && estStdAmount > 0 && stdAmount !== estStdAmount) {
+   const tbl = settings?.standardRewardTable?.length > 0 ? settings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
+   const getGrade = (amt) => { const r = tbl.find(tr => amt >= Number(tr.min) && amt < Number(tr.max)); return r ? Number(r.grade) : null; };
+   const sGrade = getGrade(stdAmount);
+   const eGrade = getGrade(estStdAmount);
+   if (sGrade !== null && eGrade !== null) {
+    const gDiff = Math.abs(sGrade - eGrade);
+    if (gDiff >= 2) {
+     calcLog.push(`⚠ 標準報酬月額（${formatCurrency(stdAmount)}円/等級${sGrade}）と推定値（${formatCurrency(estStdAmount)}円/等級${eGrade}）の差が${gDiff}等級あります。届出内容を確認してください。`);
+    } else {
+     calcLog.push(`△ 標準報酬月額（${formatCurrency(stdAmount)}円）と推定値（${formatCurrency(estStdAmount)}円）に差異があります。`);
+    }
+   }
+  }
+
   const insMultiplier = row.isDoubleSocialIns ? 2 : 1;
   if (row.isDoubleSocialIns)
     calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
@@ -1055,9 +1120,6 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     ins.childCare *= insMultiplier;
   }
 
-  const employment = hasEmployment
-    ? Math.floor(employmentInsGross * (eRate / 1000))
-    : 0;
   const socialTotal =
     ins.health + ins.pension + ins.nursing + ins.childCare + employment;
 
@@ -1167,9 +1229,9 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     nursing: ins.nursing,
     childCare: ins.childCare,
     employment,
-    incomeTax,
-    taxWarning,
-    isBlocking,
+    incomeTax: incomeTax,
+    taxWarning: taxWarning,
+    isBlocking: isBlocking,
     netPay,
     socialTotal,
     estStdAmount: estStdAmount,
@@ -5525,17 +5587,44 @@ const App = () => {
                                 isSocialInsEnrolled &&
                                 (!stdAmount || Number(stdAmount) <= 0);
 
+                              // 推定標準報酬月額との差異チェック
+                              const estAmt = results.monthlyResults[m]?.estStdAmount;
+                              const stdNum = Number(stdAmount) || 0;
+                              let gradeDiff = 0;
+                              let hasDeviation = false;
+                              if (isSocialInsEnrolled && stdNum > 0 && estAmt > 0 && stdNum !== estAmt) {
+                                hasDeviation = true;
+                                const tbl = settings?.standardRewardTable?.length > 0 ? settings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
+                                const getGrade = (amt) => { const row = tbl.find(r => amt >= Number(r.min) && amt < Number(r.max)); return row ? Number(row.grade) : null; };
+                                const stdGrade = getGrade(stdNum);
+                                const estGrade = getGrade(estAmt);
+                                if (stdGrade !== null && estGrade !== null) gradeDiff = Math.abs(stdGrade - estGrade);
+                              }
+                              const bgClass = isUnset ? "bg-red-50" : gradeDiff >= 2 ? "bg-red-50" : hasDeviation ? "bg-amber-50" : "bg-white";
+
                               return (
                                 <td
                                   key={m}
-                                  className={`border border-gray-300 p-0.5 relative ${
-                                    isUnset ? "bg-red-50" : "bg-white"
-                                  }`}
+                                  className={`border border-gray-300 p-0.5 relative ${bgClass}`}
                                 >
                                   {isUnset && (
                                     <div className="absolute top-0 left-0 w-full flex justify-center -mt-1 pointer-events-none">
                                       <span className="text-[7px] text-red-600 font-black leading-none whitespace-nowrap drop-shadow-md">
                                         ⚠️未入力
+                                      </span>
+                                    </div>
+                                  )}
+                                  {!isUnset && gradeDiff >= 2 && (
+                                    <div className="absolute top-0 left-0 w-full flex justify-center -mt-1 pointer-events-none">
+                                      <span className="text-[7px] text-red-600 font-black leading-none whitespace-nowrap drop-shadow-md">
+                                        ⚠️等級差{gradeDiff}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {!isUnset && hasDeviation && gradeDiff < 2 && (
+                                    <div className="absolute top-0 left-0 w-full flex justify-center -mt-1 pointer-events-none">
+                                      <span className="text-[7px] text-amber-600 font-black leading-none whitespace-nowrap drop-shadow-md">
+                                        △推定と差異
                                       </span>
                                     </div>
                                   )}
@@ -5558,6 +5647,10 @@ const App = () => {
                                     className={`w-full text-right outline-none font-black font-mono text-[11px] px-0.5 mt-2 bg-transparent ${
                                       isUnset
                                         ? "text-red-600 placeholder-red-300"
+                                        : gradeDiff >= 2
+                                        ? "text-red-600"
+                                        : hasDeviation
+                                        ? "text-amber-700"
                                         : "text-blue-900"
                                     } ${
                                       isYearLocked ||
@@ -5568,6 +5661,13 @@ const App = () => {
                                     }`}
                                     placeholder={
                                       isSocialInsEnrolled ? "入力必須" : "不要"
+                                    }
+                                    title={
+                                      gradeDiff >= 2
+                                        ? `標準報酬月額が推定値と大きく異なります（${gradeDiff}等級差）。届出内容または入力誤りを確認してください。`
+                                        : hasDeviation
+                                        ? "給与額から推定される標準報酬月額と入力値が異なります。算定基礎届・月額変更届の内容を確認してください。"
+                                        : ""
                                     }
                                   />
                                 </td>
@@ -9367,7 +9467,16 @@ const App = () => {
         </div>
       )}
       {/* ＝＝＝ 給与明細プレビュー モーダル (単票) ＝＝＝ */}
-      {slipEmployeeId && employees[slipEmployeeId] && !isBulkPrintOpen && (
+      {slipEmployeeId && employees[slipEmployeeId] && !isBulkPrintOpen && (() => {
+        const _emp = employees[slipEmployeeId];
+        const _isBonus = selectedListMonth === "bonus" || selectedListMonth === "bonus2";
+        let _isBlocking = false;
+        if (!_isBonus) {
+          const _yd = _emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+          const _rd = _yd.monthly?.[selectedListMonth] || {};
+          _isBlocking = calculateMonthlyResult(_emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables).isBlocking || false;
+        }
+        return (
         <div
           id="modal-backdrop-single"
           className="fixed inset-0 bg-slate-900/60 z-[100] flex justify-center items-start overflow-y-auto py-10 backdrop-blur-sm transition-opacity"
@@ -9375,9 +9484,13 @@ const App = () => {
           <div className="print-area w-[850px] relative print:w-full">
             <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
               <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
+                {_isBlocking && (
+                  <span className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 rounded px-2 py-1">計算不可：印刷できません</span>
+                )}
                 <button
                   onClick={() => window.print()}
-                  className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors"
+                  disabled={_isBlocking}
+                  className={`flex items-center gap-2 ${_isBlocking ? "bg-slate-400 cursor-not-allowed opacity-60" : "bg-indigo-600 hover:bg-indigo-500"} text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors`}
                 >
                   <Printer size={16} /> 印刷する
                 </button>
@@ -9396,13 +9509,20 @@ const App = () => {
             )}
           </div>
         </div>
-      )}
+        );
+      })()}
       {/* ＝＝＝ 給与明細プレビュー モーダル (一括印刷) ＝＝＝ */}
       {isBulkPrintOpen &&
         (() => {
           const activeEmployees = Object.entries(employees).filter(
             ([id, emp]) => emp.master?.status !== "retired"
           );
+          const _isBonusMonth = selectedListMonth === "bonus" || selectedListMonth === "bonus2";
+          const hasBlockingEmployee = !_isBonusMonth && activeEmployees.some(([id, emp]) => {
+            const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+            const _rd = _yd.monthly?.[selectedListMonth] || {};
+            return calculateMonthlyResult(emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables).isBlocking || false;
+          });
           return (
             <div
               id="modal-backdrop-bulk"
@@ -9421,10 +9541,13 @@ const App = () => {
                         対象 {activeEmployees.length}名
                       </span>
                     </div>
+                    {hasBlockingEmployee && (
+                      <span className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 rounded px-2 py-1">計算不可の明細があります</span>
+                    )}
                     <button
                       onClick={() => window.print()}
-                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors disabled:opacity-50"
-                      disabled={activeEmployees.length === 0}
+                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={activeEmployees.length === 0 || hasBlockingEmployee}
                     >
                       <Printer size={16} /> 印刷する
                     </button>

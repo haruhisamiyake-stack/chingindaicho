@@ -1513,11 +1513,24 @@ const calculateBonusResult = ({
     settings,
     prevMonthKey,
     yearStr,
-    taxTables
+    taxTables,
+    monthlyLocks
   );
+  if (prevMonthResult.isBlocking || prevMonthResult.socialTotal === null) {
+    return {
+      basePay: Number(b.basePay) || 0,
+      grossPay: bGross,
+      health: null, pension: null, nursing: null, childCare: null,
+      employment: null, socialTotal: null,
+      incomeTax: null, totalDeductions: null, netPay: null,
+      isBlocking: true,
+      taxWarning: "前月給与の社保控除後金額が計算不可です",
+      calcLog,
+    };
+  }
   const lastMonthSalaryAfterSocial = Math.max(
     0,
-    prevTaxableGross - (prevMonthResult.socialTotal || 0)
+    prevTaxableGross - prevMonthResult.socialTotal
   );
 
   const taxResult = calculateBonusIncomeTax(
@@ -8713,32 +8726,29 @@ const App = () => {
             // ★ 給与と賞与で集計用変数を分ける
             let salaryHeadcount = 0;
             let salaryGrossPay = 0;
-            let salaryIncomeTax = 0;
+            let salaryIncomeTaxTotal = 0;
 
             let bonusHeadcount = 0;
             let bonusGrossPay = 0;
-            let bonusIncomeTax = 0;
+            let bonusIncomeTaxTotal = 0;
 
-            // 賞与の簡易集計ヘルパー
-            const getBonusAggregation = (empData, bonusKey) => {
-              const b = empData?.years?.[selectedYear]?.[bonusKey];
-              if (!b || !b.payDate) return null;
-              const mStr = b.payDate.split("-")[1]; // YYYY-MM-DD から MM を抽出
-              let tAllowances = 0;
-              Object.values(b.allowanceAmounts || {}).forEach(
-                (v) => (tAllowances += Number(v) || 0)
-              );
-              return {
-                monthStr: mStr,
-                gross: (Number(b.basePay) || 0) + tAllowances,
-                tax: Number(b.incomeTax) || 0,
-              };
-            };
+            const excludedItems = [];
 
             if (!isSantei && !isRoubou) {
               Object.values(employees).forEach((emp) => {
                 const yearData = emp.data?.years?.[selectedYear];
                 if (!yearData) return;
+
+                const empName = emp.master?.name || emp.master?.id || "不明";
+                const empCode = emp.master?.employeeCode || emp.master?.id || "-";
+                const allowanceDefs =
+                  settings?.allowanceDefinitions?.length > 0
+                    ? settings.allowanceDefinitions
+                    : emp.master?.allowanceDefinitions || [];
+                const deductionDefs =
+                  settings?.deductionDefinitions?.length > 0
+                    ? settings.deductionDefinitions
+                    : emp.master?.deductionDefinitions || [];
 
                 targetMonths.forEach((m) => {
                   const row = yearData.monthly[m];
@@ -8758,26 +8768,66 @@ const App = () => {
                       taxTables,
                       monthlyLocks
                     );
-                    salaryHeadcount += 1;
-                    salaryGrossPay += res.grossPay;
-                    salaryIncomeTax += res.incomeTax;
+                    if (res.isBlocking) {
+                      excludedItems.push({
+                        code: empCode,
+                        name: empName,
+                        type: "給与",
+                        month: `${parseInt(m, 10)}月`,
+                        reason: res.lockMessage || res.taxWarning || "計算不可",
+                      });
+                    } else {
+                      salaryHeadcount += 1;
+                      salaryGrossPay += res.grossPay || 0;
+                      salaryIncomeTaxTotal += res.incomeTax || 0;
+                    }
                   }
                 });
 
-                const b1 = getBonusAggregation(emp.data, "bonus");
-                if (b1 && targetMonths.includes(b1.monthStr) && b1.gross > 0) {
-                  bonusHeadcount += 1;
-                  bonusGrossPay += b1.gross;
-                  bonusIncomeTax += b1.tax;
-                }
-                const b2 = getBonusAggregation(emp.data, "bonus2");
-                if (b2 && targetMonths.includes(b2.monthStr) && b2.gross > 0) {
-                  bonusHeadcount += 1;
-                  bonusGrossPay += b2.gross;
-                  bonusIncomeTax += b2.tax;
-                }
+                const aggBonus = (bonusKey, label) => {
+                  const bonusRow = yearData[bonusKey];
+                  if (!bonusRow || !bonusRow.payDate) return;
+                  const mStr = bonusRow.payDate.split("-")[1];
+                  if (!targetMonths.includes(mStr)) return;
+                  let tAllowances = 0;
+                  Object.values(bonusRow.allowanceAmounts || {}).forEach(
+                    (v) => (tAllowances += Number(v) || 0)
+                  );
+                  const gross = (Number(bonusRow.basePay) || 0) + tAllowances;
+                  if (gross <= 0) return;
+                  const bRes = calculateBonusResult({
+                    master: emp.master,
+                    bonusRow,
+                    bonusKey,
+                    settings,
+                    yearData,
+                    allowanceDefs,
+                    deductionDefs,
+                    monthKeyForRates: getBonusRateMonth(bonusRow),
+                    yearStr: selectedYear,
+                    taxTables,
+                    monthlyLocks,
+                  });
+                  if (bRes.isBlocking) {
+                    excludedItems.push({
+                      code: empCode,
+                      name: empName,
+                      type: label,
+                      month: `${parseInt(mStr, 10)}月`,
+                      reason: bRes.lockMessage || bRes.taxWarning || "計算不可",
+                    });
+                  } else {
+                    bonusHeadcount += 1;
+                    bonusGrossPay += bRes.grossPay || 0;
+                    bonusIncomeTaxTotal += bRes.incomeTax || 0;
+                  }
+                };
+
+                aggBonus("bonus", "賞与①");
+                aggBonus("bonus2", "賞与②");
               });
             }
+            const incomeTaxTotal = salaryIncomeTaxTotal + bonusIncomeTaxTotal;
 
             // --- 2. 算定基礎届 集計ロジック ---
             let santeiData = [];
@@ -9450,7 +9500,7 @@ const App = () => {
                       </div>
                     </div>
                   ) : (
-                    // 所得税 集計パネルのUI
+                    <>
                     <div className="bg-white border-2 border-slate-800 rounded-lg p-8 relative">
                       <div className="absolute top-0 left-0 bg-slate-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
                         納付書 転記用データ
@@ -9488,7 +9538,7 @@ const App = () => {
                             <span className="text-sm mr-1 text-blue-400">¥</span>{formatCurrency(salaryGrossPay)}
                           </div>
                           <div className="border-r-2 border-slate-800 py-4 text-2xl font-mono font-black text-rose-600 bg-rose-50/30 flex items-center justify-center">
-                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(salaryIncomeTax)}
+                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(salaryIncomeTaxTotal)}
                           </div>
                         </div>
 
@@ -9502,7 +9552,7 @@ const App = () => {
                             <span className="text-sm mr-1 text-blue-400">¥</span>{formatCurrency(bonusGrossPay)}
                           </div>
                           <div className="border-r-2 border-slate-800 py-4 text-2xl font-mono font-black text-rose-600 bg-rose-50/30 flex items-center justify-center">
-                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(bonusIncomeTax)}
+                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(bonusIncomeTaxTotal)}
                           </div>
                         </div>
 
@@ -9516,11 +9566,40 @@ const App = () => {
                             <span className="text-sm mr-1">¥</span>{formatCurrency(salaryGrossPay + bonusGrossPay)}
                           </div>
                           <div className="border-r-2 border-slate-800 py-3 text-2xl font-mono font-black text-rose-700 flex items-center justify-center">
-                            <span className="text-sm mr-1">¥</span>{formatCurrency(salaryIncomeTax + bonusIncomeTax)}
+                            <span className="text-sm mr-1">¥</span>{formatCurrency(incomeTaxTotal)}
                           </div>
                         </div>
                       </div>
                     </div>
+                    {excludedItems.length > 0 && (
+                      <div className="mt-6 bg-amber-50 border border-amber-200 rounded-xl p-5">
+                        <h4 className="text-sm font-black text-amber-700 mb-1">⚠ 未確定一覧（集計から除外）</h4>
+                        <p className="text-[10px] text-amber-600 mb-3">下記の明細は計算不可のため集計に含まれていません。内容を確認・修正してください。</p>
+                        <table className="w-full text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-amber-100 text-amber-800 font-black text-left">
+                              <th className="border border-amber-200 p-2">社員コード</th>
+                              <th className="border border-amber-200 p-2">氏名</th>
+                              <th className="border border-amber-200 p-2">区分</th>
+                              <th className="border border-amber-200 p-2">支給月</th>
+                              <th className="border border-amber-200 p-2">除外理由</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {excludedItems.map((item, i) => (
+                              <tr key={i} className="border-b border-amber-100 bg-white hover:bg-amber-50">
+                                <td className="border border-amber-200 p-2 font-mono text-slate-500">{item.code}</td>
+                                <td className="border border-amber-200 p-2 font-bold text-slate-700">{item.name}</td>
+                                <td className="border border-amber-200 p-2 text-indigo-600 font-bold">{item.type}</td>
+                                <td className="border border-amber-200 p-2 font-mono">{item.month}</td>
+                                <td className="border border-amber-200 p-2 text-red-600 font-bold">{item.reason}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    </>
                   )}
                 </div>
               </div>

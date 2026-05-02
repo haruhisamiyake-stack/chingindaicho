@@ -8274,9 +8274,14 @@ const App = () => {
               periodText = "4月〜6月支給分実績 (定時決定・算定基礎届)";
             }
 
-            let totalHeadcount = 0;
-            let totalGrossPay = 0;
-            let totalIncomeTax = 0;
+            // ★ 給与と賞与で集計用変数を分ける
+            let salaryHeadcount = 0;
+            let salaryGrossPay = 0;
+            let salaryIncomeTax = 0;
+
+            let bonusHeadcount = 0;
+            let bonusGrossPay = 0;
+            let bonusIncomeTax = 0;
 
             // 賞与の簡易集計ヘルパー
             const getBonusAggregation = (empData, bonusKey) => {
@@ -8316,23 +8321,23 @@ const App = () => {
                       selectedYear,
                       taxTables
                     );
-                    totalHeadcount += 1;
-                    totalGrossPay += res.grossPay;
-                    totalIncomeTax += res.incomeTax;
+                    salaryHeadcount += 1;
+                    salaryGrossPay += res.grossPay;
+                    salaryIncomeTax += res.incomeTax;
                   }
                 });
 
                 const b1 = getBonusAggregation(emp.data, "bonus");
                 if (b1 && targetMonths.includes(b1.monthStr) && b1.gross > 0) {
-                  totalHeadcount += 1;
-                  totalGrossPay += b1.gross;
-                  totalIncomeTax += b1.tax;
+                  bonusHeadcount += 1;
+                  bonusGrossPay += b1.gross;
+                  bonusIncomeTax += b1.tax;
                 }
                 const b2 = getBonusAggregation(emp.data, "bonus2");
                 if (b2 && targetMonths.includes(b2.monthStr) && b2.gross > 0) {
-                  totalHeadcount += 1;
-                  totalGrossPay += b2.gross;
-                  totalIncomeTax += b2.tax;
+                  bonusHeadcount += 1;
+                  bonusGrossPay += b2.gross;
+                  bonusIncomeTax += b2.tax;
                 }
               });
             }
@@ -9017,42 +9022,59 @@ const App = () => {
                           {periodText}
                         </p>
                         <p className="text-[10px] text-slate-400 mt-1">
-                          ※この期間に支給日が設定されている給与・賞与の合算値です
+                          ※この期間に支給日が設定されている給与・賞与の集計値です
                         </p>
                       </div>
 
-                      <div className="grid grid-cols-3 gap-0 border-t-2 border-l-2 border-slate-800 text-slate-800">
-                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col">
-                          <div className="bg-slate-100 text-center py-2 font-black text-sm border-b-2 border-slate-800">
-                            延べ人員
+                      {/* ★ 表形式に変更し、納付書に合わせて給与・賞与を分離 */}
+                      <div className="border-t-2 border-l-2 border-slate-800 text-slate-800">
+                        {/* ヘッダー */}
+                        <div className="grid grid-cols-4 bg-slate-100 font-black text-sm text-center border-b-2 border-slate-800">
+                          <div className="border-r-2 border-slate-800 py-2">区分</div>
+                          <div className="border-r-2 border-slate-800 py-2">延べ人員</div>
+                          <div className="border-r-2 border-slate-800 py-2 text-blue-900 bg-blue-100/50">支給額</div>
+                          <div className="border-r-2 border-slate-800 py-2 text-rose-900 bg-rose-100/50">税額 (所得税)</div>
+                        </div>
+
+                        {/* 給料 */}
+                        <div className="grid grid-cols-4 text-center border-b border-slate-300">
+                          <div className="border-r-2 border-slate-800 py-4 font-black flex items-center justify-center bg-slate-50">俸給・給料等</div>
+                          <div className="border-r-2 border-slate-800 py-4 text-xl font-mono flex items-center justify-center">
+                            {salaryHeadcount} <span className="text-xs ml-1 text-slate-500 font-sans">人</span>
                           </div>
-                          <div className="flex-1 flex items-center justify-center p-6 text-3xl font-mono font-black tracking-wider">
-                            {totalHeadcount}{" "}
-                            <span className="text-base font-bold ml-1 text-slate-500 font-sans tracking-normal">
-                              人
-                            </span>
+                          <div className="border-r-2 border-slate-800 py-4 text-xl font-mono text-blue-700 bg-blue-50/30 flex items-center justify-center">
+                            <span className="text-sm mr-1 text-blue-400">¥</span>{formatCurrency(salaryGrossPay)}
+                          </div>
+                          <div className="border-r-2 border-slate-800 py-4 text-2xl font-mono font-black text-rose-600 bg-rose-50/30 flex items-center justify-center">
+                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(salaryIncomeTax)}
                           </div>
                         </div>
-                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col bg-blue-50/30">
-                          <div className="bg-blue-100 text-blue-900 text-center py-2 font-black text-sm border-b-2 border-slate-800">
-                            総支給額
+
+                        {/* 賞与 */}
+                        <div className="grid grid-cols-4 text-center border-b-2 border-slate-800">
+                          <div className="border-r-2 border-slate-800 py-4 font-black flex items-center justify-center bg-slate-50">賞与 (役員除く)</div>
+                          <div className="border-r-2 border-slate-800 py-4 text-xl font-mono flex items-center justify-center">
+                            {bonusHeadcount} <span className="text-xs ml-1 text-slate-500 font-sans">人</span>
                           </div>
-                          <div className="flex-1 flex items-center justify-center p-6 text-3xl font-mono font-black text-blue-700 tracking-wider">
-                            <span className="text-lg font-bold mr-1 text-blue-400">
-                              ¥
-                            </span>
-                            {formatCurrency(totalGrossPay)}
+                          <div className="border-r-2 border-slate-800 py-4 text-xl font-mono text-blue-700 bg-blue-50/30 flex items-center justify-center">
+                            <span className="text-sm mr-1 text-blue-400">¥</span>{formatCurrency(bonusGrossPay)}
+                          </div>
+                          <div className="border-r-2 border-slate-800 py-4 text-2xl font-mono font-black text-rose-600 bg-rose-50/30 flex items-center justify-center">
+                            <span className="text-sm mr-1 text-rose-400">¥</span>{formatCurrency(bonusIncomeTax)}
                           </div>
                         </div>
-                        <div className="border-r-2 border-b-2 border-slate-800 flex flex-col bg-rose-50/30">
-                          <div className="bg-rose-100 text-rose-900 text-center py-2 font-black text-sm border-b-2 border-slate-800">
-                            税額 (所得税)
+
+                        {/* 合計 */}
+                        <div className="grid grid-cols-4 text-center border-b-2 border-slate-800 bg-slate-100">
+                          <div className="border-r-2 border-slate-800 py-3 font-black flex items-center justify-center">計</div>
+                          <div className="border-r-2 border-slate-800 py-3 text-lg font-mono font-bold flex items-center justify-center">
+                            {salaryHeadcount + bonusHeadcount} <span className="text-xs ml-1 text-slate-500 font-sans">人</span>
                           </div>
-                          <div className="flex-1 flex items-center justify-center p-6 text-4xl font-mono font-black text-rose-600 tracking-wider">
-                            <span className="text-xl font-bold mr-1 text-rose-400">
-                              ¥
-                            </span>
-                            {formatCurrency(totalIncomeTax)}
+                          <div className="border-r-2 border-slate-800 py-3 text-lg font-mono font-bold text-blue-800 flex items-center justify-center">
+                            <span className="text-sm mr-1">¥</span>{formatCurrency(salaryGrossPay + bonusGrossPay)}
+                          </div>
+                          <div className="border-r-2 border-slate-800 py-3 text-2xl font-mono font-black text-rose-700 flex items-center justify-center">
+                            <span className="text-sm mr-1">¥</span>{formatCurrency(salaryIncomeTax + bonusIncomeTax)}
                           </div>
                         </div>
                       </div>

@@ -1053,6 +1053,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       incomeTax: null,
       totalDeductions: null,
       netPay: null,
+      calcSuccess: false,
       calcLog: ["この月は全体ロック済のため計算をスキップしました"],
     };
   }
@@ -1161,6 +1162,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     estStdAmount,
     totalCustomDeds: null,
     totalDeductions: null,
+    calcSuccess: false,
     calcLog,
    };
   }
@@ -1276,6 +1278,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       incomeTax: null, totalDeductions: null, netPay: null,
       isBlocking: true,
       taxWarning: "計算条件不足のため処理を中断しました",
+      calcSuccess: false,
       calcLog,
     };
   }
@@ -1340,6 +1343,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     estStdAmount: estStdAmount,
     totalCustomDeds,
     totalDeductions,
+    calcSuccess: true,
     calcLog,
   };
 };
@@ -1516,7 +1520,8 @@ const calculateBonusResult = ({
     taxTables,
     monthlyLocks
   );
-  if (prevMonthResult.isBlocking || prevMonthResult.socialTotal === null) {
+  if (!prevMonthResult || prevMonthResult.calcSuccess !== true) {
+    calcLog.push("⚠ 前月給与の計算未完了のため、賞与所得税の計算を中断しました。");
     return {
       basePay: Number(b.basePay) || 0,
       grossPay: bGross,

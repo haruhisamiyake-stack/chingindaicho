@@ -589,318 +589,335 @@ const calculateIncomeTaxByDensanReiwa8 = ({
 };
 
 const calculateIncomeTax = (
-  taxableAfterSocial,
-  dependents,
-  isOtsu,
-  requireExact = false,
-  master = null,
-  settings = null,
-  yearStr = null,
-  taxTables = {}
+  taxableAfterSocial,
+  dependents,
+  isOtsu,
+  requireExact = false,
+  master = null,
+  settings = null,
+  yearStr = null,
+  taxTables = {}
 ) => {
-  const log = [];
-  const method = settings?.taxCalcMethod || "taxTable";
+  const log = [];
+  const method = settings?.taxCalcMethod || "taxTable";
 
-  if ((method === "densan" || requireExact) && !isOtsu) {
-    log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
-    const densanResult = calculateIncomeTaxByDensanReiwa8({
-      taxableAfterSocial,
-      master,
-      dependents,
-    });
-    if (densanResult && densanResult.log) log.push(...densanResult.log);
-    return { tax: densanResult.tax, warning: densanResult.warning, log };
-  }
+  if ((method === "densan" || requireExact) && !isOtsu) {
+    log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
+    const densanResult = calculateIncomeTaxByDensanReiwa8({
+      taxableAfterSocial,
+      master,
+      dependents,
+    });
+    if (densanResult && densanResult.log) log.push(...densanResult.log);
+    return { tax: densanResult.tax, warning: densanResult.warning, log };
+  }
 
-  const tableKey = `${yearStr}_monthly`;
-  const currentTable = taxTables[tableKey];
+  const tableKey = `${yearStr}_monthly`;
+  const currentTable = taxTables[tableKey];
 
-  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
-    log.push(`[所得税計算] ${yearStr}年度の月額表が未登録です`);
-    return {
-      tax: 0,
-      warning: "税額表未登録のため要確認",
-      log,
-    };
-  }
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    log.push(`[所得税計算] ${yearStr}年度の月額表が未登録です`);
+    return {
+      tax: null,
+      warning: "税額表未登録のため計算不可",
+      isBlocking: true,
+      log,
+    };
+  }
 
-  const row = currentTable.rows.find(
-    (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
-  );
+  const row = currentTable.rows.find(
+    (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
+  );
 
-  // ★ここから修正：税額表の範囲外だった場合のフォールバック（自動切替）処理
-  if (!row) {
-    if (!isOtsu) {
-      log.push(`[所得税計算] 課税対象額が税額表の範囲を超えています。自動的に電算機計算(甲欄)へ切り替えます。`);
-      const densanResult = calculateIncomeTaxByDensanReiwa8({
-        taxableAfterSocial,
-        master,
-        dependents,
-      });
-      if (densanResult && densanResult.log) log.push(...densanResult.log);
-      return { 
-        tax: densanResult.tax, 
-        warning: "税額表の範囲外のため電算機特例に自動切替されました",
-        log 
-      };
-    } else {
-      log.push(`[所得税計算] 課税対象額が税額表の範囲外です(乙欄)`);
-      return { tax: 0, warning: "乙欄で税額表の上限を超えています。手動で計算・入力してください", log };
-    }
-  }
-  // ★ここまで
+  if (!row) {
+    if (!isOtsu) {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲を超えています。自動的に電算機計算(甲欄)へ切り替えます。`);
+      const densanResult = calculateIncomeTaxByDensanReiwa8({
+        taxableAfterSocial,
+        master,
+        dependents,
+      });
+      if (densanResult && densanResult.log) log.push(...densanResult.log);
+      return { 
+        tax: densanResult.tax, 
+        warning: "税額表の範囲外のため電算機特例に自動切替されました",
+        log 
+      };
+    } else {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲外です(乙欄)`);
+      return { 
+        tax: null, 
+        warning: "乙欄で税額表の上限を超えています。手動で計算・入力してください", 
+        isBlocking: true,
+        log 
+      };
+    }
+  }
 
-  if (isOtsu) {
-    if (row.otsu.type === "rate") {
-      const tax = Math.floor(taxableAfterSocial * row.otsu.value);
-      log.push(
-        `[所得税計算] 乙欄適用(税額表): ${formatCurrency(
-          taxableAfterSocial
-        )} × ${row.otsu.value}`
-      );
-      return { tax, warning: null, log };
-    } else {
-      log.push(`[所得税計算] 乙欄適用(税額表): 固定額 ${row.otsu.value}`);
-      return { tax: row.otsu.value, warning: null, log };
-    }
-  } else {
-    const depCount = Math.min(Math.max(0, dependents), 7);
-    const tax = row.kou[depCount] || 0;
-    log.push(
-      `[所得税計算] 甲欄適用(税額表): 扶養${depCount}人枠 -> ${formatCurrency(
-        tax
-      )}円`
-    );
-    return { tax, warning: null, log };
-  }
+  if (isOtsu) {
+    if (row.otsu.type === "rate") {
+      const tax = Math.floor(taxableAfterSocial * row.otsu.value);
+      log.push(
+        `[所得税計算] 乙欄適用(税額表): ${formatCurrency(
+          taxableAfterSocial
+        )} × ${row.otsu.value}`
+      );
+      return { tax, warning: null, log };
+    } else {
+      log.push(`[所得税計算] 乙欄適用(税額表): 固定額 ${row.otsu.value}`);
+      return { tax: row.otsu.value, warning: null, log };
+    }
+  } else {
+    const depCount = Math.min(Math.max(0, dependents), 7);
+    const tax = row.kou[depCount] || 0;
+    log.push(
+      `[所得税計算] 甲欄適用(税額表): 扶養${depCount}人枠 -> ${formatCurrency(
+        tax
+      )}円`
+    );
+    return { tax, warning: null, log };
+  }
 };
 
 const getBonusTaxRate = (
-  lastMonthSalaryAfterSocial,
-  dependents,
-  isOtsu,
-  yearStr,
-  taxTables = {}
+  lastMonthSalaryAfterSocial,
+  dependents,
+  isOtsu,
+  yearStr,
+  taxTables = {}
 ) => {
-  const log = [];
-  const tableKey = `${yearStr}_bonus_nta`;
-  const currentTable = taxTables[tableKey];
+  const log = [];
+  const tableKey = `${yearStr}_bonus_nta`;
+  const currentTable = taxTables[tableKey];
 
-  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
-    const warning = "税額表未登録のため要確認";
-    log.push(`[賞与税率] ${warning}`);
-    return { rate: 0, warning, log };
-  }
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    const warning = "税額表未登録のため計算不可";
+    log.push(`[賞与税率] ${warning}`);
+    return { rate: null, warning, isBlocking: true, log };
+  }
 
-  const depCount = Math.min(Math.max(0, dependents), 7);
-  let targetRate = null;
+  const depCount = Math.min(Math.max(0, dependents), 7);
+  let targetRate = null;
 
-  if (isOtsu) {
-    const row = currentTable.rows.find(
-      (r) =>
-        r.otsuRange &&
-        lastMonthSalaryAfterSocial >= r.otsuRange.min &&
-        lastMonthSalaryAfterSocial < r.otsuRange.max
-    );
-    if (row) targetRate = row.rate;
-  } else {
-    const row = currentTable.rows.find(
-      (r) =>
-        lastMonthSalaryAfterSocial >= r.kouRanges[depCount].min &&
-        lastMonthSalaryAfterSocial < r.kouRanges[depCount].max
-    );
-    if (row) targetRate = row.rate;
-  }
+  if (isOtsu) {
+    const row = currentTable.rows.find(
+      (r) =>
+        r.otsuRange &&
+        lastMonthSalaryAfterSocial >= r.otsuRange.min &&
+        lastMonthSalaryAfterSocial < r.otsuRange.max
+    );
+    if (row) targetRate = row.rate;
+  } else {
+    const row = currentTable.rows.find(
+      (r) =>
+        lastMonthSalaryAfterSocial >= r.kouRanges[depCount].min &&
+        lastMonthSalaryAfterSocial < r.kouRanges[depCount].max
+    );
+    if (row) targetRate = row.rate;
+  }
 
-  if (targetRate === null) {
-    return {
-      rate: 0,
-      warning: "賞与算出率表の範囲外です",
-      log: ["[賞与税率] 該当する賞与算出率が見つかりません"],
-    };
-  }
+  if (targetRate === null) {
+    return {
+      rate: null,
+      warning: "賞与算出率表の範囲外です。手動で計算・入力してください",
+      isBlocking: true,
+      log: ["[賞与税率] 該当する賞与算出率が見つかりません"],
+    };
+  }
 
-  return { rate: targetRate, warning: null, log };
+  return { rate: targetRate, warning: null, log };
 };
 
 const calculateBonusIncomeTax = (
-  bonusAfterSocial,
-  lastMonthSalaryAfterSocial,
-  master,
-  settings,
-  yearStr,
-  taxTables = {}
+  bonusAfterSocial,
+  lastMonthSalaryAfterSocial,
+  master,
+  settings,
+  yearStr,
+  taxTables = {}
 ) => {
-  const dependents = master?.dependents || 0;
-  const isOtsu = master?.taxType === 1;
-  const log = ["【賞与の所得税計算】"];
+  const dependents = master?.dependents || 0;
+  const isOtsu = master?.taxType === 1;
+  const log = ["【賞与の所得税計算】"];
 
-  if (bonusAfterSocial <= 0) {
-    log.push(`- 社保控除後賞与が0円のため税額0円`);
-    return { tax: 0, warning: null, manualRequired: false, log };
-  }
+  if (bonusAfterSocial <= 0) {
+    log.push(`- 社保控除後賞与が0円のため税額0円`);
+    return { tax: 0, warning: null, manualRequired: false, log };
+  }
 
-  let bonusPeriodMonths = 6;
-  let divisor = bonusPeriodMonths > 6 ? 12 : 6;
+  let bonusPeriodMonths = 6;
+  let divisor = bonusPeriodMonths > 6 ? 12 : 6;
 
-  log.push(
-    `- 前月給与(社保控除後): ${formatCurrency(lastMonthSalaryAfterSocial)}円`
-  );
+  log.push(
+    `- 前月給与(社保控除後): ${formatCurrency(lastMonthSalaryAfterSocial)}円`
+  );
 
-  if (lastMonthSalaryAfterSocial <= 0) {
-    log.push(`- 前月給与なし計算方式を適用 (1/${divisor} 計算)`);
-    const sixth = Math.floor(bonusAfterSocial / divisor);
-    const result = calculateIncomeTax(
-      sixth,
-      dependents,
-      isOtsu,
-      true,
-      master,
-      settings,
-      yearStr,
-      taxTables
-    );
+  if (lastMonthSalaryAfterSocial <= 0) {
+    log.push(`- 前月給与なし計算方式を適用 (1/${divisor} 計算)`);
+    const sixth = Math.floor(bonusAfterSocial / divisor);
+    const result = calculateIncomeTax(
+      sixth,
+      dependents,
+      isOtsu,
+      true,
+      master,
+      settings,
+      yearStr,
+      taxTables
+    );
 
-    const taxAmount =
-      typeof result === "object" && result !== null && result.tax !== undefined
-        ? result.tax
-        : result;
-    if (taxAmount === null) {
-      log.push(`  -> 自動計算不可`);
-      return {
-        tax: 0,
-        warning: "乙欄等のため自動計算不可。手入力を優先します。",
-        manualRequired: true,
-        log,
-      };
-    }
-    const warningMsg =
-      typeof result === "object" && result !== null ? result.warning : null;
-    if (typeof result === "object" && result !== null && result.log) {
-      log.push(...result.log.map((l) => `  ${l}`));
-    }
-    log.push(
-      `- 最終税額: ${formatCurrency(taxAmount)} × ${divisor} = ${formatCurrency(
-        taxAmount * divisor
-      )}円`
-    );
+    const taxAmount =
+      typeof result === "object" && result !== null && result.tax !== undefined
+        ? result.tax
+        : result;
+    if (taxAmount === null) {
+      log.push(`  -> 自動計算不可`);
+      return {
+        tax: null,
+        warning: result.warning,
+        manualRequired: true,
+        isBlocking: result.isBlocking || true,
+        log,
+      };
+    }
+    const warningMsg =
+      typeof result === "object" && result !== null ? result.warning : null;
+    if (typeof result === "object" && result !== null && result.log) {
+      log.push(...result.log.map((l) => `  ${l}`));
+    }
+    log.push(
+      `- 最終税額: ${formatCurrency(taxAmount)} × ${divisor} = ${formatCurrency(
+        taxAmount * divisor
+      )}円`
+    );
 
-    return {
-      tax: taxAmount * divisor,
-      warning: warningMsg,
-      manualRequired: false,
-      log,
-    };
-  }
+    return {
+      tax: taxAmount * divisor,
+      warning: warningMsg,
+      manualRequired: false,
+      log,
+    };
+  }
 
-  if (bonusAfterSocial > lastMonthSalaryAfterSocial * 10) {
-    log.push(`- 前月給与の10倍超計算方式を適用 (1/${divisor} 計算)`);
-    const sixth = Math.floor(bonusAfterSocial / divisor);
-    const taxBaseSalary = sixth + lastMonthSalaryAfterSocial;
-    const resultTaxBase = calculateIncomeTax(
-      taxBaseSalary,
-      dependents,
-      isOtsu,
-      true,
-      master,
-      settings,
-      yearStr,
-      taxTables
-    );
-    const resultLastMonth = calculateIncomeTax(
-      lastMonthSalaryAfterSocial,
-      dependents,
-      isOtsu,
-      true,
-      master,
-      settings,
-      yearStr,
-      taxTables
-    );
+  if (bonusAfterSocial > lastMonthSalaryAfterSocial * 10) {
+    log.push(`- 前月給与の10倍超計算方式を適用 (1/${divisor} 計算)`);
+    const sixth = Math.floor(bonusAfterSocial / divisor);
+    const taxBaseSalary = sixth + lastMonthSalaryAfterSocial;
+    const resultTaxBase = calculateIncomeTax(
+      taxBaseSalary,
+      dependents,
+      isOtsu,
+      true,
+      master,
+      settings,
+      yearStr,
+      taxTables
+    );
+    const resultLastMonth = calculateIncomeTax(
+      lastMonthSalaryAfterSocial,
+      dependents,
+      isOtsu,
+      true,
+      master,
+      settings,
+      yearStr,
+      taxTables
+    );
 
-    const taxBaseAmt =
-      typeof resultTaxBase === "object" &&
-      resultTaxBase !== null &&
-      resultTaxBase.tax !== undefined
-        ? resultTaxBase.tax
-        : resultTaxBase;
-    const lastMonthAmt =
-      typeof resultLastMonth === "object" &&
-      resultLastMonth !== null &&
-      resultLastMonth.tax !== undefined
-        ? resultLastMonth.tax
-        : resultLastMonth;
+    const taxBaseAmt =
+      typeof resultTaxBase === "object" &&
+      resultTaxBase !== null &&
+      resultTaxBase.tax !== undefined
+        ? resultTaxBase.tax
+        : resultTaxBase;
+    const lastMonthAmt =
+      typeof resultLastMonth === "object" &&
+      resultLastMonth !== null &&
+      resultLastMonth.tax !== undefined
+        ? resultLastMonth.tax
+        : resultLastMonth;
 
-    if (taxBaseAmt === null || lastMonthAmt === null) {
-      log.push(`  -> 自動計算不可`);
-      return {
-        tax: 0,
-        warning: "乙欄等のため自動計算不可。手入力を優先します。",
-        manualRequired: true,
-        log,
-      };
-    }
+    if (taxBaseAmt === null || lastMonthAmt === null) {
+      log.push(`  -> 自動計算不可`);
+      return {
+        tax: null,
+        warning: (typeof resultTaxBase === "object" && resultTaxBase !== null ? resultTaxBase.warning : null) || (typeof resultLastMonth === "object" && resultLastMonth !== null ? resultLastMonth.warning : null) || "計算不可",
+        manualRequired: true,
+        isBlocking: true,
+        log,
+      };
+    }
 
-    log.push(`  [賞与加算分]`);
-    if (
-      typeof resultTaxBase === "object" &&
-      resultTaxBase !== null &&
-      resultTaxBase.log
-    )
-      log.push(...resultTaxBase.log.map((l) => `    ${l}`));
-    log.push(`  [前月給与分]`);
-    if (
-      typeof resultLastMonth === "object" &&
-      resultLastMonth !== null &&
-      resultLastMonth.log
-    )
-      log.push(...resultLastMonth.log.map((l) => `    ${l}`));
+    log.push(`  [賞与加算分]`);
+    if (
+      typeof resultTaxBase === "object" &&
+      resultTaxBase !== null &&
+      resultTaxBase.log
+    )
+      log.push(...resultTaxBase.log.map((l) => `    ${l}`));
+    log.push(`  [前月給与分]`);
+    if (
+      typeof resultLastMonth === "object" &&
+      resultLastMonth !== null &&
+      resultLastMonth.log
+    )
+      log.push(...resultLastMonth.log.map((l) => `    ${l}`));
 
-    const diff = Math.max(0, taxBaseAmt - lastMonthAmt);
-    log.push(
-      `- 差額: ${formatCurrency(diff)}円 × ${divisor} = ${formatCurrency(
-        diff * divisor
-      )}円`
-    );
+    const diff = Math.max(0, taxBaseAmt - lastMonthAmt);
+    log.push(
+      `- 差額: ${formatCurrency(diff)}円 × ${divisor} = ${formatCurrency(
+        diff * divisor
+      )}円`
+    );
 
-    const warningMsg =
-      typeof resultTaxBase === "object" &&
-      resultTaxBase !== null &&
-      resultTaxBase.warning
-        ? resultTaxBase.warning
-        : null;
+    const warningMsg =
+      typeof resultTaxBase === "object" &&
+      resultTaxBase !== null &&
+      resultTaxBase.warning
+        ? resultTaxBase.warning
+        : null;
 
-    return {
-      tax: diff * divisor,
-      warning: warningMsg,
-      manualRequired: false,
-      log,
-    };
-  }
+    return {
+      tax: diff * divisor,
+      warning: warningMsg,
+      manualRequired: false,
+      log,
+    };
+  }
 
-  log.push(`- 通常の賞与乗出計算方式を適用`);
-  const rateInfo = getBonusTaxRate(
-    lastMonthSalaryAfterSocial,
-    dependents,
-    isOtsu,
-    yearStr,
-    taxTables
-  );
+  log.push(`- 通常の賞与乗出計算方式を適用`);
+  const rateInfo = getBonusTaxRate(
+    lastMonthSalaryAfterSocial,
+    dependents,
+    isOtsu,
+    yearStr,
+    taxTables
+  );
 
-  if (rateInfo.log && rateInfo.log.length > 0) {
-    log.push(...rateInfo.log.map((l) => `  ${l}`));
-  }
+  if (rateInfo.rate === null) {
+    return {
+      tax: null,
+      warning: rateInfo.warning,
+      manualRequired: true,
+      isBlocking: true,
+      log: [...log, ...(rateInfo.log || [])]
+    };
+  }
 
-  log.push(`  -> 適用税率: ${(rateInfo.rate * 100).toFixed(3)}%`);
-  const tax = Math.floor(bonusAfterSocial * rateInfo.rate);
-  log.push(`  -> 算出税額: ${formatCurrency(tax)}円`);
+  if (rateInfo.log && rateInfo.log.length > 0) {
+    log.push(...rateInfo.log.map((l) => `  ${l}`));
+  }
 
-  return {
-    tax,
-    warning: rateInfo.warning,
-    manualRequired: rateInfo.warning !== null,
-    log,
-  };
+  log.push(`  -> 適用税率: ${(rateInfo.rate * 100).toFixed(3)}%`);
+  const tax = Math.floor(bonusAfterSocial * rateInfo.rate);
+  log.push(`  -> 算出税額: ${formatCurrency(tax)}円`);
+
+  return {
+    tax,
+    warning: rateInfo.warning,
+    manualRequired: rateInfo.warning !== null,
+    log,
+  };
 };
 
 const calculateSocialIns = (
@@ -928,441 +945,450 @@ const formatCurrency = (val) => {
 };
 
 const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}) => {
-  if (!master || !row) return {};
-  const calcLog = ["【月次給与 計算ログ】"];
-  const base = Number(row.basePay) || 0;
-  calcLog.push(`- 基本給: ${formatCurrency(base)}円`);
+  if (!master || !row) return {};
+  const calcLog = ["【月次給与 計算ログ】"];
+  const base = Number(row.basePay) || 0;
+  calcLog.push(`- 基本給: ${formatCurrency(base)}円`);
 
-  let totalAllowances = 0;
-  let totalTaxableAllowances = 0;
-  let totalSocialInsAllowances = 0;
-  let totalEmploymentInsAllowances = 0;
+  let totalAllowances = 0;
+  let totalTaxableAllowances = 0;
+  let totalSocialInsAllowances = 0;
+  let totalEmploymentInsAllowances = 0;
 
-  const allowanceDefs =
-    settings?.allowanceDefinitions?.length > 0
-      ? settings.allowanceDefinitions
-      : master.allowanceDefinitions || [];
-  const deductionDefs =
-    settings?.deductionDefinitions?.length > 0
-      ? settings.deductionDefinitions
-      : master.deductionDefinitions || [];
+  const allowanceDefs =
+    settings?.allowanceDefinitions?.length > 0
+      ? settings.allowanceDefinitions
+      : master.allowanceDefinitions || [];
+  const deductionDefs =
+    settings?.deductionDefinitions?.length > 0
+      ? settings.deductionDefinitions
+      : master.deductionDefinitions || [];
 
-  allowanceDefs.forEach((def) => {
-    const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
-    totalAllowances += amt;
-    if (amt > 0)
-      calcLog.push(
-        `  - 手当(${def.name}): ${formatCurrency(amt)}円 (課税:${
-          def.isTaxable ? "〇" : "×"
-        } / 社保:${def.isSocialIns ? "〇" : "×"})`
-      );
-    if (def.isTaxable) totalTaxableAllowances += amt;
-    if (def.isSocialIns) totalSocialInsAllowances += amt;
-    if (def.isEmploymentIns) totalEmploymentInsAllowances += amt;
-  });
+  allowanceDefs.forEach((def) => {
+    const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+    totalAllowances += amt;
+    if (amt > 0)
+      calcLog.push(
+        `  - 手当(${def.name}): ${formatCurrency(amt)}円 (課税:${
+          def.isTaxable ? "〇" : "×"
+        } / 社保:${def.isSocialIns ? "〇" : "×"})`
+      );
+    if (def.isTaxable) totalTaxableAllowances += amt;
+    if (def.isSocialIns) totalSocialInsAllowances += amt;
+    if (def.isEmploymentIns) totalEmploymentInsAllowances += amt;
+  });
 
-  const grossPay = base + totalAllowances;
-  const taxableGross = base + totalTaxableAllowances;
-  const socialInsGross = base + totalSocialInsAllowances;
-  const employmentInsGross = base + totalEmploymentInsAllowances;
+  const grossPay = base + totalAllowances;
+  const taxableGross = base + totalTaxableAllowances;
+  const socialInsGross = base + totalSocialInsAllowances;
+  const employmentInsGross = base + totalEmploymentInsAllowances;
 
-  calcLog.push(`- 総支給額: ${formatCurrency(grossPay)}円`);
+  calcLog.push(`- 総支給額: ${formatCurrency(grossPay)}円`);
 
-  const hRate = settings?.rateSchedules?.health
-    ? getRateForMonth(settings.rateSchedules.health, monthKey)
-    : row.healthRate || 5.0;
-  const pRate = settings?.rateSchedules?.pension
-    ? getRateForMonth(settings.rateSchedules.pension, monthKey)
-    : row.pensionRate || 9.15;
-  const nRate = settings?.rateSchedules?.nursing
-    ? getRateForMonth(settings.rateSchedules.nursing, monthKey)
-    : row.nursingRate || 0.8;
-  const cRate = settings?.rateSchedules?.childCare
-    ? getRateForMonth(settings.rateSchedules.childCare, monthKey)
-    : row.childCareRate || 0.0;
-  const eRate = settings?.rateSchedules?.employment
-    ? getRateForMonth(settings.rateSchedules.employment, monthKey)
-    : row.employmentRate || 6.0;
+  const hRate = settings?.rateSchedules?.health
+    ? getRateForMonth(settings.rateSchedules.health, monthKey)
+    : row.healthRate || 5.0;
+  const pRate = settings?.rateSchedules?.pension
+    ? getRateForMonth(settings.rateSchedules.pension, monthKey)
+    : row.pensionRate || 9.15;
+  const nRate = settings?.rateSchedules?.nursing
+    ? getRateForMonth(settings.rateSchedules.nursing, monthKey)
+    : row.nursingRate || 0.8;
+  const cRate = settings?.rateSchedules?.childCare
+    ? getRateForMonth(settings.rateSchedules.childCare, monthKey)
+    : row.childCareRate || 0.0;
+  const eRate = settings?.rateSchedules?.employment
+    ? getRateForMonth(settings.rateSchedules.employment, monthKey)
+    : row.employmentRate || 6.0;
 
-  const stdBase = socialInsGross;
-  const estStdAmount =
-    settings?.standardRewardTable?.length > 0
-      ? getStandardRewardAmount(settings.standardRewardTable, stdBase)
-      : stdBase;
-  const stdAmount = Number(row.stdAmount) || 0;
+  const stdBase = socialInsGross;
+  const estStdAmount =
+    settings?.standardRewardTable?.length > 0
+      ? getStandardRewardAmount(settings.standardRewardTable, stdBase)
+      : stdBase;
+  const stdAmount = Number(row.stdAmount) || 0;
 
-  calcLog.push(`\n【社会保険料】`);
-  calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(socialInsGross)}円`);
-  calcLog.push(`- 適用標準報酬月額: ${formatCurrency(stdAmount)}円`);
-  calcLog.push(
-    `- 適用保険料率 (健保:${hRate}% / 厚年:${pRate}% / 介護:${nRate}% / 支援金:${cRate}% / 雇用:${eRate}‰)`
-  );
+  calcLog.push(`\n【社会保険料】`);
+  calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(socialInsGross)}円`);
+  calcLog.push(`- 適用標準報酬月額: ${formatCurrency(stdAmount)}円`);
+  calcLog.push(
+    `- 適用保険料率 (健保:${hRate}% / 厚年:${pRate}% / 介護:${nRate}% / 支援金:${cRate}% / 雇用:${eRate}‰)`
+  );
 
-  const hasHealth =
-    master.healthIns !== undefined
-      ? master.healthIns === 1
-      : master.socialIns === 1;
-  const hasPension =
-    master.pensionIns !== undefined
-      ? master.pensionIns === 1
-      : master.socialIns === 1;
-  const hasEmployment = master.employmentIns === 1;
+  const hasHealth =
+    master.healthIns !== undefined
+      ? master.healthIns === 1
+      : master.socialIns === 1;
+  const hasPension =
+    master.pensionIns !== undefined
+      ? master.pensionIns === 1
+      : master.socialIns === 1;
+  const hasEmployment = master.employmentIns === 1;
 
-  const insMultiplier = row.isDoubleSocialIns ? 2 : 1;
-  if (row.isDoubleSocialIns)
-    calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
+  const insMultiplier = row.isDoubleSocialIns ? 2 : 1;
+  if (row.isDoubleSocialIns)
+    calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
 
-  const ins = calculateSocialIns(
-    stdAmount,
-    1,
-    hRate,
-    pRate,
-    nRate,
-    cRate,
-    row.hasNursingIns === 1
-  );
+  const ins = calculateSocialIns(
+    stdAmount,
+    1,
+    hRate,
+    pRate,
+    nRate,
+    cRate,
+    row.hasNursingIns === 1
+  );
 
-  if (!hasHealth || stdAmount === 0) {
-    ins.health = 0;
-    ins.nursing = 0;
-  } else {
-    ins.health *= insMultiplier;
-    ins.nursing *= insMultiplier;
-  }
+  if (!hasHealth || stdAmount === 0) {
+    ins.health = 0;
+    ins.nursing = 0;
+  } else {
+    ins.health *= insMultiplier;
+    ins.nursing *= insMultiplier;
+  }
 
-  if (!hasPension || stdAmount === 0) {
-    ins.pension = 0;
-    ins.childCare = 0;
-  } else {
-    ins.pension *= insMultiplier;
-    ins.childCare *= insMultiplier;
-  }
+  if (!hasPension || stdAmount === 0) {
+    ins.pension = 0;
+    ins.childCare = 0;
+  } else {
+    ins.pension *= insMultiplier;
+    ins.childCare *= insMultiplier;
+  }
 
-  const employment = hasEmployment
-    ? Math.floor(employmentInsGross * (eRate / 1000))
-    : 0;
-  const socialTotal =
-    ins.health + ins.pension + ins.nursing + ins.childCare + employment;
+  const employment = hasEmployment
+    ? Math.floor(employmentInsGross * (eRate / 1000))
+    : 0;
+  const socialTotal =
+    ins.health + ins.pension + ins.nursing + ins.childCare + employment;
 
-  calcLog.push(`  -> 健康保険料: ${formatCurrency(ins.health)}円`);
-  calcLog.push(`  -> 厚生年金料: ${formatCurrency(ins.pension)}円`);
-  if (ins.nursing > 0)
-    calcLog.push(`  -> 介護保険料: ${formatCurrency(ins.nursing)}円`);
-  if (ins.childCare > 0)
-    calcLog.push(
-      `  -> 子ども・子育て支援金: ${formatCurrency(ins.childCare)}円`
-    );
-  calcLog.push(
-    `  -> 雇用保険料: ${formatCurrency(employment)}円 (対象額:${formatCurrency(
-      employmentInsGross
-    )}円)`
-  );
-  calcLog.push(`- 社会保険料合計: ${formatCurrency(socialTotal)}円\n`);
+  calcLog.push(`  -> 健康保険料: ${formatCurrency(ins.health)}円`);
+  calcLog.push(`  -> 厚生年金料: ${formatCurrency(ins.pension)}円`);
+  if (ins.nursing > 0)
+    calcLog.push(`  -> 介護保険料: ${formatCurrency(ins.nursing)}円`);
+  if (ins.childCare > 0)
+    calcLog.push(
+      `  -> 子ども・子育て支援金: ${formatCurrency(ins.childCare)}円`
+    );
+  calcLog.push(
+    `  -> 雇用保険料: ${formatCurrency(employment)}円 (対象額:${formatCurrency(
+      employmentInsGross
+    )}円)`
+  );
+  calcLog.push(`- 社会保険料合計: ${formatCurrency(socialTotal)}円\n`);
 
-  const incomeTaxResult = calculateIncomeTax(
-    Math.max(0, taxableGross - socialTotal),
-    master.dependents,
-    master.taxType === 1,
-    false,
-    master,
-    settings,
-    yearStr,
-    taxTables
-  );
-  const incomeTax =
-    typeof incomeTaxResult === "object" &&
-    incomeTaxResult !== null &&
-    incomeTaxResult.tax !== undefined
-      ? incomeTaxResult.tax
-      : incomeTaxResult;
+  const incomeTaxResult = calculateIncomeTax(
+    Math.max(0, taxableGross - socialTotal),
+    master.dependents,
+    master.taxType === 1,
+    false,
+    master,
+    settings,
+    yearStr,
+    taxTables
+  );
+  const incomeTax =
+    typeof incomeTaxResult === "object" &&
+    incomeTaxResult !== null &&
+    incomeTaxResult.tax !== undefined
+      ? incomeTaxResult.tax
+      : incomeTaxResult;
 
-  // ★追加：所得税計算から返される警告を取得
-  const taxWarning =
-    typeof incomeTaxResult === "object" &&
-    incomeTaxResult !== null &&
-    incomeTaxResult.warning !== undefined
-      ? incomeTaxResult.warning
-      : null;
+  const taxWarning =
+    typeof incomeTaxResult === "object" &&
+    incomeTaxResult !== null &&
+    incomeTaxResult.warning !== undefined
+      ? incomeTaxResult.warning
+      : null;
 
-  if (
-    typeof incomeTaxResult === "object" &&
-    incomeTaxResult !== null &&
-    incomeTaxResult.log
-  ) {
-    calcLog.push(...incomeTaxResult.log);
-  }
+  const isBlocking =
+    typeof incomeTaxResult === "object" &&
+    incomeTaxResult !== null &&
+    incomeTaxResult.isBlocking !== undefined
+      ? incomeTaxResult.isBlocking
+      : false;
 
-  const residentTax = Number(row.residentTax) || 0;
-  calcLog.push(`- 住民税: ${formatCurrency(residentTax)}円`);
+  if (
+    typeof incomeTaxResult === "object" &&
+    incomeTaxResult !== null &&
+    incomeTaxResult.log
+  ) {
+    calcLog.push(...incomeTaxResult.log);
+  }
 
-  let totalCustomDeds = 0;
-  deductionDefs.forEach((def) => {
-    const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-    totalCustomDeds += amt;
-    if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
-  });
+  const residentTax = Number(row.residentTax) || 0;
+  calcLog.push(`- 住民税: ${formatCurrency(residentTax)}円`);
 
-  const totalDeductions =
-    socialTotal + incomeTax + residentTax + totalCustomDeds;
-  const netPay = grossPay - totalDeductions;
+  let totalCustomDeds = 0;
+  deductionDefs.forEach((def) => {
+    const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+    totalCustomDeds += amt;
+    if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
+  });
 
-  calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${formatCurrency(totalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${formatCurrency(netPay)}円`);
+  const safeIncomeTax = incomeTax === null ? 0 : incomeTax;
+  const totalDeductions =
+    socialTotal + safeIncomeTax + residentTax + totalCustomDeds;
+  const netPay = grossPay - totalDeductions;
 
-  if (yearStr && master?.dob) {
-    const alerts = getAgeAlerts(master.dob, yearStr, monthKey);
-    if (alerts.length > 0) {
-      calcLog.push(`\n【年齢到達アラート】`);
-      alerts.forEach((a) => {
-        if (a.type === "nursing40")
-          calcLog.push(
-            `- ${a.label}：介護保険料の徴収開始を確認してください。`
-          );
-        if (a.type === "nursing65")
-          calcLog.push(
-            `- ${a.label}：介護保険料の給与控除終了を確認してください。`
-          );
-        if (a.type === "pension70")
-          calcLog.push(
-            `- ${a.label}：厚生年金保険の資格喪失・70歳以上被用者該当届を確認してください。`
-          );
-        if (a.type === "health75")
-          calcLog.push(
-            `- ${a.label}：健康保険資格喪失・後期高齢者医療制度への移行を確認してください。`
-          );
-      });
-    }
-  }
+  calcLog.push(`\n【支給結果】`);
+  calcLog.push(`- 控除合計: ${formatCurrency(totalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${formatCurrency(netPay)}円`);
 
-  return {
-    ...row,
-    grossPay,
-    health: ins.health,
-    pension: ins.pension,
-    nursing: ins.nursing,
-    childCare: ins.childCare,
-    employment,
-    incomeTax,
-    taxWarning, // ★追加：UI側に警告を渡す
-    netPay,
-    socialTotal,
-    estStdAmount: estStdAmount,
-    totalCustomDeds,
-    totalDeductions,
-    calcLog,
-  };
+  if (yearStr && master?.dob) {
+    const alerts = getAgeAlerts(master.dob, yearStr, monthKey);
+    if (alerts.length > 0) {
+      calcLog.push(`\n【年齢到達アラート】`);
+      alerts.forEach((a) => {
+        if (a.type === "nursing40")
+          calcLog.push(
+            `- ${a.label}：介護保険料の徴収開始を確認してください。`
+          );
+        if (a.type === "nursing65")
+          calcLog.push(
+            `- ${a.label}：介護保険料の給与控除終了を確認してください。`
+          );
+        if (a.type === "pension70")
+          calcLog.push(
+            `- ${a.label}：厚生年金保険の資格喪失・70歳以上被用者該当届を確認してください。`
+          );
+        if (a.type === "health75")
+          calcLog.push(
+            `- ${a.label}：健康保険資格喪失・後期高齢者医療制度への移行を確認してください。`
+          );
+      });
+    }
+  }
+
+  return {
+    ...row,
+    grossPay,
+    health: ins.health,
+    pension: ins.pension,
+    nursing: ins.nursing,
+    childCare: ins.childCare,
+    employment,
+    incomeTax,
+    taxWarning,
+    isBlocking,
+    netPay,
+    socialTotal,
+    estStdAmount: estStdAmount,
+    totalCustomDeds,
+    totalDeductions,
+    calcLog,
+  };
 };
 
 const calculateBonusResult = ({
-  master,
-  bonusRow,
-  bonusKey,
-  settings,
-  yearData,
-  allowanceDefs,
-  deductionDefs,
-  monthKeyForRates,
-  yearStr,
-  taxTables = {},
+  master,
+  bonusRow,
+  bonusKey,
+  settings,
+  yearData,
+  allowanceDefs,
+  deductionDefs,
+  monthKeyForRates,
+  yearStr,
+  taxTables = {},
 }) => {
-  if (!master || !bonusRow || !yearData) return {};
-  const b = bonusRow;
-  const calcLog = ["【賞与 計算ログ】"];
-  let bTotalAllowances = 0,
-    bTotalTaxableAllowances = 0;
-  const bAllowances = {},
-    bDeductions = {};
+  if (!master || !bonusRow || !yearData) return {};
+  const b = bonusRow;
+  const calcLog = ["【賞与 計算ログ】"];
+  let bTotalAllowances = 0,
+    bTotalTaxableAllowances = 0;
+  const bAllowances = {},
+    bDeductions = {};
 
-  calcLog.push(`- 賞与基本額: ${formatCurrency(b.basePay)}円`);
-  allowanceDefs.forEach((def) => {
-    const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
-    bAllowances[def.id] = amt;
-    bTotalAllowances += amt;
-    if (def.isTaxable) bTotalTaxableAllowances += amt;
-    if (amt > 0)
-      calcLog.push(`  - 手当(${def.name}): ${formatCurrency(amt)}円`);
-  });
+  calcLog.push(`- 賞与基本額: ${formatCurrency(b.basePay)}円`);
+  allowanceDefs.forEach((def) => {
+    const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
+    bAllowances[def.id] = amt;
+    bTotalAllowances += amt;
+    if (def.isTaxable) bTotalTaxableAllowances += amt;
+    if (amt > 0)
+      calcLog.push(`  - 手当(${def.name}): ${formatCurrency(amt)}円`);
+  });
 
-  const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
-  const bTaxableGross = (Number(b.basePay) || 0) + bTotalTaxableAllowances;
-  calcLog.push(`- 賞与総支給額: ${formatCurrency(bGross)}円`);
+  const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
+  const bTaxableGross = (Number(b.basePay) || 0) + bTotalTaxableAllowances;
+  calcLog.push(`- 賞与総支給額: ${formatCurrency(bGross)}円`);
 
-  const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
-  const bhRate = settings?.rateSchedules?.health
-    ? getRateForMonth(settings.rateSchedules.health, monthKeyForRates)
-    : lastMonthRow.healthRate || 5.0;
-  const bpRate = settings?.rateSchedules?.pension
-    ? getRateForMonth(settings.rateSchedules.pension, monthKeyForRates)
-    : lastMonthRow.pensionRate || 9.15;
-  const bnRate = settings?.rateSchedules?.nursing
-    ? getRateForMonth(settings.rateSchedules.nursing, monthKeyForRates)
-    : lastMonthRow.nursingRate || 0.8;
-  const bcRate = settings?.rateSchedules?.childCare
-    ? getRateForMonth(settings.rateSchedules.childCare, monthKeyForRates)
-    : lastMonthRow.childCareRate || 0.0;
-  const beRate = settings?.rateSchedules?.employment
-    ? getRateForMonth(settings.rateSchedules.employment, monthKeyForRates)
-    : lastMonthRow.employmentRate || 6.0;
+  const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
+  const bhRate = settings?.rateSchedules?.health
+    ? getRateForMonth(settings.rateSchedules.health, monthKeyForRates)
+    : lastMonthRow.healthRate || 5.0;
+  const bpRate = settings?.rateSchedules?.pension
+    ? getRateForMonth(settings.rateSchedules.pension, monthKeyForRates)
+    : lastMonthRow.pensionRate || 9.15;
+  const bnRate = settings?.rateSchedules?.nursing
+    ? getRateForMonth(settings.rateSchedules.nursing, monthKeyForRates)
+    : lastMonthRow.nursingRate || 0.8;
+  const bcRate = settings?.rateSchedules?.childCare
+    ? getRateForMonth(settings.rateSchedules.childCare, monthKeyForRates)
+    : lastMonthRow.childCareRate || 0.0;
+  const beRate = settings?.rateSchedules?.employment
+    ? getRateForMonth(settings.rateSchedules.employment, monthKeyForRates)
+    : lastMonthRow.employmentRate || 6.0;
 
-  const hasHealth =
-    master.healthIns !== undefined
-      ? master.healthIns === 1
-      : master.socialIns === 1;
-  const hasPension =
-    master.pensionIns !== undefined
-      ? master.pensionIns === 1
-      : master.socialIns === 1;
-  const hasEmployment = master.employmentIns === 1;
-  const hasNursing = hasHealth && lastMonthRow.hasNursingIns === 1;
+  const hasHealth =
+    master.healthIns !== undefined
+      ? master.healthIns === 1
+      : master.socialIns === 1;
+  const hasPension =
+    master.pensionIns !== undefined
+      ? master.pensionIns === 1
+      : master.socialIns === 1;
+  const hasEmployment = master.employmentIns === 1;
+  const hasNursing = hasHealth && lastMonthRow.hasNursingIns === 1;
 
-  calcLog.push(`\n【社会保険料（累計上限判定）】`);
-  const bonusStdRaw = Math.floor(bGross / 1000) * 1000;
-  calcLog.push(`- 賞与額(千円未満切捨): ${formatCurrency(bonusStdRaw)}円`);
+  calcLog.push(`\n【社会保険料（累計上限判定）】`);
+  const bonusStdRaw = Math.floor(bGross / 1000) * 1000;
+  calcLog.push(`- 賞与額(千円未満切捨): ${formatCurrency(bonusStdRaw)}円`);
 
-  const manualPriorStd = Number(b.manualPriorHealthStd) || 0;
-  let priorHealthBonusStdTotal = manualPriorStd;
+  const manualPriorStd = Number(b.manualPriorHealthStd) || 0;
+  let priorHealthBonusStdTotal = manualPriorStd;
 
-  if (manualPriorStd > 0) {
-    calcLog.push(
-      `- 他月分(手入力)の標準賞与額累計: ${formatCurrency(manualPriorStd)}円`
-    );
-  }
+  if (manualPriorStd > 0) {
+    calcLog.push(
+      `- 他月分(手入力)の標準賞与額累計: ${formatCurrency(manualPriorStd)}円`
+    );
+  }
 
-  if (bonusKey === "bonus2" && yearData.bonus) {
-    let b1TotalAllowances = 0;
-    allowanceDefs.forEach((def) => {
-      b1TotalAllowances +=
-        Number(yearData.bonus.allowanceAmounts?.[def.id]) || 0;
-    });
-    const b1Gross = (Number(yearData.bonus.basePay) || 0) + b1TotalAllowances;
-    const b1Std = Math.min(Math.floor(b1Gross / 1000) * 1000, 5730000);
-    priorHealthBonusStdTotal += b1Std;
-    calcLog.push(`- 同一年度内(賞与①)の標準賞与額: ${formatCurrency(b1Std)}円`);
-  }
+  if (bonusKey === "bonus2" && yearData.bonus) {
+    let b1TotalAllowances = 0;
+    allowanceDefs.forEach((def) => {
+      b1TotalAllowances +=
+        Number(yearData.bonus.allowanceAmounts?.[def.id]) || 0;
+    });
+    const b1Gross = (Number(yearData.bonus.basePay) || 0) + b1TotalAllowances;
+    const b1Std = Math.min(Math.floor(b1Gross / 1000) * 1000, 5730000);
+    priorHealthBonusStdTotal += b1Std;
+    calcLog.push(`- 同一年度内(賞与①)の標準賞与額: ${formatCurrency(b1Std)}円`);
+  }
 
-  if (priorHealthBonusStdTotal > 0) {
-    calcLog.push(
-      `- 適用前の標準賞与額累計(健保): ${formatCurrency(
-        priorHealthBonusStdTotal
-      )}円`
-    );
-  }
+  if (priorHealthBonusStdTotal > 0) {
+    calcLog.push(
+      `- 適用前の標準賞与額累計(健保): ${formatCurrency(
+        priorHealthBonusStdTotal
+      )}円`
+    );
+  }
 
-  const healthBonusStd = Math.min(
-    bonusStdRaw,
-    Math.max(0, 5730000 - priorHealthBonusStdTotal)
-  );
-  calcLog.push(
-    `- 健保 上限残枠判定結果: ${formatCurrency(healthBonusStd)}円対象`
-  );
+  const healthBonusStd = Math.min(
+    bonusStdRaw,
+    Math.max(0, 5730000 - priorHealthBonusStdTotal)
+  );
+  calcLog.push(
+    `- 健保 上限残枠判定結果: ${formatCurrency(healthBonusStd)}円対象`
+  );
 
-  const pensionBonusStd = Math.min(bonusStdRaw, 1500000);
-  calcLog.push(
-    `- 厚年 150万円上限判定結果: ${formatCurrency(pensionBonusStd)}円対象`
-  );
+  const pensionBonusStd = Math.min(bonusStdRaw, 1500000);
+  calcLog.push(
+    `- 厚年 150万円上限判定結果: ${formatCurrency(pensionBonusStd)}円対象`
+  );
 
-  const bHealth = hasHealth ? Math.floor(healthBonusStd * (bhRate / 100)) : 0;
-  const bNursing = hasNursing ? Math.floor(healthBonusStd * (bnRate / 100)) : 0;
-  const bPension = hasPension
-    ? Math.floor(pensionBonusStd * (bpRate / 100))
-    : 0;
-  const bChildCare = hasPension
-    ? Math.floor(pensionBonusStd * (bcRate / 100))
-    : 0;
-  const bEmp = hasEmployment ? Math.floor(bGross * (beRate / 1000)) : 0;
+  const bHealth = hasHealth ? Math.floor(healthBonusStd * (bhRate / 100)) : 0;
+  const bNursing = hasNursing ? Math.floor(healthBonusStd * (bnRate / 100)) : 0;
+  const bPension = hasPension
+    ? Math.floor(pensionBonusStd * (bpRate / 100))
+    : 0;
+  const bChildCare = hasPension
+    ? Math.floor(pensionBonusStd * (bcRate / 100))
+    : 0;
+  const bEmp = hasEmployment ? Math.floor(bGross * (beRate / 1000)) : 0;
 
-  const bSocialTotal = bHealth + bPension + bNursing + bChildCare + bEmp;
-  const bonusAfterSocial = Math.max(0, bTaxableGross - bSocialTotal);
+  const bSocialTotal = bHealth + bPension + bNursing + bChildCare + bEmp;
+  const bonusAfterSocial = Math.max(0, bTaxableGross - bSocialTotal);
 
-  calcLog.push(`  -> 健康保険料: ${formatCurrency(bHealth)}円`);
-  calcLog.push(`  -> 厚生年金料: ${formatCurrency(bPension)}円`);
-  if (bNursing > 0)
-    calcLog.push(`  -> 介護保険料: ${formatCurrency(bNursing)}円`);
-  if (bChildCare > 0)
-    calcLog.push(`  -> 子ども・子育て支援金: ${formatCurrency(bChildCare)}円`);
-  calcLog.push(`  -> 雇用保険料: ${formatCurrency(bEmp)}円`);
-  calcLog.push(`- 社会保険料合計: ${formatCurrency(bSocialTotal)}円\n`);
+  calcLog.push(`  -> 健康保険料: ${formatCurrency(bHealth)}円`);
+  calcLog.push(`  -> 厚生年金料: ${formatCurrency(bPension)}円`);
+  if (bNursing > 0)
+    calcLog.push(`  -> 介護保険料: ${formatCurrency(bNursing)}円`);
+  if (bChildCare > 0)
+    calcLog.push(`  -> 子ども・子育て支援金: ${formatCurrency(bChildCare)}円`);
+  calcLog.push(`  -> 雇用保険料: ${formatCurrency(bEmp)}円`);
+  calcLog.push(`- 社会保険料合計: ${formatCurrency(bSocialTotal)}円\n`);
 
-  let prevMonthKey = "12";
-  if (b.payDate) {
-    const pMonth = parseInt(b.payDate.split("-")[1], 10);
-    if (pMonth > 1) prevMonthKey = String(pMonth - 1).padStart(2, "0");
-  }
-  const prevRow = yearData.monthly[prevMonthKey] || {};
-  let prevTaxableAlw = 0;
-  allowanceDefs.forEach((def) => {
-    if (def.isTaxable)
-      prevTaxableAlw += Number(prevRow.allowanceAmounts?.[def.id]) || 0;
-  });
-  const prevTaxableGross = (Number(prevRow.basePay) || 0) + prevTaxableAlw;
-  const prevMonthResult = calculateMonthlyResult(
-    master,
-    prevRow,
-    settings,
-    prevMonthKey,
-    yearStr,
-    taxTables
-  );
-  const lastMonthSalaryAfterSocial = Math.max(
-    0,
-    prevTaxableGross - (prevMonthResult.socialTotal || 0)
-  );
+  let prevMonthKey = "12";
+  if (b.payDate) {
+    const pMonth = parseInt(b.payDate.split("-")[1], 10);
+    if (pMonth > 1) prevMonthKey = String(pMonth - 1).padStart(2, "0");
+  }
+  const prevRow = yearData.monthly[prevMonthKey] || {};
+  let prevTaxableAlw = 0;
+  allowanceDefs.forEach((def) => {
+    if (def.isTaxable)
+      prevTaxableAlw += Number(prevRow.allowanceAmounts?.[def.id]) || 0;
+  });
+  const prevTaxableGross = (Number(prevRow.basePay) || 0) + prevTaxableAlw;
+  const prevMonthResult = calculateMonthlyResult(
+    master,
+    prevRow,
+    settings,
+    prevMonthKey,
+    yearStr,
+    taxTables
+  );
+  const lastMonthSalaryAfterSocial = Math.max(
+    0,
+    prevTaxableGross - (prevMonthResult.socialTotal || 0)
+  );
 
-  const taxResult = calculateBonusIncomeTax(
-    bonusAfterSocial,
-    lastMonthSalaryAfterSocial,
-    master,
-    settings,
-    yearStr,
-    taxTables
-  );
+  const taxResult = calculateBonusIncomeTax(
+    bonusAfterSocial,
+    lastMonthSalaryAfterSocial,
+    master,
+    settings,
+    yearStr,
+    taxTables
+  );
 
-  if (taxResult.log) calcLog.push(...taxResult.log);
+  if (taxResult.log) calcLog.push(...taxResult.log);
 
-  const bIncomeTax = taxResult.manualRequired
-    ? Number(b.incomeTax) || 0
-    : taxResult.tax;
-  if (taxResult.manualRequired)
-    calcLog.push(`※ 手入力値(${formatCurrency(bIncomeTax)}円)を優先`);
+  const bIncomeTax = taxResult.tax === null ? null : (taxResult.manualRequired ? (Number(b.incomeTax) || 0) : taxResult.tax);
+  const isBlocking = taxResult.isBlocking || false;
+  if (taxResult.manualRequired && taxResult.tax !== null)
+    calcLog.push(`※ 手入力値(${formatCurrency(bIncomeTax)}円)を優先`);
 
-  const bResidentTax = Number(b.residentTax) || 0;
-  if (bResidentTax > 0)
-    calcLog.push(`- 住民税: ${formatCurrency(bResidentTax)}円`);
+  const bResidentTax = Number(b.residentTax) || 0;
+  if (bResidentTax > 0)
+    calcLog.push(`- 住民税: ${formatCurrency(bResidentTax)}円`);
 
-  let bTotalCustomDeds = 0;
-  deductionDefs.forEach((def) => {
-    const amt = Number(b.deductionAmounts?.[def.id]) || 0;
-    bDeductions[def.id] = amt;
-    bTotalCustomDeds += amt;
-    if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
-  });
+  let bTotalCustomDeds = 0;
+  deductionDefs.forEach((def) => {
+    const amt = Number(b.deductionAmounts?.[def.id]) || 0;
+    bDeductions[def.id] = amt;
+    bTotalCustomDeds += amt;
+    if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
+  });
 
-  const bTotalDeductions =
-    bSocialTotal + bIncomeTax + bResidentTax + bTotalCustomDeds;
-  const bNetPay = bGross - bTotalDeductions;
+  const safeIncomeTax = bIncomeTax === null ? 0 : bIncomeTax;
+  const bTotalDeductions =
+    bSocialTotal + safeIncomeTax + bResidentTax + bTotalCustomDeds;
+  const bNetPay = bGross - bTotalDeductions;
 
-  calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${formatCurrency(bTotalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${formatCurrency(bNetPay)}円`);
+  calcLog.push(`\n【支給結果】`);
+  calcLog.push(`- 控除合計: ${formatCurrency(bTotalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${formatCurrency(bNetPay)}円`);
 
-  return {
-    basePay: Number(b.basePay) || 0,
-    grossPay: bGross,
-    health: bHealth,
-    pension: bPension,
-    nursing: bNursing,
-    childCare: bChildCare,
-    employment: bEmp,
-    incomeTax: bIncomeTax,
-    residentTax: bResidentTax,
-    totalDeductions: bTotalDeductions,
-    netPay: bNetPay,
-    allowances: bAllowances,
-    deductions: bDeductions,
-    taxWarning: taxResult.warning,
-    calcLog,
-  };
+  return {
+    basePay: Number(b.basePay) || 0,
+    grossPay: bGross,
+    health: bHealth,
+    pension: bPension,
+    nursing: bNursing,
+    childCare: bChildCare,
+    employment: bEmp,
+    incomeTax: bIncomeTax,
+    residentTax: bResidentTax,
+    totalDeductions: bTotalDeductions,
+    netPay: bNetPay,
+    allowances: bAllowances,
+    deductions: bDeductions,
+    taxWarning: taxResult.warning,
+    isBlocking,
+    calcLog,
+  };
 };
 
 const createInitialYearData = (yearStr, settings) => {
@@ -2060,24 +2086,66 @@ const App = () => {
   };
 
   const handleSave = async (empId, m, d) => {
-    if (!db || !userId || !empId) return;
-    setSaveStatus("保存中...");
-    try {
-      await setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`),
-        {
-          master: m,
-          data: d,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-      setSaveStatus("完了");
-      setTimeout(() => setSaveStatus(""), 2000);
-    } catch (e) {
-      setSaveStatus("エラー");
-    }
-  };
+    if (!db || !userId || !empId) return;
+
+    let hasNullTax = false;
+    if (d && d.years) {
+      const allowanceDefs = settings?.allowanceDefinitions || m.allowanceDefinitions || [];
+      const deductionDefs = settings?.deductionDefinitions || m.deductionDefinitions || [];
+      for (const yearStr of Object.keys(d.years)) {
+        const yearData = d.years[yearStr];
+        for (const monthKey of MONTHS) {
+          const row = yearData.monthly[monthKey];
+          if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables);
+            if (res.incomeTax === null) {
+              hasNullTax = true;
+              break;
+            }
+          }
+        }
+        if (hasNullTax) break;
+
+        if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+           if (bRes.incomeTax === null) {
+             hasNullTax = true;
+             break;
+           }
+        }
+        if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+           if (bRes2.incomeTax === null) {
+             hasNullTax = true;
+             break;
+           }
+        }
+      }
+    }
+
+    if (hasNullTax) {
+      setSaveStatus("保存停止中(計算不可)");
+      setTimeout(() => setSaveStatus(""), 3000);
+      return;
+    }
+
+    setSaveStatus("保存中...");
+    try {
+      await setDoc(
+        doc(db, `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`),
+        {
+          master: m,
+          data: d,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+      setSaveStatus("完了");
+      setTimeout(() => setSaveStatus(""), 2000);
+    } catch (e) {
+      setSaveStatus("エラー");
+    }
+  };
 
   const handleAddEmployee = async () => {
     if (!db || !userId) return;
@@ -5013,77 +5081,80 @@ const App = () => {
                           })}
 
                           <tr>
-                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
-                              所得税{" "}
-                              <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded font-normal">
-                                連動
-                              </span>
-                            </td>
-                            {MONTHS.map((m) => (
-                              <td
-                                key={m}
-                                className="border border-gray-300 p-1 text-right text-orange-600 font-bold text-[11px]"
-                              >
-                                {formatCurrency(
-                                  results.monthlyResults[m]?.incomeTax
-                                )}
-                              </td>
-                            ))}
-                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
-                              {formatCurrency(results.sums.incomeTax)}
-                            </td>
-                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                              <input
-                                type="number"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus?.incomeTax || ""}
-                                onChange={(e) =>
-                                  updateBonus(
-                                    selectedYear,
-                                    "bonus",
-                                    "incomeTax",
-                                    null,
-                                    Number(e.target.value)
-                                  )
-                                }
-                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
-                                  isYearLocked
-                                    ? "cursor-not-allowed opacity-50"
-                                    : ""
-                                }`}
-                              />
-                            </td>
-                            <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                              <input
-                                type="number"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus2?.incomeTax || ""}
-                                onChange={(e) =>
-                                  updateBonus(
-                                    selectedYear,
-                                    "bonus2",
-                                    "incomeTax",
-                                    null,
-                                    Number(e.target.value)
-                                  )
-                                }
-                                className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
-                                  isYearLocked
-                                    ? "cursor-not-allowed opacity-50"
-                                    : ""
-                                }`}
-                              />
-                            </td>
-                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
-                              {formatCurrency(results.bonusTotal.incomeTax)}
-                            </td>
-                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
-                              {formatCurrency(
-                                results.sums.incomeTax +
-                                  results.bonusTotal.incomeTax
-                              )}
-                            </td>
-                          </tr>
+                            <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
+                              所得税{" "}
+                              <span className="text-[8px] bg-blue-100 text-blue-500 px-1 border rounded font-normal">
+                                連動
+                              </span>
+                            </td>
+                            {MONTHS.map((m) => (
+                              <td
+                                key={m}
+                                className={`border border-gray-300 p-1 text-right font-bold text-[11px] ${results.monthlyResults[m]?.incomeTax === null ? "bg-red-50 text-red-600" : "text-orange-600"}`}
+                              >
+                                {results.monthlyResults[m]?.incomeTax === null ? "計算不可" : formatCurrency(results.monthlyResults[m]?.incomeTax)}
+                              </td>
+                            ))}
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
+                              {formatCurrency(results.sums.incomeTax)}
+                            </td>
+                            <td className={`border border-gray-300 p-0.5 text-right sticky right-[270px] z-25 ${results.bonus1?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
+                              <input
+                                type="number"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus?.incomeTax || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus",
+                                    "incomeTax",
+                                    null,
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  results.bonus1?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
+                                } ${
+                                  isYearLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : ""
+                                }`}
+                              />
+                              {results.bonus1?.incomeTax === null && <div className="text-[8px] text-red-600 text-center font-black pb-0.5 pointer-events-none">計算不可</div>}
+                            </td>
+                            <td className={`border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 ${results.bonus2?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
+                              <input
+                                type="number"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus2?.incomeTax || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "incomeTax",
+                                    null,
+                                    Number(e.target.value)
+                                  )
+                                }
+                                className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
+                                  results.bonus2?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
+                                } ${
+                                  isYearLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : ""
+                                }`}
+                              />
+                              {results.bonus2?.incomeTax === null && <div className="text-[8px] text-red-600 text-center font-black pb-0.5 pointer-events-none">計算不可</div>}
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
+                              {formatCurrency(results.bonusTotal.incomeTax)}
+                            </td>
+                            <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-100 text-slate-800 sticky right-0 z-30 text-[11px]">
+                              {formatCurrency(
+                                results.sums.incomeTax + results.bonusTotal.incomeTax
+                              )}
+                            </td>
+                          </tr>
                           <tr>
                             <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
                               住民税{" "}
@@ -6264,17 +6335,17 @@ const App = () => {
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.employment)}
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">
-                            <div>{formatCurrency(calcResult.incomeTax)}</div>
-                            {calcResult.taxWarning && (
-                              <div
-                                className="text-[9px] text-red-600 mt-0.5 leading-none"
-                                title={calcResult.taxWarning}
-                              >
-                                (要確認)
-                              </div>
-                            )}
-                          </td>
+                          <td className={`border border-slate-200 p-2 text-right ${calcResult.incomeTax === null ? "bg-red-50 text-red-600 font-black" : "bg-white text-orange-600 font-bold"}`}>
+                            <div>{calcResult.incomeTax === null ? "計算不可" : formatCurrency(calcResult.incomeTax)}</div>
+                            {calcResult.taxWarning && (
+                              <div
+                                className={`text-[9px] mt-0.5 leading-none ${calcResult.isBlocking ? "text-red-700 font-black" : "text-red-600"}`}
+                                title={calcResult.taxWarning}
+                              >
+                                ({calcResult.isBlocking ? "計算不可" : "要確認"})
+                              </div>
+                            )}
+                          </td>
 
                           <td className="border border-slate-200 p-1 bg-white relative">
                             <input
@@ -6468,17 +6539,17 @@ const App = () => {
                           <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
                             {formatCurrency(calcResult.employment)}
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-orange-600 font-bold">
-                            <div>{formatCurrency(calcResult.incomeTax)}</div>
-                            {calcResult.taxWarning && (
-                              <div
-                                className="text-[9px] text-red-600 mt-0.5 leading-none"
-                                title={calcResult.taxWarning}
-                              >
-                                (要確認)
-                              </div>
-                            )}
-                          </td>
+                          <td className={`border border-slate-200 p-2 text-right ${calcResult.incomeTax === null ? "bg-red-50 text-red-600 font-black" : "bg-white text-orange-600 font-bold"}`}>
+                            <div>{calcResult.incomeTax === null ? "計算不可" : formatCurrency(calcResult.incomeTax)}</div>
+                            {calcResult.taxWarning && (
+                              <div
+                                className={`text-[9px] mt-0.5 leading-none ${calcResult.isBlocking ? "text-red-700 font-black" : "text-red-600"}`}
+                                title={calcResult.taxWarning}
+                              >
+                                ({calcResult.isBlocking ? "計算不可" : "要確認"})
+                              </div>
+                            )}
+                          </td>
 
                           <td className="border border-slate-200 p-1 bg-white">
                             <input

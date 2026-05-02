@@ -12,6 +12,7 @@ import {
   setLogLevel,
   collection,
 } from "firebase/firestore";
+import { BONUS_NTA_ROWS } from "./data/bonusNtaTable";
 import {
   Calculator,
   Settings,
@@ -129,7 +130,6 @@ const DEFAULT_STD_REWARD_TABLE = [
   { grade: 50, min: 1295000, max: 99999999, monthlyAmount: 1390000 },
 ];
 
-let globalTaxTables = {}; // ★追加：税額表のグローバル参照用
 
 const DEFAULT_SETTINGS = {
   companyName: "株式会社サンプル",
@@ -207,13 +207,14 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
 
     if (importType === "bonus_nta") {
       if (cols.length < 20) {
-        throw new Error(
-          `【行 ${rowNum}】列数が不足しています（20列必要ですが ${cols.length}列です）`
-        );
+        console.warn(`【行 ${rowNum}】列数が不足（${cols.length}列）。不足列を空文字で補完します`);
+        while (cols.length < 20) cols.push("");
       }
-      const rate = Number(cols[1]) / 100;
-      if (isNaN(rate))
-        throw new Error(`【行 ${rowNum}】「rate」の値が数値ではありません`);
+      const rawRate = Number(cols[1]);
+      if (isNaN(rawRate)) {
+        throw new Error(`【行 ${rowNum}】税率(rate)が不正です`);
+      }
+      const rate = rawRate / 100;
 
       const kouRanges = [];
       for (let j = 0; j <= 7; j++) {
@@ -230,8 +231,9 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
         ) {
           max = Number(maxStr) * 1000;
         }
-        if (isNaN(min) || isNaN(max))
-          throw new Error(`【行 ${rowNum}】甲欄${j}人の値が数値ではありません`);
+        if (isNaN(min) || isNaN(max)) {
+          throw new Error(`【行 ${rowNum}】甲欄の数値が不正です`);
+        }
         kouRanges.push({ min, max });
       }
 
@@ -250,8 +252,9 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
         ) {
           max = Number(otsuMaxStr) * 1000;
         }
-        if (isNaN(min) || isNaN(max))
-          throw new Error(`【行 ${rowNum}】乙欄の値が数値ではありません`);
+        if (isNaN(min) || isNaN(max)) {
+          throw new Error(`【行 ${rowNum}】乙欄の数値が不正です`);
+        }
         otsuRange = { min, max };
       }
 
@@ -592,7 +595,8 @@ const calculateIncomeTax = (
   requireExact = false,
   master = null,
   settings = null,
-  yearStr = null
+  yearStr = null,
+  taxTables = {}
 ) => {
   const log = [];
   const method = settings?.taxCalcMethod || "taxTable";
@@ -609,7 +613,7 @@ const calculateIncomeTax = (
   }
 
   const tableKey = `${yearStr}_monthly`;
-  const currentTable = globalTaxTables[tableKey];
+  const currentTable = taxTables[tableKey];
 
   if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
     log.push(`[所得税計算] ${yearStr}年度の月額表が未登録です`);
@@ -636,7 +640,7 @@ const calculateIncomeTax = (
       if (densanResult && densanResult.log) log.push(...densanResult.log);
       return { 
         tax: densanResult.tax, 
-        warning: "税額表の上限を超えたため、電算機特例で自動計算しました", 
+        warning: "税額表の範囲外のため電算機特例に自動切替されました",
         log 
       };
     } else {
@@ -675,11 +679,12 @@ const getBonusTaxRate = (
   lastMonthSalaryAfterSocial,
   dependents,
   isOtsu,
-  yearStr
+  yearStr,
+  taxTables = {}
 ) => {
   const log = [];
   const tableKey = `${yearStr}_bonus_nta`;
-  const currentTable = globalTaxTables[tableKey];
+  const currentTable = taxTables[tableKey];
 
   if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
     const warning = "税額表未登録のため要確認";
@@ -723,7 +728,8 @@ const calculateBonusIncomeTax = (
   lastMonthSalaryAfterSocial,
   master,
   settings,
-  yearStr
+  yearStr,
+  taxTables = {}
 ) => {
   const dependents = master?.dependents || 0;
   const isOtsu = master?.taxType === 1;
@@ -751,7 +757,8 @@ const calculateBonusIncomeTax = (
       true,
       master,
       settings,
-      yearStr
+      yearStr,
+      taxTables
     );
 
     const taxAmount =
@@ -797,7 +804,8 @@ const calculateBonusIncomeTax = (
       true,
       master,
       settings,
-      yearStr
+      yearStr,
+      taxTables
     );
     const resultLastMonth = calculateIncomeTax(
       lastMonthSalaryAfterSocial,
@@ -806,7 +814,8 @@ const calculateBonusIncomeTax = (
       true,
       master,
       settings,
-      yearStr
+      yearStr,
+      taxTables
     );
 
     const taxBaseAmt =
@@ -874,7 +883,8 @@ const calculateBonusIncomeTax = (
     lastMonthSalaryAfterSocial,
     dependents,
     isOtsu,
-    yearStr
+    yearStr,
+    taxTables
   );
 
   if (rateInfo.log && rateInfo.log.length > 0) {
@@ -917,7 +927,7 @@ const formatCurrency = (val) => {
   return Number(val).toLocaleString();
 };
 
-const calculateMonthlyResult = (master, row, settings, monthKey, yearStr) => {
+const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}) => {
   if (!master || !row) return {};
   const calcLog = ["【月次給与 計算ログ】"];
   const base = Number(row.basePay) || 0;
@@ -1056,7 +1066,8 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr) => {
     false,
     master,
     settings,
-    yearStr
+    yearStr,
+    taxTables
   );
   const incomeTax =
     typeof incomeTaxResult === "object" &&
@@ -1153,6 +1164,7 @@ const calculateBonusResult = ({
   deductionDefs,
   monthKeyForRates,
   yearStr,
+  taxTables = {},
 }) => {
   if (!master || !bonusRow || !yearData) return {};
   const b = bonusRow;
@@ -1289,7 +1301,8 @@ const calculateBonusResult = ({
     prevRow,
     settings,
     prevMonthKey,
-    yearStr
+    yearStr,
+    taxTables
   );
   const lastMonthSalaryAfterSocial = Math.max(
     0,
@@ -1301,7 +1314,8 @@ const calculateBonusResult = ({
     lastMonthSalaryAfterSocial,
     master,
     settings,
-    yearStr
+    yearStr,
+    taxTables
   );
 
   if (taxResult.log) calcLog.push(...taxResult.log);
@@ -1525,13 +1539,16 @@ const App = () => {
           throw new Error("無効なインポート形式です");
         }
         const rows = parseTaxTableCsv(event.target.result, taxImportType);
+        if (taxImportType === "bonus_nta" && rows.length !== 21) {
+          setTaxImportError(`⚠ 賞与算出率表の行数が${rows.length}行です（期待値：21行）。CSVを確認してください`);
+        }
         setTaxImportPreview({
           year: taxImportYear,
           type: taxImportType,
           rows,
         });
       } catch (err) {
-        setTaxImportError(err.message);
+        setTaxImportError("CSV形式エラー：" + err.message);
       }
     };
     reader.onerror = () =>
@@ -1596,30 +1613,17 @@ const App = () => {
       rows += `${taxImportYear},monthly,109000,111000,380,0,0,0,0,0,0,0,fixed,3900\n`;
       csvContent = header + rows;
     } else if (type === "bonus_nta") {
-      const BONUS_NTA_TEMPLATE = `年度,賞与の金額に乗ずべき率,扶養0人_以上,扶養0人_未満,扶養1人_以上,扶養1人_未満,扶養2人_以上,扶養2人_未満,扶養3人_以上,扶養3人_未満,扶養4人_以上,扶養4人_未満,扶養5人_以上,扶養5人_未満,扶養6人_以上,扶養6人_未満,扶養7人以上_以上,扶養7人以上_未満,乙_以上,乙_未満
-${taxImportYear},0.000,0,82,0,107,0,143,0,181,0,218,0,251,0,284,0,317,,
-${taxImportYear},2.042,82,94,107,250,143,276,181,300,218,300,251,304,284,343,317,383,,
-${taxImportYear},4.084,94,260,250,289,276,321,300,354,300,387,304,412,343,438,383,463,,
-${taxImportYear},6.126,260,309,289,346,321,377,354,405,387,431,412,457,438,483,463,508,,
-${taxImportYear},8.168,309,342,346,373,377,400,405,424,431,452,457,479,483,505,508,529,,
-${taxImportYear},10.210,342,372,373,401,400,426,424,452,452,477,479,503,505,527,529,552,0,224
-${taxImportYear},12.252,372,402,401,430,426,457,452,484,477,509,503,531,527,553,552,578,,
-${taxImportYear},14.294,402,433,430,463,457,492,484,517,509,540,531,564,553,589,578,614,,
-${taxImportYear},16.336,433,520,463,520,492,525,517,550,540,577,564,604,589,630,614,657,,
-${taxImportYear},18.378,520,605,520,621,525,636,550,651,577,666,604,681,630,697,657,708,,
-${taxImportYear},20.420,605,684,621,705,636,728,651,751,666,774,681,798,697,821,708,845,224,295
-${taxImportYear},22.462,684,715,705,739,728,764,751,788,774,813,798,838,821,862,845,887,,
-${taxImportYear},24.504,715,752,739,778,764,804,788,830,813,856,838,881,862,907,887,933,,
-${taxImportYear},26.546,752,795,778,821,804,848,830,876,856,903,881,930,907,957,933,985,,
-${taxImportYear},28.588,795,854,821,882,848,910,876,938,903,966,930,994,957,1022,985,1051,,
-${taxImportYear},30.630,854,922,882,952,910,983,938,1013,966,1044,994,1074,1022,1104,1051,1135,295,527
-${taxImportYear},32.672,922,1318,952,1342,983,1367,1013,1391,1044,1416,1074,1440,1104,1464,1135,1489,,
-${taxImportYear},35.735,1318,1521,1342,1526,1367,1526,1391,1538,1416,1555,1440,1555,1464,1555,1489,1583,,
-${taxImportYear},38.798,1521,2621,1526,2645,1526,2669,1538,2693,1555,2716,1555,2740,1555,2764,1583,2788,527,1118
-${taxImportYear},41.861,2621,3495,2645,3527,2669,3559,2693,3590,2716,3622,2740,3654,2764,3685,2788,3717,,
-${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,3590,千円以上,3622,千円以上,3654,千円以上,3685,千円以上,3717,千円以上,1118,千円以上`;
+      if (BONUS_NTA_ROWS.length !== 21) {
+        alert("賞与算出率表が不完全です");
+        return;
+      }
 
-      csvContent = BONUS_NTA_TEMPLATE;
+      const BONUS_NTA_HEADER =
+        "年度,賞与の金額に乗ずべき率,扶養0人_以上,扶養0人_未満,扶養1人_以上,扶養1人_未満,扶養2人_以上,扶養2人_未満,扶養3人_以上,扶養3人_未満,扶養4人_以上,扶養4人_未満,扶養5人_以上,扶養5人_未満,扶養6人_以上,扶養6人_未満,扶養7人以上_以上,扶養7人以上_未満,乙_以上,乙_未満";
+      const csvRows = BONUS_NTA_ROWS.map((row) =>
+        [taxImportYear, ...row].join(",")
+      ).join("\n");
+      csvContent = BONUS_NTA_HEADER + "\n" + csvRows;
     }
 
     const blob = new Blob([bom, csvContent], {
@@ -1966,7 +1970,6 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
         snap.forEach((doc) => {
           tables[doc.id] = doc.data();
         });
-        globalTaxTables = tables; // 計算ロジック用にグローバル参照を更新
         setTaxTables(tables);
       },
       (err) => {
@@ -2746,6 +2749,7 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
             [],
           monthKeyForRates: getBonusRateMonth(rowData),
           yearStr: selectedYear,
+          taxTables,
         });
       } else {
         rowData = currentYearDataObj.monthly[monthKey] || {};
@@ -2754,7 +2758,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
           rowData,
           settings,
           monthKey,
-          selectedYear
+          selectedYear,
+          taxTables
         );
       }
 
@@ -2916,7 +2921,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
         row,
         settings,
         m,
-        selectedYear
+        selectedYear,
+        taxTables
       );
 
       monthlyResults[m] = monthlyResult;
@@ -3028,6 +3034,7 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
         deductionDefs,
         monthKeyForRates: getBonusRateMonth(b),
         yearStr: selectedYear,
+        taxTables,
       });
     };
 
@@ -3130,6 +3137,7 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
         deductionDefs,
         monthKeyForRates: getBonusRateMonth(rowData),
         yearStr: selectedYear,
+        taxTables,
       });
     } else {
       rowData = slipYearData.monthly[monthKey] || {};
@@ -3138,7 +3146,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
         rowData,
         settings,
         monthKey,
-        selectedYear
+        selectedYear,
+        taxTables
       );
       titleText = "給与明細書";
       targetMonthText = rowData.salaryMonthText || "未設定";
@@ -3843,7 +3852,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
                             rowData,
                             settings,
                             ledgerSelectedMonth,
-                            selectedYear
+                            selectedYear,
+                            taxTables
                           );
                           const isMonthLocked = rowData?.isLocked === true;
                           const isDisabled = isYearLocked || isMonthLocked;
@@ -5999,6 +6009,7 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
                           deductionDefs,
                           monthKeyForRates: getBonusRateMonth(rowData),
                           yearStr: selectedYear,
+                          taxTables,
                         });
                       } else {
                         rowData =
@@ -6008,7 +6019,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
                           rowData,
                           settings,
                           selectedListMonth,
-                          selectedYear
+                          selectedYear,
+                          taxTables
                         );
                         isMonthLocked = rowData?.isLocked === true;
                       }
@@ -8230,7 +8242,8 @@ ${taxImportYear},45.945,3495,千円以上,3527,千円以上,3559,千円以上,35
                       row,
                       settings,
                       m,
-                      selectedYear
+                      selectedYear,
+                      taxTables
                     );
                     totalHeadcount += 1;
                     totalGrossPay += res.grossPay;

@@ -1705,30 +1705,22 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   
 
-  // ▼▼▼ パス生成共通関数（既存＋新規） ▼▼▼
-  // ※既存の関数を消すとホワイトクラッシュするため残します
-  const getTenantCol = (path) => getColRef(`artifacts/${appId}/tenants/${selectedTenantId}/${path}`);
-  const getTenantDoc = (path) => getDocRef(`artifacts/${appId}/tenants/${selectedTenantId}/${path}`);
+  // ▼▼▼ Firestoreアクセス共通関数 ▼▼▼
+  // getCol(path)          : コレクション参照
+  // getDocRef(path, id?)  : ドキュメント参照（id省略時はpathに /docId まで含める）
+  const getCol = (path) => collection(db, path);
+  const getDocRef = (path, id) => id ? doc(db, path, id) : doc(db, path);
 
-  // 新規：段階的移行のためのパス解決関数
-  const getUserPath = (uid, path) => {
-    return `artifacts/${appId}/users/${uid}/${path}`;
+  // テナントスコープのショートカット
+  const getTenantCol = (path) => {
+    if (!selectedTenantId) throw new Error("tenant未選択");
+    return getCol(`artifacts/${appId}/tenants/${selectedTenantId}/${path}`);
   };
-
-  const getTenantPath = (tenantId, path) => {
-    return `artifacts/${appId}/tenants/${tenantId}/${path}`;
+  const getTenantDoc = (path) => {
+    if (!selectedTenantId) throw new Error("tenant未選択");
+    return getDocRef(`artifacts/${appId}/tenants/${selectedTenantId}/${path}`);
   };
-
-  const resolvePath = (uid, tId, path) => {
-    if (tId) {
-      return getTenantPath(tId, path);
-    }
-    return getUserPath(uid, path);
-  };
-
-  const getColRef = (path) => collection(db, path);
-  const getDocRef = (path) => doc(db, path);
-  // ▲▲▲ ここまで追加 ▲▲▲
+  // ▲▲▲ ここまで ▲▲▲
 
   const [saveStatus, setSaveStatus] = useState("");
 
@@ -1848,7 +1840,7 @@ const App = () => {
     try {
       const docId = `${taxImportPreview.year}_${taxImportPreview.type}`;
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
-      const docRef = getDocRef(`artifacts/${appId}/taxTables/${docId}`);
+      const docRef = getDocRef(`artifacts/${appId}/taxTables`, docId);
       await setDoc(docRef, {
         year: taxImportPreview.year,
         type: taxImportPreview.type,
@@ -1877,7 +1869,7 @@ const App = () => {
     try {
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
       await deleteDoc(
-        getDocRef( `artifacts/${appId}/taxTables/${docId}`)
+        getDocRef(`artifacts/${appId}/taxTables`, docId)
       );
     } catch (err) {
       alert("削除に失敗しました");
@@ -2025,7 +2017,7 @@ const App = () => {
 
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
       const docId = `${bonusNtaYear}_bonus_nta`;
-      const docRef = getDocRef( `artifacts/${appId}/taxTables/${docId}`);
+      const docRef = getDocRef(`artifacts/${appId}/taxTables`, docId);
       await setDoc(docRef, {
         year: bonusNtaYear,
         type: "bonus_nta",
@@ -2126,18 +2118,56 @@ const App = () => {
   }, [selectedEmployeeId, selectedYear, data]);
 
   // ★ データ移行＆テナント初期化処理
+  const _migrateUserDataToTenant = async (uid, tenantId, firestore, preloadedEmpsSnap = null) => {
+    const basePath = `artifacts/${appId}/tenants/${tenantId}`;
+    const oldBasePath = `artifacts/${appId}/users/${uid}`;
+    const batch = writeBatch(firestore);
+
+    // 従業員データ移行
+    const empsSnap = preloadedEmpsSnap ?? await getDocs(collection(firestore, `${oldBasePath}/payrollEmployees`));
+    empsSnap.forEach((empDoc) => {
+      batch.set(doc(firestore, `${basePath}/payrollEmployees/${empDoc.id}`), empDoc.data());
+    });
+
+    // 設定データ移行
+    const settingsSnap = await getDocs(collection(firestore, `${oldBasePath}/payrollSettings`));
+    settingsSnap.forEach((sDoc) => {
+      batch.set(doc(firestore, `${basePath}/payrollSettings/${sDoc.id}`), sDoc.data());
+    });
+
+    // 月次ロック移行
+    const locksSnap = await getDocs(collection(firestore, `${oldBasePath}/monthlyLocks`));
+    locksSnap.forEach((lDoc) => {
+      batch.set(doc(firestore, `${basePath}/monthlyLocks/${lDoc.id}`), lDoc.data());
+    });
+
+    await batch.commit();
+  };
+
   const initTenantAndMigrate = async (uid, firestore) => {
-    const q = query(collection(firestore, `artifacts/${appId}/tenants`), where("ownerUid", "==", uid));
-    const snap = await getDocs(q);
-    
+    const tenantsQuery = query(
+      collection(firestore, `artifacts/${appId}/tenants`),
+      where("ownerUid", "==", uid)
+    );
+    const snap = await getDocs(tenantsQuery);
+
     if (!snap.empty) {
-      // 既存テナントがあれば設定
-      setTenants([{ id: snap.docs[0].id, name: snap.docs[0].data().name || "株式会社 新規テナント" }]);
-      setSelectedTenantId(snap.docs[0].id);
+      const tenantDoc = snap.docs[0];
+      const tenantData = tenantDoc.data();
+      setTenants([{ id: tenantDoc.id, name: tenantData.name || "株式会社 新規テナント" }]);
+      setSelectedTenantId(tenantDoc.id);
+      // migrationDoneがfalseなら旧データ移行を実行（二重実行防止）
+      if (!tenantData.migrationDone) {
+        await _migrateUserDataToTenant(uid, tenantDoc.id, firestore);
+        await setDoc(doc(firestore, `artifacts/${appId}/tenants/${tenantDoc.id}`), { migrationDone: true }, { merge: true });
+      }
       return;
     }
 
-    // テナントが存在しない場合、新規作成
+    // テナントが存在しない場合、旧データ確認
+    const oldEmpsSnap = await getDocs(collection(firestore, `artifacts/${appId}/users/${uid}/payrollEmployees`));
+    const hasOldData = !oldEmpsSnap.empty;
+
     const newTenantRef = doc(collection(firestore, `artifacts/${appId}/tenants`));
     const newTenantId = newTenantRef.id;
 
@@ -2145,8 +2175,13 @@ const App = () => {
       name: "株式会社 新規テナント",
       ownerUid: uid,
       createdAt: new Date().toISOString(),
-      migrationDone: true
+      migrationDone: !hasOldData,
     });
+
+    if (hasOldData) {
+      await _migrateUserDataToTenant(uid, newTenantId, firestore, oldEmpsSnap);
+      await setDoc(newTenantRef, { migrationDone: true }, { merge: true });
+    }
 
     setTenants([{ id: newTenantId, name: "株式会社 新規テナント" }]);
     setSelectedTenantId(newTenantId);
@@ -2256,7 +2291,7 @@ const App = () => {
   // ★ 追加：税額表データの取得（全テナント共通）
   useEffect(() => {
     if (!isAuthReady || !db) return;
-    const colRef = getColRef( `artifacts/${appId}/taxTables`);
+    const colRef = getCol(`artifacts/${appId}/taxTables`);
     const unsubscribe = onSnapshot(colRef, (snap) => {
       const tables = {};
       snap.forEach((doc) => {
@@ -3819,7 +3854,7 @@ const App = () => {
                   const name = window.prompt("新しい顧問先の会社名を入力してください");
                   if (name && name.trim()) {
                     const newId = `tenant_${Date.now()}`;
-                    const docRef = getDocRef( `artifacts/${appId}/tenants/${newId}`);
+                    const docRef = getDocRef(`artifacts/${appId}/tenants`, newId);
                     setDoc(docRef, { name: name.trim(), ownerUid: userId, createdAt: new Date().toISOString() })
                       .then(() => {
                          setSelectedTenantId(newId);

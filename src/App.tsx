@@ -3863,10 +3863,13 @@ const App = () => {
   }
   // ▲▲▲ ここまで追加 ▲▲▲
 
+  // ▼追加：マスタ管理画面かどうかを判定する▼
+  const isMasterMode = activeTab === "taxTable" || activeTab === "stdRewardTable";
+
   return (
     <div className="flex h-screen bg-[#F0F2F5] font-sans text-sm overflow-hidden">
       {/* --- 左サイドバー --- */}
-      <aside className="w-72 bg-slate-900 text-white flex flex-col flex-shrink-0 shadow-xl z-50">
+      <aside className={`w-72 bg-slate-900 text-white flex flex-col flex-shrink-0 shadow-xl z-50 ${isMasterMode ? "hidden" : ""}`}>
         <div className="p-6 border-b border-slate-800">
           <h1 className="font-black text-xl tracking-widest uppercase flex items-center gap-2 text-white">
             <Calculator className="text-emerald-400" size={24} /> PAYROLL
@@ -3920,16 +3923,6 @@ const App = () => {
             <Users size={18} /> 社員登録
           </button>
           <button
-            onClick={() => setActiveTab("settings")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "settings"
-                ? "bg-orange-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Settings size={18} /> 会社個別設定
-          </button>
-          <button
             onClick={() => setActiveTab("aggregation")}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
               activeTab === "aggregation"
@@ -3960,7 +3953,7 @@ const App = () => {
       {/* --- 右側全体ラッパー --- */}
       <div className="flex-1 flex flex-col min-w-0 bg-[#F0F2F5] relative">
         {/* ▼▼▼ 追加：グローバルヘッダー（会社名の常時表示） ▼▼▼ */}
-        <header className="bg-white border-b border-slate-200 px-8 py-4 flex justify-between items-center z-[45] shadow-sm flex-shrink-0">
+        <header className={`bg-white border-b border-slate-200 px-8 py-4 flex justify-between items-center z-[45] shadow-sm flex-shrink-0 ${isMasterMode ? "hidden" : ""}`}>
           <div className="flex items-center gap-4">
             <div className="bg-indigo-100 p-2.5 rounded-xl text-indigo-600 shadow-inner">
               <Building size={24} />

@@ -2,7 +2,8 @@
 const appId = "payroll-ledger-app";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { initializeApp, getApps } from "firebase/app";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "firebase/auth";
+import { query, where, getDocs, writeBatch } from "firebase/firestore";
 import {
   getFirestore,
   doc,
@@ -1702,15 +1703,45 @@ const App = () => {
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
+  
+  // ★ 新設：テナント管理Stateとデータ移行フラグ
+  const [currentTenantId, setCurrentTenantId] = useState(null);
+  const [migrationDone, setMigrationDone] = useState(false);
+
+  // ▼▼▼ パス生成共通関数（既存＋新規） ▼▼▼
+  // ※既存の関数を消すとホワイトクラッシュするため残します
+  const getTenantCol = (path) => collection(db, `artifacts/${appId}/tenants/${currentTenantId}/${path}`);
+  const getTenantDoc = (path) => doc(db, `artifacts/${appId}/tenants/${currentTenantId}/${path}`);
+
+  // 新規：段階的移行のためのパス解決関数
+  const getUserPath = (uid, path) => {
+    return `artifacts/${appId}/users/${uid}/${path}`;
+  };
+
+  const getTenantPath = (tenantId, path) => {
+    return `artifacts/${appId}/tenants/${tenantId}/${path}`;
+  };
+
+  const resolvePath = (uid, tId, path) => {
+    if (tId) {
+      return getTenantPath(tId, path);
+    }
+    return getUserPath(uid, path);
+  };
+
+  const getColRef = (path) => collection(db, path);
+  const getDocRef = (path) => doc(db, path);
+  // ▲▲▲ ここまで追加 ▲▲▲
+
   const [saveStatus, setSaveStatus] = useState("");
 
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
-  // ▼▼▼ 今回追加する部分：顧問先のリストと選択中の顧問先ID ▼▼▼
-  const [clients, setClients] = useState([{ id: "client_1", name: "株式会社サンプル顧問先" }]);
-  const [selectedClientId, setSelectedClientId] = useState("client_1");
-  const [clientSearchQuery, setClientSearchQuery] = useState("");
-  // ▲▲▲ ここまで追加 ▲▲▲
+  // ▼▼▼ 変更：テナント（会社）のリストと選択中のテナントID ▼▼▼
+  const [tenants, setTenants] = useState([{ id: "tenant_1", name: "株式会社サンプル顧問先" }]);
+  const [selectedTenantId, setSelectedTenantId] = useState("tenant_1");
+  const [tenantSearchQuery, setTenantSearchQuery] = useState("");
+  // ▲▲▲ ここまで変更 ▲▲▲
 
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
@@ -1814,14 +1845,14 @@ const App = () => {
   };
 
   const handleExecuteTaxImport = async () => {
-    if (!taxImportPreview || !db || !userId) return;
+    if (!taxImportPreview || !db) return;
     setIsTaxImporting(true);
     setTaxImportError("");
     try {
       const docId = `${taxImportPreview.year}_${taxImportPreview.type}`;
       const docRef = doc(
         db,
-        `artifacts/${appId}/users/${userId}/taxTables/${docId}`
+        `artifacts/${appId}/taxTables/${docId}`
       );
       await setDoc(docRef, {
         year: taxImportPreview.year,
@@ -1850,7 +1881,7 @@ const App = () => {
       return;
     try {
       await deleteDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/taxTables/${docId}`)
+        doc(db, `artifacts/${appId}/taxTables/${docId}`)
       );
     } catch (err) {
       alert("削除に失敗しました");
@@ -1997,7 +2028,7 @@ const App = () => {
       if (!window.confirm(`${bonusNtaYear}年度の賞与算出率表として保存します。よろしいですか？`)) return;
 
       const docId = `${bonusNtaYear}_bonus_nta`;
-      const docRef = doc(db, `artifacts/${appId}/users/${userId}/taxTables/${docId}`);
+      const docRef = doc(db, `artifacts/${appId}/taxTables/${docId}`);
       await setDoc(docRef, {
         year: bonusNtaYear,
         type: "bonus_nta",
@@ -2097,197 +2128,150 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEmployeeId, selectedYear, data]);
 
+  // ★ データ移行＆テナント初期化処理
+  const initTenantAndMigrate = async (uid, firestore) => {
+    const q = query(collection(firestore, `artifacts/${appId}/tenants`), where("ownerUid", "==", uid));
+    const snap = await getDocs(q);
+    
+    if (!snap.empty) {
+      // 既存テナントがあれば設定
+      setTenants([{ id: snap.docs[0].id, name: snap.docs[0].data().name || "株式会社 新規テナント" }]);
+      setCurrentTenantId(snap.docs[0].id);
+      setSelectedTenantId(snap.docs[0].id);
+      return;
+    }
+
+    // テナントが存在しない場合、新規作成
+    const newTenantRef = doc(collection(firestore, `artifacts/${appId}/tenants`));
+    const newTenantId = newTenantRef.id;
+
+    await setDoc(newTenantRef, {
+      name: "株式会社 新規テナント",
+      ownerUid: uid,
+      createdAt: new Date().toISOString(),
+      migrationDone: true
+    });
+
+    setTenants([{ id: newTenantId, name: "株式会社 新規テナント" }]);
+    setCurrentTenantId(newTenantId);
+    setSelectedTenantId(newTenantId);
+  };
+
   useEffect(() => {
     setLogLevel("error");
     const firestore = getFirestore(app);
     const auth = getAuth(app);
     setDb(firestore);
-    onAuthStateChanged(auth, (user) => {
+    
+    onAuthStateChanged(auth, async (user) => {
       if (user) {
         setUserId(user.uid);
         setIsAuthReady(true);
+        await initTenantAndMigrate(user.uid, firestore);
+      } else {
+        setIsAuthReady(false);
+        setUserId(null);
+        setCurrentTenantId(null);
+        setSelectedTenantId(null);
+        setLoading(false); // ログイン画面表示のためローディング解除
       }
     });
-    const initAuth = async () => {
-      try {
-        await signInAnonymously(auth);
-      } catch (e) {
-        console.error("認証エラー:", e);
-      }
-    };
-    initAuth();
   }, []);
 
-  // ★顧問先（クライアント）一覧の取得
+  const handleGoogleLogin = async () => {
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (e) {
+      console.error("ログインエラー:", e);
+    }
+  };
+
+  // ★ 共通関数ベースのデータ監視 (テナント確定後に発火)
   useEffect(() => {
-    if (!isAuthReady || !userId || !db) return;
+    if (!isAuthReady || !db || !currentTenantId) return;
 
-    const clientsRef = collection(db, `artifacts/${appId}/users/${userId}/clients`);
-    const unsubscribe = onSnapshot(
-      clientsRef,
-      (snap) => {
-        const fetchedClients = [];
-        snap.forEach((doc) => {
-          fetchedClients.push({ id: doc.id, ...doc.data() });
-        });
-        
-        // もしデータベースが空なら、デフォルトのダミー顧問先をセットする
-        if (fetchedClients.length === 0) {
-          setClients([{ id: "client_1", name: "株式会社サンプル顧問先" }]);
-        } else {
-          setClients(fetchedClients);
-        }
-
-        // 選択中の顧問先がない場合、自動的に1社目を選択
-        if (fetchedClients.length > 0 && !selectedClientId) {
-          setSelectedClientId(fetchedClients[0].id);
-        }
-      },
-      (err) => {
-        console.error("顧問先一覧の取得エラー:", err);
+    // 従業員データの購読
+    const unsubEmps = onSnapshot(getTenantCol("payrollEmployees"), (snap) => {
+      if (snap.empty) {
+        const newId = `emp_${Date.now()}`;
+        const newEmp = createInitialEmployee("社員①", "001", settings);
+        setDoc(getTenantDoc(`payrollEmployees/${newId}`), {
+          ...newEmp,
+          updatedAt: new Date().toISOString(),
+        }).catch(console.error);
+        return;
       }
-    );
 
-    return () => unsubscribe();
-  }, [isAuthReady, userId, db, selectedClientId]);
-
-  useEffect(() => {
-    if (!isAuthReady || !userId || !db || !selectedClientId) return;
-    if (!settings?.editableYear) return;
-
-    const colRef = collection(
-      db,
-      `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees`
-    );
-
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snap) => {
-        if (snap.empty) {
-          const newId = `emp_${Date.now()}`;
-          const newEmp = createInitialEmployee("社員①", "001", settings);
-          setDoc(
-            doc(
-              db,
-              `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${newId}`
-            ),
-            {
-              ...newEmp,
-              updatedAt: new Date().toISOString(),
-            }
-          ).catch(console.error);
-          return;
-        }
-
-        const emps = {};
-        snap.forEach((doc) => {
-          let empData = doc.data();
-          if (empData.data && !empData.data.years) {
-            const defaultYear = getDefaultYear(settings);
-            if (defaultYear) {
-              empData.data = {
-                years: {
-                  [defaultYear]: {
-                    monthly:
-                      empData.data.monthly ||
-                      createInitialYearData(defaultYear, settings).monthly,
-                    bonus:
-                      empData.data.bonus ||
-                      createInitialYearData(defaultYear, settings).bonus,
-                  },
+      const emps = {};
+      snap.forEach((doc) => {
+        let empData = doc.data();
+        if (empData.data && !empData.data.years) {
+          const defaultYear = getDefaultYear(settings);
+          if (defaultYear) {
+            empData.data = {
+              years: {
+                [defaultYear]: {
+                  monthly: empData.data.monthly || createInitialYearData(defaultYear, settings).monthly,
+                  bonus: empData.data.bonus || createInitialYearData(defaultYear, settings).bonus,
                 },
-              };
-            }
+              },
+            };
           }
-          emps[doc.id] = empData;
-        });
-        setEmployees(emps);
-        setLoading(false);
-      },
-      (err) => {
-        console.error(err);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [isAuthReady, userId, db, settings?.editableYear, selectedClientId]);
-
-  useEffect(() => {
-    if (!isAuthReady || !userId || !db || !selectedClientId) return;
-    const settingsRef = doc(
-      db,
-      `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`
-    );
-
-    const unsubscribe = onSnapshot(
-      settingsRef,
-      (snap) => {
-        if (snap.exists()) {
-          const d = snap.data();
-          setSettings({
-            ...DEFAULT_SETTINGS,
-            ...d,
-            rateSchedules: {
-              ...DEFAULT_RATE_SCHEDULES,
-              ...(d.rateSchedules || {}),
-            },
-            standardRewardTable:
-              Array.isArray(d.standardRewardTable) &&
-              d.standardRewardTable.length > 0
-                ? d.standardRewardTable
-                : DEFAULT_STD_REWARD_TABLE,
-          });
-        } else {
-          setDoc(settingsRef, DEFAULT_SETTINGS).catch(console.error);
-          setSettings(DEFAULT_SETTINGS);
         }
-      },
-      (err) => {
-        console.error(err);
-      }
-    );
+        emps[doc.id] = empData;
+      });
+      setEmployees(emps);
+      setLoading(false);
+    });
 
-    return () => unsubscribe();
-  }, [isAuthReady, userId, db, selectedClientId]);
-
-  // ★ 追加：税額表データの取得
-  useEffect(() => {
-    if (!isAuthReady || !userId || !db) return;
-    const colRef = collection(
-      db,
-      `artifacts/${appId}/users/${userId}/taxTables`
-    );
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snap) => {
-        const tables = {};
-        snap.forEach((doc) => {
-          tables[doc.id] = doc.data();
+    // 設定データの購読
+    const unsubSettings = onSnapshot(getTenantDoc("payrollSettings/v1"), (snap) => {
+      if (snap.exists()) {
+        const d = snap.data();
+        setSettings({
+          ...DEFAULT_SETTINGS,
+          ...d,
+          rateSchedules: {
+            ...DEFAULT_RATE_SCHEDULES,
+            ...(d.rateSchedules || {}),
+          },
+          standardRewardTable: Array.isArray(d.standardRewardTable) && d.standardRewardTable.length > 0
+            ? d.standardRewardTable
+            : DEFAULT_STD_REWARD_TABLE,
         });
-        setTaxTables(tables);
-      },
-      (err) => {
-        console.error(err);
+      } else {
+        setDoc(getTenantDoc("payrollSettings/v1"), DEFAULT_SETTINGS).catch(console.error);
+        setSettings(DEFAULT_SETTINGS);
       }
-    );
-    return () => unsubscribe();
-  }, [isAuthReady, userId, db]);
+    });
 
-  // ★月次全体ロックデータの取得
+    // 月次ロックデータの購読
+    const unsubLocks = onSnapshot(getTenantDoc("monthlyLocks/v1"), (snap) => {
+      setMonthlyLocks(snap.exists() ? snap.data() : {});
+    });
+
+    return () => {
+      unsubEmps();
+      unsubSettings();
+      unsubLocks();
+    };
+  }, [isAuthReady, db, currentTenantId, settings?.editableYear]);
+
+  // ★ 追加：税額表データの取得（全テナント共通）
   useEffect(() => {
-    if (!isAuthReady || !userId || !db || !selectedClientId) return;
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
-    const unsubscribe = onSnapshot(
-      docRef,
-      (snap) => {
-        if (snap.exists()) setMonthlyLocks(snap.data());
-        else setMonthlyLocks({});
-      },
-      (err) => { console.error(err); }
-    );
+    if (!isAuthReady || !db) return;
+    const colRef = collection(db, `artifacts/${appId}/taxTables`);
+    const unsubscribe = onSnapshot(colRef, (snap) => {
+      const tables = {};
+      snap.forEach((doc) => {
+        tables[doc.id] = doc.data();
+      });
+      setTaxTables(tables);
+    });
     return () => unsubscribe();
-  }, [isAuthReady, userId, db, selectedClientId]);
+  }, [isAuthReady, db]);
 
   useEffect(() => {
     if (!selectedEmployeeId && Object.keys(employees).length > 0) {
@@ -2324,23 +2308,23 @@ const App = () => {
       }
     }
 
-    if (shouldUpdateSettings && db && userId && selectedClientId) {
+    if (shouldUpdateSettings && db && currentTenantId) {
       setSettings(newSettings);
       setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`),
+        getTenantDoc("payrollSettings/v1"),
         newSettings,
         { merge: true }
       ).catch(console.error);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, db, userId, selectedClientId]);
+  }, [employees, db, currentTenantId]);
 
   const handleSaveSettingsObj = async (newSettings) => {
-    if (!db || !userId || !selectedClientId) return;
+    if (!db || !currentTenantId) return;
     setSaveStatus("保存中...");
     try {
       await setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`),
+        getTenantDoc("payrollSettings/v1"),
         newSettings,
         { merge: true }
       );
@@ -2353,27 +2337,26 @@ const App = () => {
   };
 
   const handleLockMonth = async (yearStr, monthKey) => {
-    if (!db || !userId || !selectedClientId || !yearStr || !monthKey) return;
+    if (!db || !currentTenantId || !yearStr || !monthKey) return;
     if (!window.confirm(`${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。よろしいですか？`)) return;
     const key = `${yearStr}_${monthKey}`;
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
     const newEntry = {
       locked: true,
       lockedAt: new Date().toISOString(),
-      lockedBy: auth?.currentUser?.email || userId || "unknown",
+      lockedBy: userId || "unknown",
       unlockedAt: null,
       unlockReason: null,
       history: [
         ...(prev.history || []),
-        { action: "lock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown" },
+        { action: "lock", at: new Date().toISOString(), by: userId || "unknown" },
       ],
     };
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
-    await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+    await setDoc(getTenantDoc("monthlyLocks/v1"), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
   };
 
   const handleUnlockMonth = async (yearStr, monthKey, reason) => {
-    if (!db || !userId || !selectedClientId || !yearStr || !monthKey) return;
+    if (!db || !currentTenantId || !yearStr || !monthKey) return;
     if (!reason || !reason.trim()) { alert("解除理由を入力してください"); return; }
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
     const newEntry = {
@@ -2383,11 +2366,10 @@ const App = () => {
       unlockReason: reason.trim(),
       history: [
         ...(prev.history || []),
-        { action: "unlock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown", reason: reason.trim() },
+        { action: "unlock", at: new Date().toISOString(), by: userId || "unknown", reason: reason.trim() },
       ],
     };
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
-    await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+    await setDoc(getTenantDoc("monthlyLocks/v1"), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
     setUnlockReason("");
   };
 
@@ -2409,7 +2391,7 @@ const App = () => {
   };
 
   const handleSave = async (empId, m, d) => {
-    if (!db || !userId || !selectedClientId || !empId) return;
+    if (!db || !currentTenantId || !empId) return;
 
     let hasNullTax = false;
     if (d && d.years) {
@@ -2455,7 +2437,7 @@ const App = () => {
     setSaveStatus("保存中...");
     try {
       await setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`),
+        getTenantDoc(`payrollEmployees/${empId}`),
         {
           master: m,
           data: d,
@@ -2471,7 +2453,7 @@ const App = () => {
   };
 
   const handleAddEmployee = async () => {
-    if (!db || !userId) return;
+    if (!db || !currentTenantId) return;
     const newId = `emp_${Date.now()}`;
     const newEmp = createInitialEmployee("新規社員", "", settings);
 
@@ -2482,7 +2464,7 @@ const App = () => {
   };
 
   const handleAddNewEmployeeFromList = async () => {
-    if (!db || !userId) return;
+    if (!db || !currentTenantId) return;
     const newId = `emp_${Date.now()}`;
     const newEmp = createInitialEmployee("新規社員", "", settings);
 
@@ -2567,20 +2549,12 @@ const App = () => {
       const { settings: importedSettings, employees: importedEmployees } =
         importPreview.rawData;
 
-      if (db && userId && selectedClientId) {
-        const settingsRef = doc(
-          db,
-          `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`
-        );
-        await setDoc(settingsRef, importedSettings, { merge: true });
+      if (db && currentTenantId) {
+        await setDoc(getTenantDoc("payrollSettings/v1"), importedSettings, { merge: true });
 
         const promises = Object.entries(importedEmployees).map(
           ([empId, empData]) => {
-            const empRef = doc(
-              db,
-              `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`
-            );
-            return setDoc(empRef, empData, { merge: true });
+            return setDoc(getTenantDoc(`payrollEmployees/${empId}`), empData, { merge: true });
           }
         );
 
@@ -2643,11 +2617,9 @@ const App = () => {
   };
 
   const handleDeleteEmployee = async (empId) => {
-    // 【修正⑤】名前の取得
     const emp = employees[empId];
     const empName = emp?.master?.name || "この社員";
 
-    // 【修正③】確認メッセージ強化
     if (
       !window.confirm(
         `${empName} の社員データを削除します。\n` +
@@ -2656,7 +2628,7 @@ const App = () => {
       )
     )
       return;
-    setSaveStatus("削除中..."); // 【修正②】削除後の自動選択を含むステート更新
+    setSaveStatus("削除中..."); 
 
     setEmployees((prev) => {
       const next = { ...prev };
@@ -2669,27 +2641,19 @@ const App = () => {
       }
 
       return next;
-    }); // クラウド上のデータベースから完全に消去する
+    }); 
 
-    if (db && userId && selectedClientId) {
+    if (db && currentTenantId) {
       try {
-        await deleteDoc(
-          doc(
-            db,
-            `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`
-          )
-        );
-        // 【修正④】削除成功ステータス
+        await deleteDoc(getTenantDoc(`payrollEmployees/${empId}`));
         setSaveStatus("削除しました");
         setTimeout(() => setSaveStatus(""), 2000);
       } catch (error) {
         console.error("削除エラー:", error);
-        // 【修正④】削除エラーステータス
         setSaveStatus("削除エラー");
         setTimeout(() => setSaveStatus(""), 2000);
       }
     } else {
-      // オフライン/未ログイン時のフォールバックUI更新
       setSaveStatus("削除しました");
       setTimeout(() => setSaveStatus(""), 2000);
     }
@@ -3765,16 +3729,38 @@ const App = () => {
       </div>
     );
 
-  // ▼追加：現在選択されているクライアントの情報を取得▼
-  const currentClient = clients.find(c => c.id === selectedClientId);
-  const currentClientName = currentClient?.name || "未選択";
+  // ★ 新設：未ログイン時の画面
+  if (!userId) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-slate-900 text-white font-sans">
+        <div className="bg-slate-800 p-10 rounded-2xl shadow-2xl flex flex-col items-center max-w-md w-full border border-slate-700">
+          <Calculator className="text-emerald-400 mb-6" size={64} />
+          <h1 className="text-3xl font-black tracking-widest mb-2 uppercase">Payroll Cloud</h1>
+          <p className="text-sm text-slate-400 mb-10 font-bold tracking-widest">税理士法人アストラスト</p>
+          <button 
+            onClick={handleGoogleLogin}
+            className="w-full bg-white text-slate-800 px-8 py-4 rounded-xl font-black text-sm shadow-lg hover:bg-slate-100 hover:scale-[1.02] transition-all flex justify-center items-center gap-3"
+          >
+            <User size={18} className="text-indigo-500" /> Googleアカウントでログイン
+          </button>
+        </div>
+        <div className="mt-8 text-xs text-slate-500 font-bold flex items-center gap-2">
+          <ShieldCheck size={14} /> クラウド賃金台帳システム - セキュア接続
+        </div>
+      </div>
+    );
+  }
+
+  // ▼追加：現在選択されているテナント（会社）の情報を取得▼
+  const currentTenant = tenants.find(t => t.id === currentTenantId);
+  const currentTenantName = currentTenant?.name || "未選択";
 
   // ▼▼▼ 新規追加：ポータル（ルート）画面の独立レンダリング ▼▼▼
   if (activeTab === "portal") {
     // ★ 検索キーワードで顧問先を絞り込む
-    const filteredClients = clients.filter(c => 
-      (c.name || "").toLowerCase().includes(clientSearchQuery.toLowerCase()) || 
-      (c.id || "").toLowerCase().includes(clientSearchQuery.toLowerCase())
+    const filteredTenants = tenants.filter(t => 
+      (t.name || "").toLowerCase().includes(tenantSearchQuery.toLowerCase()) || 
+      (t.id || "").toLowerCase().includes(tenantSearchQuery.toLowerCase())
     );
 
     return (
@@ -3822,8 +3808,8 @@ const App = () => {
                 <input
                   type="text"
                   placeholder="顧問先を検索..."
-                  value={clientSearchQuery}
-                  onChange={(e) => setClientSearchQuery(e.target.value)}
+                  value={tenantSearchQuery}
+                  onChange={(e) => setTenantSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
                 />
               </div>
@@ -3831,11 +3817,11 @@ const App = () => {
                 onClick={() => {
                   const name = window.prompt("新しい顧問先の会社名を入力してください");
                   if (name && name.trim()) {
-                    const newId = `client_${Date.now()}`;
-                    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${newId}`);
+                    const newId = `tenant_${Date.now()}`;
+                    const docRef = doc(db, `artifacts/${appId}/tenants/${newId}`);
                     setDoc(docRef, { name: name.trim(), createdAt: new Date().toISOString() })
                       .then(() => {
-                         setSelectedClientId(newId);
+                         setSelectedTenantId(newId);
                          setActiveTab("ledger");
                       })
                       .catch(e => alert("顧問先の追加に失敗しました"));
@@ -3849,11 +3835,11 @@ const App = () => {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-20">
-            {filteredClients.map(c => (
+            {filteredTenants.map(t => (
               <div
-                key={c.id}
+                key={t.id}
                 onClick={() => {
-                  setSelectedClientId(c.id);
+                  setSelectedTenantId(t.id);
                   setActiveTab("ledger");
                 }}
                 className="group bg-white rounded-xl p-4 border border-slate-200 transition-all cursor-pointer shadow-sm hover:shadow-md hover:border-blue-400 hover:-translate-y-0.5 flex flex-col justify-between min-h-[120px]"
@@ -3863,13 +3849,13 @@ const App = () => {
                     <Building size={20} />
                   </div>
                   <h3 className="text-sm font-black text-slate-800 group-hover:text-blue-700 transition-colors line-clamp-2 leading-snug pt-1">
-                    {c.name || "名称未設定"}
+                    {t.name || "名称未設定"}
                   </h3>
                 </div>
                 
                 <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
                   <span className="text-[9px] font-mono text-slate-400 truncate pr-2">
-                    ID: {c.id.replace('client_', '')}
+                    ID: {t.id.replace('tenant_', '')}
                   </span>
                   <span className="text-[10px] font-bold text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
                     開く ➔
@@ -3878,7 +3864,7 @@ const App = () => {
               </div>
             ))}
             
-            {filteredClients.length === 0 && (
+            {filteredTenants.length === 0 && (
               <div className="col-span-full py-12 text-center bg-white rounded-xl border border-slate-200">
                 <Building size={48} className="mx-auto text-slate-200 mb-3" />
                 <p className="text-slate-500 font-bold text-sm">該当する顧問先が見つかりません</p>
@@ -4002,7 +3988,7 @@ const App = () => {
                 現在操作中の顧問先
               </span>
               <span className="text-2xl font-black text-slate-800 leading-none tracking-tight">
-                {currentClientName}
+                {currentTenantName}
               </span>
             </div>
           </div>

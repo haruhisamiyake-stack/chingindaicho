@@ -38,6 +38,7 @@ import {
   Lock,
   Unlock,
   Copy,
+  Building,
 } from "lucide-react";
 
 // --- Firebase Configuration ---
@@ -1696,7 +1697,7 @@ const createInitialEmployee = (
 };
 
 const App = () => {
-  const [activeTab, setActiveTab] = useState("ledger");
+  const [activeTab, setActiveTab] = useState("portal");
   const [db, setDb] = useState(null);
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -3763,6 +3764,92 @@ const App = () => {
       </div>
     );
 
+  // ▼追加：現在選択されているクライアントの情報を取得▼
+  const currentClient = clients.find(c => c.id === selectedClientId);
+  const currentClientName = currentClient?.name || "未選択";
+
+  // ▼▼▼ 新規追加：ポータル（ルート）画面の独立レンダリング ▼▼▼
+  if (activeTab === "portal") {
+    return (
+      <div className="h-screen bg-slate-100 font-sans text-sm overflow-y-auto flex flex-col custom-scrollbar">
+        <header className="bg-slate-900 px-8 py-5 flex justify-between items-center shadow-md">
+          <div>
+            <h1 className="font-black text-2xl tracking-widest uppercase flex items-center gap-3 text-white">
+              <Calculator className="text-emerald-400" size={28} /> PAYROLL SYSTEM
+            </h1>
+            <p className="text-xs text-slate-400 mt-1 ml-10">税理士法人アストラスト</p>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-slate-300 text-xs font-bold font-mono bg-slate-800 px-4 py-2 rounded-lg border border-slate-700">
+              ORG ID: {userId?.substring(0, 10) || "..."}
+            </div>
+          </div>
+        </header>
+        
+        <div className="flex-1 p-8 max-w-6xl mx-auto w-full mt-8">
+          <div className="flex justify-between items-end mb-10 bg-white p-8 rounded-2xl shadow-sm border border-slate-200 border-l-4 border-l-blue-500">
+            <div>
+              <h2 className="text-3xl font-black text-slate-800 tracking-tight">顧問先を選択してください</h2>
+              <p className="text-sm font-bold text-slate-500 mt-3 leading-relaxed">
+                カードをクリックすると、その会社の給与計算システム（台帳）へ入ります。<br/>
+                誤操作を防ぐため、<span className="text-rose-500">別の会社の計算を行う際は、必ずメニューからこの一覧画面に戻ってきて</span>切り替えてください。
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                const name = window.prompt("新しい顧問先の会社名を入力してください");
+                if (name && name.trim()) {
+                  const newId = `client_${Date.now()}`;
+                  const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${newId}`);
+                  setDoc(docRef, { name: name.trim(), createdAt: new Date().toISOString() })
+                    .then(() => {
+                       setSelectedClientId(newId);
+                       setActiveTab("ledger");
+                    })
+                    .catch(e => alert("顧問先の追加に失敗しました"));
+                }
+              }}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl font-bold shadow-md transition-all active:scale-95"
+            >
+              <PlusCircle size={18} /> 新規顧問先を登録
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-20">
+            {clients.map(c => (
+              <div
+                key={c.id}
+                onClick={() => {
+                  setSelectedClientId(c.id);
+                  setActiveTab("ledger");
+                }}
+                className="group bg-white rounded-2xl p-6 border-2 border-slate-200 transition-all cursor-pointer shadow-sm hover:shadow-xl hover:border-blue-400 hover:-translate-y-1"
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <div className="p-4 rounded-xl bg-slate-50 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
+                    <Building size={28} />
+                  </div>
+                </div>
+                <h3 className="text-xl font-black text-slate-800 mb-2 group-hover:text-blue-700 transition-colors line-clamp-1">
+                  {c.name || "名称未設定"}
+                </h3>
+                <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-100">
+                  <span className="text-[10px] font-black text-slate-400 bg-slate-100 px-2 py-1 rounded uppercase">
+                    Client ID
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-500 truncate">
+                    {c.id}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  // ▲▲▲ ここまで追加 ▲▲▲
+
   return (
     <div className="flex h-screen bg-[#F0F2F5] font-sans text-sm overflow-hidden">
       {/* --- 左サイドバー --- */}
@@ -3776,7 +3863,29 @@ const App = () => {
           </p>
         </div>
 
+        {/* ▼▼▼ 修正：顧問先ポータルへ戻るボタン ▼▼▼ */}
+        <div className="p-4 border-b border-slate-800 bg-blue-900/30">
+          <button
+            onClick={() => setActiveTab("portal")}
+            className="w-full flex justify-between items-center px-4 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-sm transition-all shadow-md active:scale-95 border border-blue-500"
+          >
+            <span className="flex items-center gap-2"><Building size={18} /> 顧問先一覧へ戻る</span>
+            <span className="text-[10px] bg-blue-800 px-2 py-0.5 rounded border border-blue-500 shadow-inner">切替</span>
+          </button>
+        </div>
+        {/* ▲▲▲ ここまで修正 ▲▲▲ */}
+
         <nav className="p-4 space-y-2 border-b border-slate-800">
+          <button
+            onClick={() => setActiveTab("portal")}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
+              activeTab === "portal"
+                ? "bg-blue-600 text-white shadow-lg"
+                : "text-slate-400 hover:bg-slate-800 hover:text-white"
+            }`}
+          >
+            <Building size={18} /> 顧問先ポータル
+          </button>
           <button
             onClick={() => setActiveTab("ledger")}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
@@ -3864,9 +3973,34 @@ const App = () => {
           </div>
         </div>
       </aside>
-      {/* --- メインコンテンツエリア --- */}
-      <main className="flex-1 overflow-auto bg-[#F0F2F5] relative">
-        {activeTab === "employees" && (
+      
+      {/* --- 右側全体ラッパー --- */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[#F0F2F5] relative">
+        {/* ▼▼▼ 追加：グローバルヘッダー（会社名の常時表示） ▼▼▼ */}
+        <header className="bg-white border-b border-slate-200 px-8 py-4 flex justify-between items-center z-[45] shadow-sm flex-shrink-0">
+          <div className="flex items-center gap-4">
+            <div className="bg-indigo-100 p-2.5 rounded-xl text-indigo-600 shadow-inner">
+              <Building size={24} />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1.5">
+                現在操作中の顧問先
+              </span>
+              <span className="text-2xl font-black text-slate-800 leading-none tracking-tight">
+                {currentClientName}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 px-4 py-2 rounded-lg text-rose-600 font-bold text-xs shadow-sm animate-pulse">
+            <ShieldCheck size={16} />
+            <span>入力する会社に間違いがないか確認してください</span>
+          </div>
+        </header>
+        {/* ▲▲▲ ここまで追加 ▲▲▲ */}
+
+        {/* --- メインコンテンツエリア --- */}
+        <main className="flex-1 overflow-auto relative custom-scrollbar">
+          {activeTab === "employees" && (
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden max-w-6xl mx-auto mt-4 mb-20">
               <div className="bg-slate-800 px-6 py-4 flex justify-between items-center text-white">
@@ -9645,11 +9779,12 @@ const App = () => {
                     </>
                   )}
                 </div>
-              </div>
-            );
-          })()}
-      </main>
-      {/* ＝＝＝ 社員マスター編集 モーダル ＝＝＝ */}
+          </div>
+        );
+      })()}
+        </main>
+      </div>
+  {/* ＝＝＝ 社員マスター編集 モーダル ＝＝＝ */}
       {editingEmployeeId && editingMaster && (
         <div
           id="modal-backdrop-edit"

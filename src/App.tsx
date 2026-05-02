@@ -326,18 +326,25 @@ const getDefaultYear = (settings) => settings?.editableYear || null;
 const getYearNumber = (year) =>
   year ? Number(String(year).replace("R", "")) : 0;
 
+// 年度文字列を必ず2桁に正規化する共通関数 (例：R8 → R08)
+const normalizeYear = (yStr) => {
+  if (!yStr || !String(yStr).startsWith("R")) return yStr;
+  const numPart = String(yStr).replace("R", "");
+  return `R${numPart.padStart(2, "0")}`;
+};
+
 const buildYearsList = (employees, settings) => {
   const yearSet = new Set();
   if (settings?.editableYear) {
-    yearSet.add(settings.editableYear);
+    yearSet.add(normalizeYear(settings.editableYear));
   }
   Object.values(employees || {}).forEach((emp) => {
     Object.keys(emp?.data?.years || {}).forEach((year) => {
-      yearSet.add(year);
+      yearSet.add(normalizeYear(year));
     });
   });
 
-  // ▼▼▼ ここから追加：常に「次の年度」を選択肢に出すロジック ▼▼▼
+  // 常に「次の年度」を選択肢に出すロジック
   let maxYearNum = 8; // 最低R08を基準とする
   yearSet.forEach(y => {
     const num = Number(String(y).replace("R", ""));
@@ -348,7 +355,6 @@ const buildYearsList = (employees, settings) => {
   // 最大年度の次の年（例：R08ならR09）を追加
   const nextYear = `R${String(maxYearNum + 1).padStart(2, "0")}`;
   yearSet.add(nextYear);
-  // ▲▲▲ ここまで追加 ▲▲▲
 
   return Array.from(yearSet).sort((a, b) => {
     const aNum = Number(String(a).replace("R", ""));
@@ -510,7 +516,34 @@ const getNursingAlert = (dobStr, yearStr, mStr) => {
   );
   return nursing ? nursing.label : null;
 };
+// 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
+const getEffectiveTaxTable = (taxTables, yearStr, type) => {
+  if (!taxTables || !yearStr) return null;
 
+  // targetのyearStrをグローバル関数のnormalizeYearで正規化
+  const normalizedTargetYear = normalizeYear(yearStr);
+  
+  // 探したい年を数字にする (例: "R09" -> 9)
+  const targetNum = Number(normalizedTargetYear.replace("R", ""));
+  
+  // 登録されている全ての表の中から、種類(monthly等)が一致し、かつ探したい年以下のものを抽出
+  const applicableTables = Object.values(taxTables)
+    .filter((t) => t.type === type)
+    .map((t) => {
+      // taxTablesのyearもグローバル関数のnormalizeYearで正規化してから比較
+      const normalizedTableYear = normalizeYear(t.year);
+      return { 
+        ...t, 
+        year: normalizedTableYear, 
+        num: Number(normalizedTableYear.replace("R", "")) 
+      };
+    })
+    .filter((t) => t.num <= targetNum)
+    .sort((a, b) => b.num - a.num); // 年が新しい順に並び替える
+
+  // 条件に合う中で一番新しい（＝その年に最も近い過去の）表を返す
+  return applicableTables.length > 0 ? applicableTables[0] : null;
+};
 // ----------------------------------------------------
 // 【電算機特例】源泉徴収税額の計算（令和8年分想定）
 // ----------------------------------------------------
@@ -603,143 +636,186 @@ const calculateIncomeTaxByDensanReiwa8 = ({
 };
 
 const calculateIncomeTax = (
-  taxableAfterSocial,
-  dependents,
-  isOtsu,
-  requireExact = false,
-  master = null,
-  settings = null,
-  yearStr = null,
-  taxTables = {}
+  taxableAfterSocial,
+  dependents,
+  isOtsu,
+  requireExact = false,
+  master = null,
+  settings = null,
+  yearStr = null,
+  taxTables = {}
 ) => {
-  const log = [];
-  const method = settings?.taxCalcMethod || "taxTable";
+  const log = [];
+  const method = settings?.taxCalcMethod || "taxTable";
 
-  if ((method === "densan" || requireExact) && !isOtsu) {
-    log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
-    const densanResult = calculateIncomeTaxByDensanReiwa8({
-      taxableAfterSocial,
-      master,
-      dependents,
-    });
-    if (densanResult && densanResult.log) log.push(...densanResult.log);
-    return { tax: densanResult.tax, warning: densanResult.warning, log };
-  }
+  // グローバル関数 normalizeYear を使用して正規化
+  let normalizedYearStr = normalizeYear(yearStr);
 
-  const tableKey = `${yearStr}_monthly`;
-  const currentTable = taxTables[tableKey];
+  if ((method === "densan" || requireExact) && !isOtsu) {
+    log.push(`[所得税計算] 甲欄適用: 電算機計算の特例を使用`);
+    const densanResult = calculateIncomeTaxByDensanReiwa8({
+      taxableAfterSocial,
+      master,
+      dependents,
+    });
+    if (densanResult && densanResult.log) log.push(...densanResult.log);
+    return { tax: densanResult.tax, warning: densanResult.warning, log };
+  }
 
-  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
-    log.push(`[所得税計算] ${yearStr}年度の月額表が未登録です`);
-    return {
-      tax: null,
-      warning: "税額表未登録のため計算不可",
-      isBlocking: true,
-      log,
-    };
-  }
+  const currentTable = getEffectiveTaxTable(taxTables, normalizedYearStr, "monthly");
 
-  const row = currentTable.rows.find(
-    (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
-  );
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    // 修正箇所：「以降」を「以前」に変更
+    log.push(`[所得税計算] ${normalizedYearStr}年度以前に使用可能な月額表が未登録です`);
+    return {
+      tax: null,
+      warning: "税額表未登録のため計算不可",
+      isBlocking: true,
+      log,
+    };
+  }
 
-  if (!row) {
-    if (!isOtsu) {
-      log.push(`[所得税計算] 課税対象額が税額表の範囲を超えています。自動的に電算機計算(甲欄)へ切り替えます。`);
-      const densanResult = calculateIncomeTaxByDensanReiwa8({
-        taxableAfterSocial,
-        master,
-        dependents,
-      });
-      if (densanResult && densanResult.log) log.push(...densanResult.log);
-      return { 
-        tax: densanResult.tax, 
-        warning: "税額表の範囲外のため電算機特例に自動切替されました",
-        log 
-      };
-    } else {
-      log.push(`[所得税計算] 課税対象額が税額表の範囲外です(乙欄)`);
-      return { 
-        tax: null, 
-        warning: "乙欄で税額表の上限を超えています。手動で計算・入力してください", 
-        isBlocking: true,
-        log 
-      };
-    }
-  }
+  // ① 選択された税額表と対象年度の差分を計算する
+  const targetNum = Number(normalizedYearStr.replace("R", ""));
+  const currentTableNum = Number(currentTable.year.replace("R", ""));
+  const diff = targetNum - currentTableNum;
 
-  if (isOtsu) {
-    if (row.otsu.type === "rate") {
-      const tax = Math.floor(taxableAfterSocial * row.otsu.value);
-      log.push(
-        `[所得税計算] 乙欄適用(税額表): ${formatCurrency(
-          taxableAfterSocial
-        )} × ${row.otsu.value}`
-      );
-      return { tax, warning: null, log };
-    } else {
-      log.push(`[所得税計算] 乙欄適用(税額表): 固定額 ${row.otsu.value}`);
-      return { tax: row.otsu.value, warning: null, log };
-    }
-  } else {
-    const depCount = Math.min(Math.max(0, dependents), 7);
-    const tax = row.kou[depCount] || 0;
-    log.push(
-      `[所得税計算] 甲欄適用(税額表): 扶養${depCount}人枠 -> ${formatCurrency(
-        tax
-      )}円`
-    );
-    return { tax, warning: null, log };
-  }
+  if (currentTable.year !== normalizedYearStr) {
+    log.push(`[所得税計算] 案内：${normalizedYearStr}年度の表が未登録のため、${currentTable.year}年度版を適用して計算します。`);
+    
+    // ② diffが2以上の場合はログに警告を追加、③ diffが1の場合は案内ログのみ
+    if (diff >= 2) {
+      log.push(`[所得税計算] 警告：税制改正の可能性があります。最新の税額表を確認してください`);
+    } else if (diff === 1) {
+      log.push(`[所得税計算] 案内：前年の税額表を使用しています`);
+    }
+  } else {
+    log.push(`[所得税計算] ${currentTable.year}年度版の税額表を適用`);
+  }
+
+  const row = currentTable.rows.find(
+    (r) => taxableAfterSocial >= r.min && taxableAfterSocial < r.max
+  );
+
+  if (!row) {
+    if (!isOtsu) {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲を超えています。自動的に電算機計算(甲欄)へ切り替えます。`);
+      const densanResult = calculateIncomeTaxByDensanReiwa8({
+        taxableAfterSocial,
+        master,
+        dependents,
+      });
+      if (densanResult && densanResult.log) log.push(...densanResult.log);
+      return { 
+        tax: densanResult.tax, 
+        warning: "税額表の範囲外のため電算機特例に自動切替されました",
+        log 
+      };
+    } else {
+      log.push(`[所得税計算] 課税対象額が税額表の範囲外です(乙欄)`);
+      return { 
+        tax: null, 
+        warning: "乙欄で税額表の上限を超えています。手動で計算・入力してください", 
+        isBlocking: true,
+        log 
+      };
+    }
+  }
+
+  if (isOtsu) {
+    if (row.otsu.type === "rate") {
+      const tax = Math.floor(taxableAfterSocial * row.otsu.value);
+      log.push(
+        `[所得税計算] 乙欄適用(税額表): ${formatCurrency(
+          taxableAfterSocial
+        )} × ${row.otsu.value}`
+      );
+      return { tax, warning: null, log };
+    } else {
+      log.push(`[所得税計算] 乙欄適用(税額表): 固定額 ${row.otsu.value}`);
+      return { tax: row.otsu.value, warning: null, log };
+    }
+  } else {
+    const depCount = Math.min(Math.max(0, dependents), 7);
+    const tax = row.kou[depCount] || 0;
+    log.push(
+      `[所得税計算] 甲欄適用(税額表): 扶養${depCount}人枠 -> ${formatCurrency(
+        tax
+      )}円`
+    );
+    return { tax, warning: null, log };
+  }
 };
 
 const getBonusTaxRate = (
-  lastMonthSalaryAfterSocial,
-  dependents,
-  isOtsu,
-  yearStr,
-  taxTables = {}
+  lastMonthSalaryAfterSocial,
+  dependents,
+  isOtsu,
+  yearStr,
+  taxTables = {}
 ) => {
-  const log = [];
-  const tableKey = `${yearStr}_bonus_nta`;
-  const currentTable = taxTables[tableKey];
+  const log = [];
+  
+  // グローバル関数 normalizeYear を使用して正規化
+  let normalizedYearStr = normalizeYear(yearStr);
 
-  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
-    const warning = "税額表未登録のため計算不可";
-    log.push(`[賞与税率] ${warning}`);
-    return { rate: null, warning, isBlocking: true, log };
-  }
+  const currentTable = getEffectiveTaxTable(taxTables, normalizedYearStr, "bonus_nta");
 
-  const depCount = Math.min(Math.max(0, dependents), 7);
-  let targetRate = null;
+  if (!currentTable || !currentTable.rows || currentTable.rows.length === 0) {
+    const warning = "賞与算出率表が未登録のため計算不可";
+    // 修正箇所：「以降」を「以前」に変更
+    log.push(`[賞与税率] ${normalizedYearStr}年度以前に使用可能な${warning}`);
+    return { rate: null, warning, isBlocking: true, log };
+  }
 
-  if (isOtsu) {
-    const row = currentTable.rows.find(
-      (r) =>
-        r.otsuRange &&
-        lastMonthSalaryAfterSocial >= r.otsuRange.min &&
-        lastMonthSalaryAfterSocial < r.otsuRange.max
-    );
-    if (row) targetRate = row.rate;
-  } else {
-    const row = currentTable.rows.find(
-      (r) =>
-        lastMonthSalaryAfterSocial >= r.kouRanges[depCount].min &&
-        lastMonthSalaryAfterSocial < r.kouRanges[depCount].max
-    );
-    if (row) targetRate = row.rate;
-  }
+  // ① 選択された税額表と対象年度の差分を計算する
+  const targetNum = Number(normalizedYearStr.replace("R", ""));
+  const currentTableNum = Number(currentTable.year.replace("R", ""));
+  const diff = targetNum - currentTableNum;
 
-  if (targetRate === null) {
-    return {
-      rate: null,
-      warning: "賞与算出率表の範囲外です。手動で計算・入力してください",
-      isBlocking: true,
-      log: ["[賞与税率] 該当する賞与算出率が見つかりません"],
-    };
-  }
+  if (currentTable.year !== normalizedYearStr) {
+    log.push(`[賞与税率] 案内：${normalizedYearStr}年度の表が未登録のため、${currentTable.year}年度版を適用します。`);
+    
+    // ② diffが2以上の場合はログに警告を追加、③ diffが1の場合は案内ログのみ
+    if (diff >= 2) {
+      log.push(`[賞与税率] 警告：税制改正の可能性があります。最新の税額表を確認してください`);
+    } else if (diff === 1) {
+      log.push(`[賞与税率] 案内：前年の税額表を使用しています`);
+    }
+  } else {
+    log.push(`[賞与税率] ${currentTable.year}年度版の算出率表を適用`);
+  }
 
-  return { rate: targetRate, warning: null, log };
+  const depCount = Math.min(Math.max(0, dependents), 7);
+  let targetRate = null;
+
+  if (isOtsu) {
+    const row = currentTable.rows.find(
+      (r) =>
+        r.otsuRange &&
+        lastMonthSalaryAfterSocial >= r.otsuRange.min &&
+        lastMonthSalaryAfterSocial < r.otsuRange.max
+    );
+    if (row) targetRate = row.rate;
+  } else {
+    const row = currentTable.rows.find(
+      (r) =>
+        lastMonthSalaryAfterSocial >= r.kouRanges[depCount].min &&
+        lastMonthSalaryAfterSocial < r.kouRanges[depCount].max
+    );
+    if (row) targetRate = row.rate;
+  }
+
+  if (targetRate === null) {
+    return {
+      rate: null,
+      warning: "賞与算出率表の範囲外です。手動で計算・入力してください",
+      isBlocking: true,
+      log: ["[賞与税率] 該当する賞与算出率が見つかりません"],
+    };
+  }
+
+  return { rate: targetRate, warning: null, log };
 };
 
 const calculateBonusIncomeTax = (
@@ -958,8 +1034,28 @@ const formatCurrency = (val) => {
   return Number(val).toLocaleString();
 };
 
-const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}) => {
+const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}, monthlyLocks = {}) => {
   if (!master || !row) return {};
+  const _lockYear = normalizeYear(yearStr);
+  if (monthlyLocks?.[_lockYear]?.[monthKey]?.locked === true) {
+    return {
+      ...row,
+      isLocked: true,
+      isBlocking: true,
+      lockMessage: "この月は全体ロック済です",
+      grossPay: null,
+      health: null,
+      pension: null,
+      nursing: null,
+      childCare: null,
+      employment: null,
+      socialTotal: null,
+      incomeTax: null,
+      totalDeductions: null,
+      netPay: null,
+      calcLog: ["この月は全体ロック済のため計算をスキップしました"],
+    };
+  }
   const calcLog = ["【月次給与 計算ログ】"];
   const base = Number(row.basePay) || 0;
   calcLog.push(`- 基本給: ${formatCurrency(base)}円`);
@@ -1259,8 +1355,29 @@ const calculateBonusResult = ({
   monthKeyForRates,
   yearStr,
   taxTables = {},
+  monthlyLocks = {},
 }) => {
   if (!master || !bonusRow || !yearData) return {};
+  const _lockYear = normalizeYear(yearStr);
+  if (monthlyLocks?.[_lockYear]?.[bonusKey]?.locked === true) {
+    return {
+      basePay: Number(bonusRow.basePay) || 0,
+      grossPay: null,
+      isLocked: true,
+      isBlocking: true,
+      lockMessage: "この月は全体ロック済です",
+      health: null,
+      pension: null,
+      nursing: null,
+      childCare: null,
+      employment: null,
+      socialTotal: null,
+      incomeTax: null,
+      totalDeductions: null,
+      netPay: null,
+      calcLog: ["この月は全体ロック済のため計算をスキップしました"],
+    };
+  }
   const b = bonusRow;
   const calcLog = ["【賞与 計算ログ】"];
   let bTotalAllowances = 0,
@@ -1612,6 +1729,13 @@ const App = () => {
   const [isTaxImporting, setIsTaxImporting] = useState(false);
   const [viewingTaxTableId, setViewingTaxTableId] = useState(null); // ★詳細表示用モーダルステート
 
+  // ★月次全体ロック管理ステート
+  const [monthlyLocks, setMonthlyLocks] = useState({});
+  const [lockMgmtYear, setLockMgmtYear] = useState("");
+  const [lockMgmtMonth, setLockMgmtMonth] = useState("01");
+  const [unlockReason, setUnlockReason] = useState("");
+  const [showLockHistoryKey, setShowLockHistoryKey] = useState(null);
+
   
   // ★追加: 年度別比較用データの集計
   const taxYearStats = useMemo(() => {
@@ -1912,6 +2036,11 @@ const App = () => {
   };
   const isYearLocked = isLockedYear(selectedYear);
 
+  const isMonthGloballyLocked = (yearStr, monthKey) => {
+    if (!yearStr || !monthKey) return false;
+    return monthlyLocks?.[yearStr]?.[monthKey]?.locked === true;
+  };
+
   useEffect(() => {
     if (!selectedEmployeeId || !selectedYear || !data) return;
 
@@ -2087,6 +2216,21 @@ const App = () => {
     return () => unsubscribe();
   }, [isAuthReady, userId, db]);
 
+  // ★月次全体ロックデータの取得
+  useEffect(() => {
+    if (!isAuthReady || !userId || !db) return;
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    const unsubscribe = onSnapshot(
+      docRef,
+      (snap) => {
+        if (snap.exists()) setMonthlyLocks(snap.data());
+        else setMonthlyLocks({});
+      },
+      (err) => { console.error(err); }
+    );
+    return () => unsubscribe();
+  }, [isAuthReady, userId, db]);
+
   useEffect(() => {
     if (!selectedEmployeeId && Object.keys(employees).length > 0) {
       setSelectedEmployeeId(Object.keys(employees)[0]);
@@ -2150,6 +2294,45 @@ const App = () => {
     }
   };
 
+  const handleLockMonth = async (yearStr, monthKey) => {
+    if (!yearStr || !monthKey) return;
+    if (!window.confirm(`${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。よろしいですか？`)) return;
+    const key = `${yearStr}_${monthKey}`;
+    const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
+    const newEntry = {
+      locked: true,
+      lockedAt: new Date().toISOString(),
+      lockedBy: auth?.currentUser?.email || userId || "unknown",
+      unlockedAt: null,
+      unlockReason: null,
+      history: [
+        ...(prev.history || []),
+        { action: "lock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown" },
+      ],
+    };
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+  };
+
+  const handleUnlockMonth = async (yearStr, monthKey, reason) => {
+    if (!yearStr || !monthKey) return;
+    if (!reason || !reason.trim()) { alert("解除理由を入力してください"); return; }
+    const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
+    const newEntry = {
+      ...prev,
+      locked: false,
+      unlockedAt: new Date().toISOString(),
+      unlockReason: reason.trim(),
+      history: [
+        ...(prev.history || []),
+        { action: "unlock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown", reason: reason.trim() },
+      ],
+    };
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+    setUnlockReason("");
+  };
+
   const handleSettingChange = (field, value) => {
     const newSettings = { ...settings, [field]: value };
     setSettings(newSettings);
@@ -2179,7 +2362,7 @@ const App = () => {
         for (const monthKey of MONTHS) {
           const row = yearData.monthly[monthKey];
           if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables);
+            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables, monthlyLocks);
             if (res.incomeTax === null) {
               hasNullTax = true;
               break;
@@ -2189,14 +2372,14 @@ const App = () => {
         if (hasNullTax) break;
 
         if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables, monthlyLocks });
            if (bRes.incomeTax === null) {
              hasNullTax = true;
              break;
            }
         }
         if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables, monthlyLocks });
            if (bRes2.incomeTax === null) {
              hasNullTax = true;
              break;
@@ -2514,6 +2697,7 @@ const App = () => {
 
     // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
     if (field !== "isLocked" && currentMonthData.isLocked) return;
+    if (field !== "isLocked" && isMonthGloballyLocked(year, m)) return;
     const newData = {
       ...data,
       years: {
@@ -2566,6 +2750,7 @@ const App = () => {
 
     // ★追加: 月がロックされていたら無効
     if (currentYearDataObj.monthly[targetMonth]?.isLocked) return;
+    if (isMonthGloballyLocked(year, targetMonth)) return;
 
     const newValue =
       currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
@@ -2602,6 +2787,7 @@ const App = () => {
 
     // ★追加: 貼り付け先の月がロックされていたら無効
     if (emp.data?.years?.[targetYear]?.monthly?.[targetMonth]?.isLocked) return;
+    if (isMonthGloballyLocked(targetYear, targetMonth)) return;
     let sourceYear = targetYear;
     let sourceMonth = "";
     if (targetMonth === "01") {
@@ -2677,6 +2863,7 @@ const App = () => {
 
     // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
     if (field !== "isLocked" && currentMonthData.isLocked) return;
+    if (field !== "isLocked" && isMonthGloballyLocked(year, monthKey)) return;
     const newData = {
       ...emp.data,
       years: {
@@ -2715,6 +2902,7 @@ const App = () => {
 
     // 月がロックされていたら編集無効
     if (currentMonthData.isLocked) return;
+    if (isMonthGloballyLocked(year, monthKey)) return;
 
     const currentObj = currentMonthData[field] || {};
     const newObj = { ...currentObj, [objKey]: val };
@@ -2900,6 +3088,7 @@ const App = () => {
           monthKeyForRates: getBonusRateMonth(rowData),
           yearStr: selectedYear,
           taxTables,
+          monthlyLocks,
         });
       } else {
         rowData = currentYearDataObj.monthly[monthKey] || {};
@@ -2909,7 +3098,8 @@ const App = () => {
           settings,
           monthKey,
           selectedYear,
-          taxTables
+          taxTables,
+          monthlyLocks
         );
       }
 
@@ -3072,7 +3262,8 @@ const App = () => {
         settings,
         m,
         selectedYear,
-        taxTables
+        taxTables,
+        monthlyLocks
       );
 
       monthlyResults[m] = monthlyResult;
@@ -3185,6 +3376,7 @@ const App = () => {
         monthKeyForRates: getBonusRateMonth(b),
         yearStr: selectedYear,
         taxTables,
+        monthlyLocks,
       });
     };
 
@@ -3288,6 +3480,7 @@ const App = () => {
         monthKeyForRates: getBonusRateMonth(rowData),
         yearStr: selectedYear,
         taxTables,
+        monthlyLocks,
       });
     } else {
       rowData = slipYearData.monthly[monthKey] || {};
@@ -3297,7 +3490,8 @@ const App = () => {
         settings,
         monthKey,
         selectedYear,
-        taxTables
+        taxTables,
+        monthlyLocks
       );
       titleText = "給与明細書";
       targetMonthText = rowData.salaryMonthText || "未設定";
@@ -4003,10 +4197,11 @@ const App = () => {
                             settings,
                             ledgerSelectedMonth,
                             selectedYear,
-                            taxTables
+                            taxTables,
+                            monthlyLocks
                           );
                           const isMonthLocked = rowData?.isLocked === true;
-                          const isDisabled = isYearLocked || isMonthLocked;
+                          const isDisabled = isYearLocked || isMonthLocked || isMonthGloballyLocked(selectedYear, ledgerSelectedMonth);
 
                           return (
                             <tr
@@ -4264,11 +4459,16 @@ const App = () => {
                           onChange={(e) => setSelectedYear(e.target.value)}
                           className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
                         >
-                          {yearsList.map((y) => (
-                            <option key={y} value={y}>
-                              {y}
-                            </option>
-                          ))}
+                          {yearsList.map((y) => {
+                            const hasTable = Object.values(taxTables).some(
+                              (t) => normalizeYear(t.year) === normalizeYear(y)
+                            );
+                            return (
+                              <option key={y} value={y}>
+                                {y} {!hasTable ? " (税額表未登録)" : ""}
+                              </option>
+                            );
+                          })}
                         </select>
                         {isYearLocked && (
                           <span className="bg-red-50 text-red-600 text-[10px] font-black px-1.5 py-0.5 rounded border border-red-200 whitespace-nowrap ml-1 animate-pulse">
@@ -6054,11 +6254,16 @@ const App = () => {
                       onChange={(e) => setSelectedYear(e.target.value)}
                       className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
                     >
-                      {yearsList.map((y) => (
-                        <option key={y} value={y}>
-                          {y}
-                        </option>
-                      ))}
+                      {yearsList.map((y) => {
+                        const hasTable = Object.values(taxTables).some(
+                          (t) => normalizeYear(t.year) === normalizeYear(y)
+                        );
+                        return (
+                          <option key={y} value={y}>
+                            {y} {!hasTable ? " (税額表未登録)" : ""}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
                   {isYearLocked && (
@@ -6084,6 +6289,12 @@ const App = () => {
                   </select>
                 </div>
               </div>
+              {!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth) && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-b border-purple-200 text-purple-700 text-xs font-bold">
+                  <span>🔒</span>
+                  <span>この月は全体ロック済みです — 閲覧・印刷・集計は可能です</span>
+                </div>
+              )}
               <div className="flex-1 overflow-auto bg-gray-50/30">
                 <table className="w-full border-collapse">
                   <thead className="sticky top-0 z-40 shadow-sm">
@@ -6201,6 +6412,7 @@ const App = () => {
                           monthKeyForRates: getBonusRateMonth(rowData),
                           yearStr: selectedYear,
                           taxTables,
+                          monthlyLocks,
                         });
                       } else {
                         rowData =
@@ -6211,11 +6423,12 @@ const App = () => {
                           settings,
                           selectedListMonth,
                           selectedYear,
-                          taxTables
+                          taxTables,
+                          monthlyLocks
                         );
                         isMonthLocked = rowData?.isLocked === true;
                       }
-                      const isDisabled = isYearLocked || isMonthLocked;
+                      const isDisabled = isYearLocked || isMonthLocked || (!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth));
 
                       return (
                         <tr
@@ -7789,6 +8002,109 @@ const App = () => {
           </div>
         )}
 
+        {/* ─── 月次全体ロック管理 ─── */}
+        {activeTab === "settings" && (
+          <div className="p-6 max-w-2xl">
+            <section>
+              <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">月次全体ロック管理</h3>
+              <p className="text-xs text-slate-500 mb-4">年度と月を指定して全従業員の給与データを一括ロックします。ロック中も閲覧・印刷・集計は可能です。</p>
+              <div className="flex flex-wrap gap-3 items-end mb-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-500 block mb-1">年度</label>
+                  <select
+                    value={lockMgmtYear}
+                    onChange={(e) => setLockMgmtYear(e.target.value)}
+                    className="border border-slate-300 rounded px-3 py-1.5 text-sm"
+                  >
+                    <option value="">選択</option>
+                    {Array.from({ length: 10 }, (_, i) => {
+                      const base = settings.editableYear ? Number(settings.editableYear.replace("R","")) : 6;
+                      const n = base - 4 + i;
+                      return <option key={n} value={`R${n}`}>R{n}</option>;
+                    })}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500 block mb-1">月</label>
+                  <select
+                    value={lockMgmtMonth}
+                    onChange={(e) => setLockMgmtMonth(e.target.value)}
+                    className="border border-slate-300 rounded px-3 py-1.5 text-sm"
+                  >
+                    {MONTHS.map((m) => (
+                      <option key={m} value={m}>{parseInt(m, 10)}月</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  {lockMgmtYear && !isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
+                    <button
+                      onClick={() => handleLockMonth(lockMgmtYear, lockMgmtMonth)}
+                      className="px-4 py-1.5 text-xs font-bold text-white bg-purple-600 hover:bg-purple-500 rounded shadow-sm transition-colors"
+                    >
+                      🔒 ロック
+                    </button>
+                  ) : lockMgmtYear && isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="text"
+                        placeholder="解除理由（必須）"
+                        value={unlockReason}
+                        onChange={(e) => setUnlockReason(e.target.value)}
+                        className="border border-slate-300 rounded px-3 py-1.5 text-xs w-48"
+                      />
+                      <button
+                        onClick={() => handleUnlockMonth(lockMgmtYear, lockMgmtMonth, unlockReason)}
+                        className="px-4 py-1.5 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded shadow-sm transition-colors"
+                      >
+                        🔓 解除
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              {/* ロック済み月一覧 */}
+              {Object.keys(monthlyLocks).length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-bold text-slate-600 mb-2">ロック履歴</p>
+                  <div className="space-y-1 max-h-64 overflow-y-auto">
+                    {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
+                      Object.entries(months).map(([mk, info]) => (
+                        <div key={`${yr}_${mk}`} className="flex items-center gap-3 text-xs bg-white border border-slate-200 rounded px-3 py-1.5">
+                          <span className={`font-bold ${info.locked ? "text-purple-700" : "text-slate-400"}`}>
+                            {info.locked ? "🔒" : "🔓"} {yr} {parseInt(mk, 10)}月
+                          </span>
+                          {info.locked && <span className="text-slate-500">ロック: {info.lockedAt ? new Date(info.lockedAt).toLocaleString("ja-JP") : "-"}</span>}
+                          {!info.locked && info.unlockedAt && <span className="text-slate-500">解除: {new Date(info.unlockedAt).toLocaleString("ja-JP")} — {info.unlockReason}</span>}
+                          <button
+                            onClick={() => setShowLockHistoryKey(showLockHistoryKey === `${yr}_${mk}` ? null : `${yr}_${mk}`)}
+                            className="ml-auto text-indigo-500 underline"
+                          >
+                            履歴
+                          </button>
+                          {showLockHistoryKey === `${yr}_${mk}` && (
+                            <div className="absolute mt-6 z-50 bg-white border border-slate-300 rounded shadow-lg p-3 text-xs max-w-xs">
+                              {(info.history || []).map((h, hi) => (
+                                <div key={hi} className="mb-1">
+                                  <span className={h.action === "lock" ? "text-purple-600 font-bold" : "text-orange-600 font-bold"}>
+                                    {h.action === "lock" ? "🔒 ロック" : "🔓 解除"}
+                                  </span>
+                                  <span className="text-slate-500 ml-2">{new Date(h.at).toLocaleString("ja-JP")} by {h.by}</span>
+                                  {h.reason && <span className="text-slate-600 ml-2">「{h.reason}」</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
         {/* --- 標準報酬月額表 独立画面 --- */}
         {activeTab === "stdRewardTable" && (
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
@@ -8439,7 +8755,8 @@ const App = () => {
                       settings,
                       m,
                       selectedYear,
-                      taxTables
+                      taxTables,
+                      monthlyLocks
                     );
                     salaryHeadcount += 1;
                     salaryGrossPay += res.grossPay;
@@ -8717,11 +9034,16 @@ const App = () => {
                         onChange={(e) => setSelectedYear(e.target.value)}
                         className="bg-transparent border-none outline-none text-lg font-black text-slate-800 cursor-pointer"
                       >
-                        {yearsList.map((y) => (
-                          <option key={y} value={y}>
-                            {y}
-                          </option>
-                        ))}
+                        {yearsList.map((y) => {
+                          const hasTable = Object.values(taxTables).some(
+                            (t) => normalizeYear(t.year) === normalizeYear(y)
+                          );
+                          return (
+                            <option key={y} value={y}>
+                              {y} {!hasTable ? " (税額表未登録)" : ""}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                   </div>
@@ -9494,7 +9816,7 @@ const App = () => {
         if (!_isBonus) {
           const _yd = _emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
           const _rd = _yd.monthly?.[selectedListMonth] || {};
-          _isBlocking = calculateMonthlyResult(_emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables).isBlocking || false;
+          _isBlocking = calculateMonthlyResult(_emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
         }
         return (
         <div
@@ -9541,7 +9863,7 @@ const App = () => {
           const hasBlockingEmployee = !_isBonusMonth && activeEmployees.some(([id, emp]) => {
             const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
             const _rd = _yd.monthly?.[selectedListMonth] || {};
-            return calculateMonthlyResult(emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables).isBlocking || false;
+            return calculateMonthlyResult(emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
           });
           return (
             <div

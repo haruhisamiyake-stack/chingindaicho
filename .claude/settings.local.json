@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(npx tsc *)",
+      "Bash(python impl_normalize_lock.py)",
+      "Bash(python impl_lock_calclog.py)"
+    ]
+  }
+}

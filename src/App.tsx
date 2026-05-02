@@ -1705,6 +1705,11 @@ const App = () => {
 
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
+  // ▼▼▼ 今回追加する部分：顧問先のリストと選択中の顧問先ID ▼▼▼
+  const [clients, setClients] = useState([{ id: "client_1", name: "株式会社サンプル顧問先" }]);
+  const [selectedClientId, setSelectedClientId] = useState("client_1");
+  // ▲▲▲ ここまで追加 ▲▲▲
+
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [employeeSearchQuery, setEmployeeSearchQuery] = useState("");
@@ -2111,13 +2116,46 @@ const App = () => {
     initAuth();
   }, []);
 
+  // ★顧問先（クライアント）一覧の取得
   useEffect(() => {
     if (!isAuthReady || !userId || !db) return;
+
+    const clientsRef = collection(db, `artifacts/${appId}/users/${userId}/clients`);
+    const unsubscribe = onSnapshot(
+      clientsRef,
+      (snap) => {
+        const fetchedClients = [];
+        snap.forEach((doc) => {
+          fetchedClients.push({ id: doc.id, ...doc.data() });
+        });
+        
+        // もしデータベースが空なら、デフォルトのダミー顧問先をセットする
+        if (fetchedClients.length === 0) {
+          setClients([{ id: "client_1", name: "株式会社サンプル顧問先" }]);
+        } else {
+          setClients(fetchedClients);
+        }
+
+        // 選択中の顧問先がない場合、自動的に1社目を選択
+        if (fetchedClients.length > 0 && !selectedClientId) {
+          setSelectedClientId(fetchedClients[0].id);
+        }
+      },
+      (err) => {
+        console.error("顧問先一覧の取得エラー:", err);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [isAuthReady, userId, db, selectedClientId]);
+
+  useEffect(() => {
+    if (!isAuthReady || !userId || !db || !selectedClientId) return;
     if (!settings?.editableYear) return;
 
     const colRef = collection(
       db,
-      `artifacts/${appId}/users/${userId}/payrollEmployees`
+      `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees`
     );
 
     const unsubscribe = onSnapshot(
@@ -2129,7 +2167,7 @@ const App = () => {
           setDoc(
             doc(
               db,
-              `artifacts/${appId}/users/${userId}/payrollEmployees/${newId}`
+              `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${newId}`
             ),
             {
               ...newEmp,
@@ -2171,13 +2209,13 @@ const App = () => {
     );
 
     return () => unsubscribe();
-  }, [isAuthReady, userId, db, settings?.editableYear]);
+  }, [isAuthReady, userId, db, settings?.editableYear, selectedClientId]);
 
   useEffect(() => {
-    if (!isAuthReady || !userId || !db) return;
+    if (!isAuthReady || !userId || !db || !selectedClientId) return;
     const settingsRef = doc(
       db,
-      `artifacts/${appId}/users/${userId}/payrollSettings/v1`
+      `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`
     );
 
     const unsubscribe = onSnapshot(
@@ -2209,7 +2247,7 @@ const App = () => {
     );
 
     return () => unsubscribe();
-  }, [isAuthReady, userId, db]);
+  }, [isAuthReady, userId, db, selectedClientId]);
 
   // ★ 追加：税額表データの取得
   useEffect(() => {
@@ -2236,8 +2274,8 @@ const App = () => {
 
   // ★月次全体ロックデータの取得
   useEffect(() => {
-    if (!isAuthReady || !userId || !db) return;
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    if (!isAuthReady || !userId || !db || !selectedClientId) return;
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
     const unsubscribe = onSnapshot(
       docRef,
       (snap) => {
@@ -2247,7 +2285,7 @@ const App = () => {
       (err) => { console.error(err); }
     );
     return () => unsubscribe();
-  }, [isAuthReady, userId, db]);
+  }, [isAuthReady, userId, db, selectedClientId]);
 
   useEffect(() => {
     if (!selectedEmployeeId && Object.keys(employees).length > 0) {
@@ -2284,23 +2322,23 @@ const App = () => {
       }
     }
 
-    if (shouldUpdateSettings && db && userId) {
+    if (shouldUpdateSettings && db && userId && selectedClientId) {
       setSettings(newSettings);
       setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/payrollSettings/v1`),
+        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`),
         newSettings,
         { merge: true }
       ).catch(console.error);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, db, userId]);
+  }, [employees, db, userId, selectedClientId]);
 
   const handleSaveSettingsObj = async (newSettings) => {
-    if (!db || !userId) return;
+    if (!db || !userId || !selectedClientId) return;
     setSaveStatus("保存中...");
     try {
       await setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/payrollSettings/v1`),
+        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`),
         newSettings,
         { merge: true }
       );
@@ -2313,7 +2351,7 @@ const App = () => {
   };
 
   const handleLockMonth = async (yearStr, monthKey) => {
-    if (!yearStr || !monthKey) return;
+    if (!db || !userId || !selectedClientId || !yearStr || !monthKey) return;
     if (!window.confirm(`${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。よろしいですか？`)) return;
     const key = `${yearStr}_${monthKey}`;
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
@@ -2328,12 +2366,12 @@ const App = () => {
         { action: "lock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown" },
       ],
     };
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
     await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
   };
 
   const handleUnlockMonth = async (yearStr, monthKey, reason) => {
-    if (!yearStr || !monthKey) return;
+    if (!db || !userId || !selectedClientId || !yearStr || !monthKey) return;
     if (!reason || !reason.trim()) { alert("解除理由を入力してください"); return; }
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
     const newEntry = {
@@ -2346,7 +2384,7 @@ const App = () => {
         { action: "unlock", at: new Date().toISOString(), by: auth?.currentUser?.email || userId || "unknown", reason: reason.trim() },
       ],
     };
-    const docRef = doc(db, `artifacts/${appId}/users/${userId}/monthlyLocks/v1`);
+    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/monthlyLocks/v1`);
     await setDoc(docRef, { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
     setUnlockReason("");
   };
@@ -2369,66 +2407,66 @@ const App = () => {
   };
 
   const handleSave = async (empId, m, d) => {
-    if (!db || !userId || !empId) return;
+    if (!db || !userId || !selectedClientId || !empId) return;
 
-    let hasNullTax = false;
-    if (d && d.years) {
-      const allowanceDefs = settings?.allowanceDefinitions || m.allowanceDefinitions || [];
-      const deductionDefs = settings?.deductionDefinitions || m.deductionDefinitions || [];
-      for (const yearStr of Object.keys(d.years)) {
-        const yearData = d.years[yearStr];
-        for (const monthKey of MONTHS) {
-          const row = yearData.monthly[monthKey];
-          if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables, monthlyLocks);
-            if (res.incomeTax === null) {
-              hasNullTax = true;
-              break;
-            }
-          }
-        }
-        if (hasNullTax) break;
+    let hasNullTax = false;
+    if (d && d.years) {
+      const allowanceDefs = settings?.allowanceDefinitions || m.allowanceDefinitions || [];
+      const deductionDefs = settings?.deductionDefinitions || m.deductionDefinitions || [];
+      for (const yearStr of Object.keys(d.years)) {
+        const yearData = d.years[yearStr];
+        for (const monthKey of MONTHS) {
+          const row = yearData.monthly[monthKey];
+          if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables);
+            if (res.incomeTax === null) {
+              hasNullTax = true;
+              break;
+            }
+          }
+        }
+        if (hasNullTax) break;
 
-        if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables, monthlyLocks });
-           if (bRes.incomeTax === null) {
-             hasNullTax = true;
-             break;
-           }
-        }
-        if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables, monthlyLocks });
-           if (bRes2.incomeTax === null) {
-             hasNullTax = true;
-             break;
-           }
-        }
-      }
-    }
+        if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+           if (bRes.incomeTax === null) {
+             hasNullTax = true;
+             break;
+           }
+        }
+        if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+           if (bRes2.incomeTax === null) {
+             hasNullTax = true;
+             break;
+           }
+        }
+      }
+    }
 
-    if (hasNullTax) {
-      setSaveStatus("保存停止中(計算不可)");
-      setTimeout(() => setSaveStatus(""), 3000);
-      return;
-    }
+    if (hasNullTax) {
+      setSaveStatus("保存停止中(計算不可)");
+      setTimeout(() => setSaveStatus(""), 3000);
+      return;
+    }
 
-    setSaveStatus("保存中...");
-    try {
-      await setDoc(
-        doc(db, `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`),
-        {
-          master: m,
-          data: d,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-      setSaveStatus("完了");
-      setTimeout(() => setSaveStatus(""), 2000);
-    } catch (e) {
-      setSaveStatus("エラー");
-    }
-  };
+    setSaveStatus("保存中...");
+    try {
+      await setDoc(
+        doc(db, `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`),
+        {
+          master: m,
+          data: d,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+      setSaveStatus("完了");
+      setTimeout(() => setSaveStatus(""), 2000);
+    } catch (e) {
+      setSaveStatus("エラー");
+    }
+  };
 
   const handleAddEmployee = async () => {
     if (!db || !userId) return;
@@ -2527,10 +2565,10 @@ const App = () => {
       const { settings: importedSettings, employees: importedEmployees } =
         importPreview.rawData;
 
-      if (db && userId) {
+      if (db && userId && selectedClientId) {
         const settingsRef = doc(
           db,
-          `artifacts/${appId}/users/${userId}/payrollSettings/v1`
+          `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollSettings/v1`
         );
         await setDoc(settingsRef, importedSettings, { merge: true });
 
@@ -2538,7 +2576,7 @@ const App = () => {
           ([empId, empData]) => {
             const empRef = doc(
               db,
-              `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`
+              `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`
             );
             return setDoc(empRef, empData, { merge: true });
           }
@@ -2631,12 +2669,12 @@ const App = () => {
       return next;
     }); // クラウド上のデータベースから完全に消去する
 
-    if (db && userId) {
+    if (db && userId && selectedClientId) {
       try {
         await deleteDoc(
           doc(
             db,
-            `artifacts/${appId}/users/${userId}/payrollEmployees/${empId}`
+            `artifacts/${appId}/users/${userId}/clients/${selectedClientId}/payrollEmployees/${empId}`
           )
         );
         // 【修正④】削除成功ステータス
@@ -6307,7 +6345,7 @@ const App = () => {
                   </select>
                 </div>
               </div>
-              {!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth) && (
+              {!(selectedListMonth === "bonus" || selectedListMonth === "bonus2") && isMonthGloballyLocked(selectedYear, selectedListMonth) && (
                 <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-b border-purple-200 text-purple-700 text-xs font-bold">
                   <span>🔒</span>
                   <span>この月は全体ロック済みです — 閲覧・印刷・集計は可能です</span>

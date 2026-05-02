@@ -1709,6 +1709,7 @@ const App = () => {
   // ▼▼▼ 今回追加する部分：顧問先のリストと選択中の顧問先ID ▼▼▼
   const [clients, setClients] = useState([{ id: "client_1", name: "株式会社サンプル顧問先" }]);
   const [selectedClientId, setSelectedClientId] = useState("client_1");
+  const [clientSearchQuery, setClientSearchQuery] = useState("");
   // ▲▲▲ ここまで追加 ▲▲▲
 
   const [employees, setEmployees] = useState({});
@@ -3770,6 +3771,12 @@ const App = () => {
 
   // ▼▼▼ 新規追加：ポータル（ルート）画面の独立レンダリング ▼▼▼
   if (activeTab === "portal") {
+    // ★ 検索キーワードで顧問先を絞り込む
+    const filteredClients = clients.filter(c => 
+      (c.name || "").toLowerCase().includes(clientSearchQuery.toLowerCase()) || 
+      (c.id || "").toLowerCase().includes(clientSearchQuery.toLowerCase())
+    );
+
     return (
       <div className="h-screen bg-slate-100 font-sans text-sm overflow-y-auto flex flex-col custom-scrollbar">
         <header className="bg-slate-900 px-8 py-5 flex justify-between items-center shadow-md">
@@ -3799,63 +3806,84 @@ const App = () => {
           </div>
         </header>
         
-        <div className="flex-1 p-8 max-w-6xl mx-auto w-full mt-8">
-          <div className="flex justify-between items-end mb-10 bg-white p-8 rounded-2xl shadow-sm border border-slate-200 border-l-4 border-l-blue-500">
-            <div>
-              <h2 className="text-3xl font-black text-slate-800 tracking-tight">顧問先を選択してください</h2>
-              <p className="text-sm font-bold text-slate-500 mt-3 leading-relaxed">
-                カードをクリックすると、その会社の給与計算システム（台帳）へ入ります。<br/>
-                誤操作を防ぐため、<span className="text-rose-500">別の会社の計算を行う際は、必ずメニューからこの一覧画面に戻ってきて</span>切り替えてください。
+        <div className="flex-1 p-6 max-w-[2100px] mx-auto w-full mt-4">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 bg-white p-6 rounded-xl shadow-sm border border-slate-200 border-l-4 border-l-blue-500 gap-4">
+            <div className="flex-1">
+              <h2 className="text-2xl font-black text-slate-800 tracking-tight">顧問先ポータル</h2>
+              <p className="text-xs font-bold text-slate-500 mt-2 leading-relaxed">
+                カードをクリックして各会社の給与計算へ移動します。<br/>
+                別の会社の計算を行う際は、<span className="text-rose-500">必ずこの画面に戻ってきて</span>切り替えてください。
               </p>
             </div>
-            <button
-              onClick={() => {
-                const name = window.prompt("新しい顧問先の会社名を入力してください");
-                if (name && name.trim()) {
-                  const newId = `client_${Date.now()}`;
-                  const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${newId}`);
-                  setDoc(docRef, { name: name.trim(), createdAt: new Date().toISOString() })
-                    .then(() => {
-                       setSelectedClientId(newId);
-                       setActiveTab("ledger");
-                    })
-                    .catch(e => alert("顧問先の追加に失敗しました"));
-                }
-              }}
-              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl font-bold shadow-md transition-all active:scale-95"
-            >
-              <PlusCircle size={18} /> 新規顧問先を登録
-            </button>
+            
+            <div className="flex items-center gap-3 w-full md:w-auto">
+              <div className="relative w-full md:w-64">
+                <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="顧問先を検索..."
+                  value={clientSearchQuery}
+                  onChange={(e) => setClientSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
+                />
+              </div>
+              <button
+                onClick={() => {
+                  const name = window.prompt("新しい顧問先の会社名を入力してください");
+                  if (name && name.trim()) {
+                    const newId = `client_${Date.now()}`;
+                    const docRef = doc(db, `artifacts/${appId}/users/${userId}/clients/${newId}`);
+                    setDoc(docRef, { name: name.trim(), createdAt: new Date().toISOString() })
+                      .then(() => {
+                         setSelectedClientId(newId);
+                         setActiveTab("ledger");
+                      })
+                      .catch(e => alert("顧問先の追加に失敗しました"));
+                  }
+                }}
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-bold text-sm shadow-md transition-all active:scale-95 whitespace-nowrap"
+              >
+                <PlusCircle size={16} /> 新規登録
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-20">
-            {clients.map(c => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-20">
+            {filteredClients.map(c => (
               <div
                 key={c.id}
                 onClick={() => {
                   setSelectedClientId(c.id);
                   setActiveTab("ledger");
                 }}
-                className="group bg-white rounded-2xl p-6 border-2 border-slate-200 transition-all cursor-pointer shadow-sm hover:shadow-xl hover:border-blue-400 hover:-translate-y-1"
+                className="group bg-white rounded-xl p-4 border border-slate-200 transition-all cursor-pointer shadow-sm hover:shadow-md hover:border-blue-400 hover:-translate-y-0.5 flex flex-col justify-between min-h-[120px]"
               >
-                <div className="flex justify-between items-start mb-4">
-                  <div className="p-4 rounded-xl bg-slate-50 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
-                    <Building size={28} />
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-lg bg-slate-50 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors shrink-0">
+                    <Building size={20} />
                   </div>
+                  <h3 className="text-sm font-black text-slate-800 group-hover:text-blue-700 transition-colors line-clamp-2 leading-snug pt-1">
+                    {c.name || "名称未設定"}
+                  </h3>
                 </div>
-                <h3 className="text-xl font-black text-slate-800 mb-2 group-hover:text-blue-700 transition-colors line-clamp-1">
-                  {c.name || "名称未設定"}
-                </h3>
-                <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-100">
-                  <span className="text-[10px] font-black text-slate-400 bg-slate-100 px-2 py-1 rounded uppercase">
-                    Client ID
+                
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+                  <span className="text-[9px] font-mono text-slate-400 truncate pr-2">
+                    ID: {c.id.replace('client_', '')}
                   </span>
-                  <span className="text-[10px] font-mono text-slate-500 truncate">
-                    {c.id}
+                  <span className="text-[10px] font-bold text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                    開く ➔
                   </span>
                 </div>
               </div>
             ))}
+            
+            {filteredClients.length === 0 && (
+              <div className="col-span-full py-12 text-center bg-white rounded-xl border border-slate-200">
+                <Building size={48} className="mx-auto text-slate-200 mb-3" />
+                <p className="text-slate-500 font-bold text-sm">該当する顧問先が見つかりません</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -3921,6 +3949,17 @@ const App = () => {
             }`}
           >
             <Users size={18} /> 社員登録
+          </button>
+          {/* ▼ 復活させた「会社個別設定」ボタン ▼ */}
+          <button
+            onClick={() => setActiveTab("settings")}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
+              activeTab === "settings"
+                ? "bg-orange-600 text-white shadow-lg"
+                : "text-slate-400 hover:bg-slate-800 hover:text-white"
+            }`}
+          >
+            <Settings size={18} /> 会社個別設定
           </button>
           <button
             onClick={() => setActiveTab("aggregation")}
@@ -7783,283 +7822,7 @@ const App = () => {
                   </div>
                 </section>
 
-                {/* 5. 源泉徴収税額表管理 */}
-                <section>
-                  <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
-                    源泉徴収税額表管理
-                  </h3>
-                  <div className="bg-slate-50 p-5 rounded-lg border border-slate-200 space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">
-                          対象年度
-                        </label>
-                        <select
-                          value={taxImportYear}
-                          onChange={(e) => {
-                            setTaxImportYear(e.target.value);
-                            setTaxImportPreview(null);
-                            setTaxImportError("");
-                          }}
-                          className="w-full bg-white border border-slate-300 rounded px-3 py-2 text-sm outline-none focus:border-orange-500 font-bold"
-                        >
-                          {Array.from(
-                            new Set(["R08", "R09", "R10", ...yearsList])
-                          )
-                            .sort()
-                            .map((y) => (
-                              <option key={y} value={y}>
-                                {y}
-                              </option>
-                            ))}
-                        </select>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">
-                          種類
-                        </label>
-                        <select
-                          value={taxImportType}
-                          onChange={(e) => {
-                            setTaxImportType(e.target.value);
-                            setTaxImportPreview(null);
-                            setTaxImportError("");
-                          }}
-                          className="w-full bg-white border border-slate-300 rounded px-3 py-2 text-sm outline-none focus:border-orange-500 font-bold"
-                        >
-                                                   {" "}
-                          <option value="monthly">月額表</option>               
-                                   {" "}
-                          <option value="bonus_nta">
-                            賞与表（税務署形式）
-                          </option>
-                                                 {" "}
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 border-b border-slate-200 pb-4">
-                      <label className="text-xs font-bold text-slate-500 block mb-1">
-                        CSVテンプレートのダウンロード
-                      </label>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleDownloadTemplate("monthly")}
-                          className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 rounded transition-colors shadow-sm"
-                        >
-                          <Download size={14} /> 月額表テンプレート
-                        </button>
-                        <button　onClick={() => handleDownloadTemplate("bonus_nta")}
-                          className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 rounded transition-colors shadow-sm"
-                        >
-                          <Download size={14} /> 賞与算出率表テンプレート
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500">
-                        CSVファイル選択
-                      </label>
-                      <input
-                        type="file"
-                        id="tax-csv-input"
-                        accept=".csv"
-                        onChange={handleTaxCsvChange}
-                        className="block w-full text-xs text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 cursor-pointer bg-white border border-slate-200 rounded"
-                      />
-                    </div>
-
-                    {taxImportError && (
-                      <div className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 p-2 rounded">
-                        {taxImportError}
-                      </div>
-                    )}
-
-                    {taxImportPreview && (
-                      <div className="bg-white border border-slate-200 rounded p-3 mt-4 shadow-sm">
-                                               {" "}
-                        <div className="text-xs font-bold text-slate-700 mb-2">
-                                                    プレビュー (
-                          {taxImportPreview.year}                          {" "}
-                          {taxImportPreview.type === "bonus_nta"
-                            ? "賞与表(税務署形式)"
-                            : taxImportPreview.type}
-                          ) :                          {" "}
-                          {taxImportPreview.rows.length}件のデータ              
-                                   {" "}
-                        </div>
-                                               {" "}
-                        <div className="overflow-x-auto max-h-40 border border-slate-100 rounded custom-scrollbar">
-                                                   {" "}
-                          <table className="w-full text-[10px] text-right whitespace-nowrap">
-                                                       {" "}
-                            <thead className="bg-slate-100 sticky top-0">
-                                                           {" "}
-                              {taxImportPreview.type === "bonus_nta" ? (
-                                <tr>
-                                                                   {" "}
-                                  <th className="p-1 border-b">税率</th>       
-                                                           {" "}
-                                  <th className="p-1 border-b">甲0(min)</th>   
-                                                               {" "}
-                                  <th className="p-1 border-b">甲0(max)</th>   
-                                                               {" "}
-                                  <th className="p-1 border-b">乙(min)</th>     
-                                                           {" "}
-                                </tr>
-                              ) : (
-                                <tr>
-                                                                   {" "}
-                                  <th className="p-1 border-b">以上</th>       
-                                                           {" "}
-                                  <th className="p-1 border-b">未満</th>       
-                                                           {" "}
-                                  <th className="p-1 border-b">甲0</th>         
-                                                         {" "}
-                                  <th className="p-1 border-b">乙</th>         
-                                                       {" "}
-                                </tr>
-                              )}
-                                                         {" "}
-                            </thead>
-                                                       {" "}
-                            <tbody>
-                                                           {" "}
-                              {taxImportPreview.rows.slice(0, 5).map((r, i) => (
-                                <tr key={i}>
-                                                                   {" "}
-                                  {taxImportPreview.type === "bonus_nta" ? (
-                                    <>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                        {(r.rate * 100).toFixed(3)}%
-                                      </td>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                        {r.kouRanges[0].min}
-                                      </td>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                        {r.kouRanges[0].max >= 999999999
-                                          ? "以上"
-                                          : r.kouRanges[0].max}
-                                      </td>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                        {r.otsuRange ? r.otsuRange.min : "-"}
-                                      </td>
-                                                                         {" "}
-                                    </>
-                                  ) : (
-                                    <>
-                                                                           {" "}
-                                      <td className="p-1 border-b">{r.min}</td> 
-                                                                         {" "}
-                                      <td className="p-1 border-b">
-                                                                               {" "}
-                                        {r.max >= 999999999 ? "以上" : r.max}   
-                                                                         {" "}
-                                      </td>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                        {r.kou[0]}
-                                      </td>
-                                                                           {" "}
-                                      <td className="p-1 border-b">
-                                                                               {" "}
-                                        {r.otsu.type === "rate"
-                                          ? r.otsu.value
-                                          : r.otsu.value}
-                                                                             {" "}
-                                      </td>
-                                                                         {" "}
-                                    </>
-                                  )}
-                                                                 {" "}
-                                </tr>
-                              ))}
-                                                           {" "}
-                              {taxImportPreview.rows.length > 5 && (
-                                <tr>
-                                                                   {" "}
-                                  <td
-                                    colSpan={4}
-                                    className="p-1 text-center text-slate-400 font-bold bg-slate-50"
-                                  >
-                                                                        他{" "}
-                                    {taxImportPreview.rows.length - 5}         
-                                                              件のデータ        
-                                                             {" "}
-                                  </td>
-                                                                 {" "}
-                                </tr>
-                              )}
-                                                         {" "}
-                            </tbody>
-                                                     {" "}
-                          </table>
-                                                 {" "}
-                        </div>
-                                               {" "}
-                        <div className="mt-3 flex justify-end">
-                                                   {" "}
-                          <button
-                            onClick={handleExecuteTaxImport}
-                            disabled={isTaxImporting}
-                            className="px-4 py-2 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded disabled:opacity-50 transition-colors shadow-sm"
-                          >
-                                                       {" "}
-                            {isTaxImporting
-                              ? "保存中..."
-                              : "この内容で保存する"}
-                                                     {" "}
-                          </button>
-                                                 {" "}
-                        </div>
-                                             {" "}
-                      </div>
-                    )}
-
-                    <div className="mt-6 border-t border-slate-200 pt-4">
-                      <h4 className="text-xs font-bold text-slate-600 mb-3">
-                        登録済みの税額表一覧
-                      </h4>
-                      {Object.keys(taxTables).length === 0 ? (
-                        <p className="text-[10px] text-slate-400 font-bold bg-white p-3 rounded border border-slate-100 text-center">
-                          登録されている税額表はありません。
-                        </p>
-                      ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                          {Object.entries(taxTables).map(([docId, table]) => (
-                            <div
-                              key={docId}
-                              className="flex justify-between items-center bg-white border border-slate-200 rounded p-2 shadow-sm"
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
-                                  {table.year}
-                                </span>
-                                <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-100 font-bold uppercase tracking-wider">
-                                  {table.type}
-                                </span>
-                                <span className="text-[9px] text-slate-400 font-mono">
-                                  ({table.rows?.length || 0}行)
-                                </span>
-                              </div>
-                              <button
-                                onClick={() => handleDeleteTaxTable(docId)}
-                                className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded transition-colors"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </section>
+                {/* (源泉徴収税額表管理はポータルへ移動しました) */}
 
                 {/* 6. バックアップ管理 */}
                 <section>

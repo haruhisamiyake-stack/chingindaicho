@@ -1020,11 +1020,14 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     settings?.standardRewardTable?.length > 0
       ? getStandardRewardAmount(settings.standardRewardTable, stdBase)
       : stdBase;
-  const stdAmount = Number(row.stdAmount) || 0;
+  const stdAmountRaw = row.stdAmount;
+  const stdAmount = (stdAmountRaw == null || stdAmountRaw === "")
+    ? null
+    : Number(stdAmountRaw);
 
   calcLog.push(`\n【社会保険料】`);
   calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(socialInsGross)}円`);
-  calcLog.push(`- 適用標準報酬月額: ${formatCurrency(stdAmount)}円`);
+  calcLog.push(`- 適用標準報酬月額: ${stdAmount === null ? "（未入力）" : formatCurrency(stdAmount) + "円"}`);
   calcLog.push(
     `- 適用保険料率 (健保:${hRate}% / 厚年:${pRate}% / 介護:${nRate}% / 支援金:${cRate}% / 雇用:${eRate}‰)`
   );
@@ -1043,39 +1046,30 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     ? Math.floor(employmentInsGross * (eRate / 1000))
     : 0;
 
-  const stdAmountMissing = (hasHealth || hasPension) && stdAmount === 0;
+  const stdAmountMissing = (hasHealth || hasPension) && stdAmount === null;
   if (stdAmountMissing) {
-   calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算をブロックします。`);
-   const residentTax = Number(row.residentTax) || 0;
-   let totalCustomDeds = 0;
-   deductionDefs.forEach((def) => {
-    const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-    totalCustomDeds += amt;
-   });
-   const socialTotal = employment;
-   const totalDeductions = socialTotal + residentTax + totalCustomDeds;
-   const netPay = grossPay - totalDeductions;
+   calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算を中断します。`);
    return {
     ...row,
     grossPay,
-    health: 0,
-    pension: 0,
-    nursing: 0,
-    childCare: 0,
-    employment,
+    health: null,
+    pension: null,
+    nursing: null,
+    childCare: null,
+    employment: null,
     incomeTax: null,
     taxWarning: "標準報酬月額が未入力です",
     isBlocking: true,
-    netPay,
-    socialTotal,
+    netPay: null,
+    socialTotal: null,
     estStdAmount,
-    totalCustomDeds,
-    totalDeductions,
+    totalCustomDeds: null,
+    totalDeductions: null,
     calcLog,
    };
   }
 
-  if (stdAmount > 0 && estStdAmount > 0 && stdAmount !== estStdAmount) {
+  if (stdAmount !== null && stdAmount > 0 && estStdAmount > 0 && stdAmount !== estStdAmount) {
    const tbl = settings?.standardRewardTable?.length > 0 ? settings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
    const getGrade = (amt) => { const r = tbl.find(tr => amt >= Number(tr.min) && amt < Number(tr.max)); return r ? Number(r.grade) : null; };
    const sGrade = getGrade(stdAmount);
@@ -1095,7 +1089,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
 
   const ins = calculateSocialIns(
-    stdAmount,
+    stdAmount ?? 0,
     1,
     hRate,
     pRate,
@@ -1104,7 +1098,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     row.hasNursingIns === 1
   );
 
-  if (!hasHealth || stdAmount === 0) {
+  if (!hasHealth || stdAmount == null || stdAmount === 0) {
     ins.health = 0;
     ins.nursing = 0;
   } else {
@@ -1112,7 +1106,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     ins.nursing *= insMultiplier;
   }
 
-  if (!hasPension || stdAmount === 0) {
+  if (!hasPension || stdAmount == null || stdAmount === 0) {
     ins.pension = 0;
     ins.childCare = 0;
   } else {
@@ -1177,6 +1171,19 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     calcLog.push(...incomeTaxResult.log);
   }
 
+  if (incomeTax === null) {
+    return {
+      ...row,
+      grossPay,
+      health: null, pension: null, nursing: null, childCare: null,
+      employment: null, socialTotal: null,
+      incomeTax: null, totalDeductions: null, netPay: null,
+      isBlocking: true,
+      taxWarning: "計算条件不足のため処理を中断しました",
+      calcLog,
+    };
+  }
+
   const residentTax = Number(row.residentTax) || 0;
   calcLog.push(`- 住民税: ${formatCurrency(residentTax)}円`);
 
@@ -1187,14 +1194,14 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
   });
 
-  const safeIncomeTax = incomeTax === null ? 0 : incomeTax;
-  const totalDeductions =
-    socialTotal + safeIncomeTax + residentTax + totalCustomDeds;
-  const netPay = grossPay - totalDeductions;
+  const totalDeductions = incomeTax === null
+    ? null
+    : socialTotal + incomeTax + residentTax + totalCustomDeds;
+  const netPay = totalDeductions === null ? null : grossPay - totalDeductions;
 
   calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${formatCurrency(totalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${formatCurrency(netPay)}円`);
+  calcLog.push(`- 控除合計: ${totalDeductions === null ? "計算不可" : formatCurrency(totalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${netPay === null ? "計算不可" : formatCurrency(netPay)}円`);
 
   if (yearStr && master?.dob) {
     const alerts = getAgeAlerts(master.dob, yearStr, monthKey);
@@ -1231,7 +1238,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     employment,
     incomeTax: incomeTax,
     taxWarning: taxWarning,
-    isBlocking: isBlocking,
+    isBlocking: isBlocking || incomeTax === null,
     netPay,
     socialTotal,
     estStdAmount: estStdAmount,
@@ -1408,9 +1415,22 @@ const calculateBonusResult = ({
   if (taxResult.log) calcLog.push(...taxResult.log);
 
   const bIncomeTax = taxResult.tax === null ? null : (taxResult.manualRequired ? (Number(b.incomeTax) || 0) : taxResult.tax);
-  const isBlocking = taxResult.isBlocking || false;
+  const isBlocking = taxResult.isBlocking || bIncomeTax === null || false;
   if (taxResult.manualRequired && taxResult.tax !== null)
     calcLog.push(`※ 手入力値(${formatCurrency(bIncomeTax)}円)を優先`);
+
+  if (bIncomeTax === null) {
+    return {
+      basePay: Number(b.basePay) || 0,
+      grossPay: bGross,
+      health: null, pension: null, nursing: null, childCare: null,
+      employment: null, socialTotal: null,
+      incomeTax: null, totalDeductions: null, netPay: null,
+      isBlocking: true,
+      taxWarning: taxResult.warning,
+      calcLog,
+    };
+  }
 
   const bResidentTax = Number(b.residentTax) || 0;
   if (bResidentTax > 0)
@@ -1424,14 +1444,14 @@ const calculateBonusResult = ({
     if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
   });
 
-  const safeIncomeTax = bIncomeTax === null ? 0 : bIncomeTax;
-  const bTotalDeductions =
-    bSocialTotal + safeIncomeTax + bResidentTax + bTotalCustomDeds;
-  const bNetPay = bGross - bTotalDeductions;
+  const bTotalDeductions = bIncomeTax === null
+    ? null
+    : bSocialTotal + bIncomeTax + bResidentTax + bTotalCustomDeds;
+  const bNetPay = bTotalDeductions === null ? null : bGross - bTotalDeductions;
 
   calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${formatCurrency(bTotalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${formatCurrency(bNetPay)}円`);
+  calcLog.push(`- 控除合計: ${bTotalDeductions === null ? "計算不可" : formatCurrency(bTotalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${bNetPay === null ? "計算不可" : formatCurrency(bNetPay)}円`);
 
   return {
     basePay: Number(b.basePay) || 0,
@@ -1470,7 +1490,7 @@ const createInitialYearData = (yearStr, settings) => {
         holidayHours: "",
         basePay: 0,
         residentTax: 0,
-        stdAmount: 0,
+        stdAmount: "",
         hasNursingIns: 0,
         allowanceAmounts: {},
         deductionAmounts: {},

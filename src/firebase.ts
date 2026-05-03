@@ -30,26 +30,28 @@ export const db = getFirestore(app);
 export const appId: string = import.meta.env.VITE_APP_ID;
 
 export const PATHS = {
-  taxTables:              ()                             => ["artifacts", appId, "taxTables"],
-  taxTable:               (docId)                        => ["artifacts", appId, "taxTables", docId],
-  tenants:                ()                             => ["artifacts", appId, "tenants"],
-  tenant:                 (tenantId)                     => ["artifacts", appId, "tenants", tenantId],
-  // uid-scoped paths (current structure)
-  tenantUsers:     (tenantId)                     => ["artifacts", appId, "tenants", tenantId, "users"],
-  tenantUser:      (tenantId, uid)                => ["artifacts", appId, "tenants", tenantId, "users", uid],
-  employees:       (tenantId, uid)                => ["artifacts", appId, "tenants", tenantId, "users", uid, "payrollEmployees"],
-  employee:        (tenantId, uid, empId)         => ["artifacts", appId, "tenants", tenantId, "users", uid, "payrollEmployees", empId],
-  settings:        (tenantId, uid, docId = "v1") => ["artifacts", appId, "tenants", tenantId, "users", uid, "payrollSettings", docId],
-  monthlyLocks:    (tenantId, uid, docId = "v1") => ["artifacts", appId, "tenants", tenantId, "users", uid, "monthlyLocks", docId],
-  // legacy: tenant-scoped without uid (migration source)
-  legacyTenantEmployees:  (tenantId)                    => ["artifacts", appId, "tenants", tenantId, "payrollEmployees"],
-  legacyTenantEmployee:   (tenantId, empId)             => ["artifacts", appId, "tenants", tenantId, "payrollEmployees", empId],
-  legacyTenantSettings:   (tenantId, docId = "v1")      => ["artifacts", appId, "tenants", tenantId, "payrollSettings", docId],
-  legacyTenantLocks:      (tenantId, docId = "v1")      => ["artifacts", appId, "tenants", tenantId, "monthlyLocks", docId],
-  // legacy: user-scoped before tenant migration
-  legacyEmployees:        (uid)                          => ["artifacts", appId, "users", uid, "payrollEmployees"],
-  legacySettings:         (uid)                          => ["artifacts", appId, "users", uid, "payrollSettings"],
-  legacyLocks:            (uid)                          => ["artifacts", appId, "users", uid, "monthlyLocks"],
+  // tenant management
+  tenants:               ()                              => ["tenants"],
+  tenant:                (tenantId)                      => ["tenants", tenantId],
+  tenantUsers:           (tenantId)                      => ["tenants", tenantId, "users"],
+  tenantUser:            (tenantId, uid)                 => ["tenants", tenantId, "users", uid],
+  // tenant-scoped data (active structure)
+  employees:             (tenantId)                      => ["tenants", tenantId, "employees"],
+  employee:              (tenantId, empId)               => ["tenants", tenantId, "employees", empId],
+  settings:              (tenantId, docId = "v1")        => ["tenants", tenantId, "settings", docId],
+  monthlyLocks:          (tenantId, docId = "v1")        => ["tenants", tenantId, "monthlyLocks", docId],
+  // tax tables (global)
+  taxTables:             ()                              => ["taxTables"],
+  taxTable:              (docId)                         => ["taxTables", docId],
+  // legacy: tenant-flat (migration source v1)
+  legacyTenantEmployees: (tenantId)                      => ["tenants", tenantId, "employees"],
+  legacyTenantEmployee:  (tenantId, empId)               => ["tenants", tenantId, "employees", empId],
+  legacyTenantSettings:  (tenantId, docId = "v1")        => ["tenants", tenantId, "settings", docId],
+  legacyTenantLocks:     (tenantId, docId = "v1")        => ["tenants", tenantId, "monthlyLocks", docId],
+  // legacy: uid-scoped old collection names (migration source v0)
+  legacyEmployees:       (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "payrollEmployees"],
+  legacySettings:        (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "payrollSettings"],
+  legacyLocks:           (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "monthlyLocks"],
 };
 
 export const getCol = (...path) => collection(db, ...path);

@@ -1802,7 +1802,6 @@ const createInitialEmployee = (
 const App = () => {
   const [activeTab, setActiveTab] = useState("portal");
   const [userId, setUserId] = useState(null);
-  const tenantId = userId;
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
   
@@ -1811,15 +1810,15 @@ const App = () => {
   const getTenantCol = (pathKey) => {
     if (!tenantId) throw new Error("user未認証");
     const map = {
-      employees: () => getCol(...PATHS.employees(tenantId, userId)),
+      employees: () => getCol(...PATHS.employees(tenantId)),
     };
     return map[pathKey]();
   };
   const getTenantDoc = (pathKey) => {
     if (!tenantId) throw new Error("user未認証");
     const map = {
-      settings:     () => getDocRef(...PATHS.settings(tenantId, userId)),
-      monthlyLocks: () => getDocRef(...PATHS.monthlyLocks(tenantId, userId)),
+      settings:     () => getDocRef(...PATHS.settings(tenantId)),
+      monthlyLocks: () => getDocRef(...PATHS.monthlyLocks(tenantId)),
     };
     return map[pathKey]();
   };
@@ -1830,6 +1829,7 @@ const App = () => {
 
   const [tenants, setTenants] = useState([]);
   const [selectedTenantId, setSelectedTenantId] = useState(null);
+  const tenantId = selectedTenantId;
   const [tenantSearchQuery, setTenantSearchQuery] = useState("");
 
   const [employees, setEmployees] = useState({});
@@ -2218,21 +2218,21 @@ const App = () => {
     const batch = createBatch();
 
     // 従業員データ移行
-    const empsSnap = preloadedEmpsSnap ?? await fetchDocs(getCol(...PATHS.legacyEmployees(uid)));
+    const empsSnap = preloadedEmpsSnap ?? await fetchDocs(getCol(...PATHS.legacyEmployees(tenantId, uid)));
     empsSnap.forEach((empDoc) => {
-      batch.set(getDocRef(...PATHS.employee(tenantId, uid, empDoc.id)), empDoc.data());
+      batch.set(getDocRef(...PATHS.employee(tenantId, empDoc.id)), empDoc.data());
     });
 
     // 設定データ移行
-    const settingsSnap = await fetchDocs(getCol(...PATHS.legacySettings(uid)));
+    const settingsSnap = await fetchDocs(getCol(...PATHS.legacySettings(tenantId, uid)));
     settingsSnap.forEach((sDoc) => {
-      batch.set(getDocRef(...PATHS.settings(tenantId, uid, sDoc.id)), sDoc.data());
+      batch.set(getDocRef(...PATHS.settings(tenantId, sDoc.id)), sDoc.data());
     });
 
     // 月次ロック移行
-    const locksSnap = await fetchDocs(getCol(...PATHS.legacyLocks(uid)));
+    const locksSnap = await fetchDocs(getCol(...PATHS.legacyLocks(tenantId, uid)));
     locksSnap.forEach((lDoc) => {
-      batch.set(getDocRef(...PATHS.monthlyLocks(tenantId, uid, lDoc.id)), lDoc.data());
+      batch.set(getDocRef(...PATHS.monthlyLocks(tenantId, lDoc.id)), lDoc.data());
     });
 
     await batch.commit();
@@ -2243,17 +2243,17 @@ const App = () => {
 
     const empsSnap = await fetchDocs(getCol(...PATHS.legacyTenantEmployees(tenantId)));
     empsSnap.forEach((empDoc) => {
-      batch.set(getDocRef(...PATHS.employee(tenantId, uid, empDoc.id)), empDoc.data());
+      batch.set(getDocRef(...PATHS.employee(tenantId, empDoc.id)), empDoc.data());
     });
 
     const settingsSnap = await fetchDocs(getCol(...PATHS.legacyTenantSettings(tenantId)));
     settingsSnap.forEach((sDoc) => {
-      batch.set(getDocRef(...PATHS.settings(tenantId, uid, sDoc.id)), sDoc.data());
+      batch.set(getDocRef(...PATHS.settings(tenantId, sDoc.id)), sDoc.data());
     });
 
     const locksSnap = await fetchDocs(getCol(...PATHS.legacyTenantLocks(tenantId)));
     locksSnap.forEach((lDoc) => {
-      batch.set(getDocRef(...PATHS.monthlyLocks(tenantId, uid, lDoc.id)), lDoc.data());
+      batch.set(getDocRef(...PATHS.monthlyLocks(tenantId, lDoc.id)), lDoc.data());
     });
 
     await batch.commit();
@@ -2266,8 +2266,8 @@ const App = () => {
     if (!snap.empty) {
       const tenantDoc = snap.docs[0];
       const tenantData = tenantDoc.data();
-      setTenants([{ id: tenantDoc.id, name: tenantData.name || "株式会社 新規テナント" }]);
-      setSelectedTenantId(tenantDoc.id);
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント" })));
+      setSelectedTenantId(null);
       if (!tenantData.migrationDone) {
         await _migrateUserDataToTenant(uid, tenantDoc.id);
         await saveDoc(PATHS.tenant(tenantDoc.id), { migrationDone: true, migrationV2Done: true }, { merge: true });
@@ -2279,7 +2279,7 @@ const App = () => {
     }
 
     // テナントが存在しない場合、旧データ確認
-    const oldEmpsSnap = await fetchDocs(getCol(...PATHS.legacyEmployees(uid)));
+    const oldEmpsSnap = await fetchDocs(getCol(...PATHS.legacyEmployees(uid, uid)));
     const hasOldData = !oldEmpsSnap.empty;
 
     const newTenantId = newAutoDocRef(...PATHS.tenants()).id;
@@ -2298,7 +2298,7 @@ const App = () => {
     }
 
     setTenants([{ id: newTenantId, name: "株式会社 新規テナント" }]);
-    setSelectedTenantId(newTenantId);
+    setSelectedTenantId(null);
   };
 
   useEffect(() => {
@@ -2310,6 +2310,7 @@ const App = () => {
         setUserId(user.uid);
         setIsAuthReady(true);
         await initTenantAndMigrate(user.uid);
+        setLoading(false);
       } else {
         setIsAuthReady(false);
         setUserId(null);
@@ -2329,16 +2330,26 @@ const App = () => {
     }
   };
 
-  // ★ 共通関数ベースのデータ監視 (テナント確定後に発火)
+  // ★ tenantsコレクション購読（ポータルリスト自動更新）
   useEffect(() => {
     if (!isAuthReady || !userId) return;
+    const tenantsQuery = queryCol(getCol(...PATHS.tenants()), whereEq("ownerUid", "==", userId));
+    const unsubTenants = subscribe(tenantsQuery, (snap) => {
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント" })));
+    });
+    return () => unsubTenants();
+  }, [isAuthReady, userId]);
+
+  // ★ 共通関数ベースのデータ監視 (テナント確定後に発火)
+  useEffect(() => {
+    if (!isAuthReady || !userId || !tenantId) return;
 
     // 従業員データの購読
     const unsubEmps = subscribe(getTenantCol("employees"), (snap) => {
       if (snap.empty) {
         const newId = `emp_${Date.now()}`;
         const newEmp = createInitialEmployee("社員①", "001", settings);
-        saveDoc(PATHS.employee(tenantId, userId, newId), {
+        saveDoc(PATHS.employee(tenantId, newId), {
           ...newEmp,
           updatedAt: new Date().toISOString(),
         }).catch(console.error);
@@ -2383,7 +2394,7 @@ const App = () => {
             : DEFAULT_STD_REWARD_TABLE,
         });
       } else {
-        saveDoc(PATHS.settings(tenantId, userId), DEFAULT_SETTINGS).catch(console.error);
+        saveDoc(PATHS.settings(tenantId), DEFAULT_SETTINGS).catch(console.error);
         setSettings(DEFAULT_SETTINGS);
       }
     });
@@ -2398,7 +2409,7 @@ const App = () => {
       unsubSettings();
       unsubLocks();
     };
-  }, [isAuthReady, userId, settings?.editableYear]);
+  }, [isAuthReady, userId, selectedTenantId, settings?.editableYear]);
 
   // ★ 追加：税額表データの取得（全テナント共通）
   useEffect(() => {
@@ -2453,7 +2464,7 @@ const App = () => {
       setSettings(newSettings);
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
       saveDoc(
-        PATHS.settings(tenantId, userId),
+        PATHS.settings(tenantId),
         newSettings,
         { merge: true }
       ).catch(console.error);
@@ -2467,7 +2478,7 @@ const App = () => {
     try {
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
       await saveDoc(
-        PATHS.settings(tenantId, userId),
+        PATHS.settings(tenantId),
         newSettings,
         { merge: true }
       );
@@ -2496,7 +2507,7 @@ const App = () => {
       ],
     };
     if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
-    await saveDoc(PATHS.monthlyLocks(tenantId, userId), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+    await saveDoc(PATHS.monthlyLocks(tenantId), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
   };
 
   const handleUnlockMonth = async (yearStr, monthKey, reason) => {
@@ -2514,7 +2525,7 @@ const App = () => {
       ],
     };
     if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
-    await saveDoc(PATHS.monthlyLocks(tenantId, userId), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+    await saveDoc(PATHS.monthlyLocks(tenantId), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
     setUnlockReason("");
   };
 
@@ -2583,7 +2594,7 @@ const App = () => {
     try {
       if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
       await saveDoc(
-        PATHS.employee(tenantId, userId, empId),
+        PATHS.employee(tenantId, empId),
         {
           master: m,
           data: d,
@@ -2696,11 +2707,11 @@ const App = () => {
         importPreview.rawData;
 
       if (selectedTenantId) {
-        await saveDoc(PATHS.settings(tenantId, userId), importedSettings, { merge: true });
+        await saveDoc(PATHS.settings(tenantId), importedSettings, { merge: true });
 
         const promises = Object.entries(importedEmployees).map(
           ([empId, empData]) => {
-            return saveDoc(PATHS.employee(tenantId, userId, empId), empData, { merge: true });
+            return saveDoc(PATHS.employee(tenantId, empId), empData, { merge: true });
           }
         );
 
@@ -2791,7 +2802,7 @@ const App = () => {
 
     if (selectedTenantId) {
       try {
-        await removeDoc(PATHS.employee(tenantId, userId, empId));
+        await removeDoc(PATHS.employee(tenantId, empId));
         setSaveStatus("削除しました");
         setTimeout(() => setSaveStatus(""), 2000);
       } catch (error) {

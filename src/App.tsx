@@ -1075,23 +1075,11 @@ const calculateMonthlyCore = ({
   const stdAmountMissing = (hasHealth || hasPension) && stdAmount === null;
   if (stdAmountMissing) {
     return {
-      grossPay,
-      health: null,
-      pension: null,
-      nursing: null,
-      childCare: null,
-      employment: null,
-      incomeTax: null,
-      taxWarning: "標準報酬月額が未入力です",
-      isBlocking: true,
-      netPay: null,
-      socialTotal: null,
-      estStdAmount,
-      totalCustomDeds: null,
-      totalDeductions: null,
-      calcSuccess: false,
-      _logData: {
+      result: null,
+      error: "stdAmountMissing",
+      debug: {
         status: "stdAmountMissing",
+        grossPay,
         allowanceAmounts,
         socialInsGross,
         stdAmount,
@@ -1182,15 +1170,11 @@ const calculateMonthlyCore = ({
 
   if (incomeTax === null) {
     return {
-      grossPay,
-      health: null, pension: null, nursing: null, childCare: null,
-      employment: null, socialTotal: null,
-      incomeTax: null, totalDeductions: null, netPay: null,
-      isBlocking: true,
-      taxWarning: "計算条件不足のため処理を中断しました",
-      calcSuccess: false,
-      _logData: {
+      result: null,
+      error: "incomeTaxNull",
+      debug: {
         status: "incomeTaxNull",
+        grossPay,
         allowanceAmounts,
         socialInsGross,
         employmentInsGross,
@@ -1209,20 +1193,23 @@ const calculateMonthlyCore = ({
   });
 
   return {
-    grossPay,
-    health: ins.health,
-    pension: ins.pension,
-    nursing: ins.nursing,
-    childCare: ins.childCare,
-    employment,
-    incomeTax: incomeTax,
-    taxWarning: taxWarning,
-    isBlocking: isBlocking || incomeTax === null,
-    socialTotal,
-    estStdAmount: estStdAmount,
-    totalCustomDeds,
-    calcSuccess: true,
-    _logData: {
+    result: {
+      grossPay,
+      health: ins.health,
+      pension: ins.pension,
+      nursing: ins.nursing,
+      childCare: ins.childCare,
+      employment,
+      incomeTax: incomeTax,
+      taxWarning: taxWarning,
+      isBlocking: isBlocking || incomeTax === null,
+      socialTotal,
+      estStdAmount: estStdAmount,
+      totalCustomDeds,
+      calcSuccess: true,
+    },
+    error: null,
+    debug: {
       status: "success",
       allowanceAmounts,
       deductionAmounts,
@@ -1336,49 +1323,73 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     },
   });
 
-  if (!core || !core._logData) return core ? { ...row, ...core } : {};
+  if (!core) return {};
 
+  const { result: coreResult, debug, error } = core;
   const residentTax = Number(row.residentTax) || 0;
-  const totalDeductions = core.incomeTax === null
-    ? null
-    : (core.socialTotal ?? 0) + core.incomeTax + residentTax + (core.totalCustomDeds ?? 0);
-  const netPay = totalDeductions === null ? null : (core.grossPay ?? 0) - totalDeductions;
-
-  const ageAlerts = (yearStr && master?.dob)
-    ? getAgeAlerts(master.dob, yearStr, monthKey)
-    : [];
-
-  const { _logData, ...coreResult } = core;
-  const result = { ...row, ...coreResult, totalDeductions, netPay };
-  const logData = { ..._logData, ageAlerts };
-  const { status } = logData;
 
   const calcLog = ["【月次給与 計算ログ】"];
   const base = Number(row.basePay) || 0;
   calcLog.push(`- 基本給: ${formatCurrency(base)}円`);
 
-  (logData.allowanceAmounts || []).forEach((def) => {
+  (debug.allowanceAmounts || []).forEach((def) => {
     if (def.amount > 0)
       calcLog.push(
         `  - 手当(${def.name}): ${formatCurrency(def.amount)}円 (課税:${def.isTaxable ? "〇" : "×"} / 社保:${def.isSocialIns ? "〇" : "×"})`
       );
   });
 
-  calcLog.push(`- 総支給額: ${formatCurrency(result.grossPay)}円`);
+  calcLog.push(`- 総支給額: ${formatCurrency(debug.grossPay)}円`);
   calcLog.push(`\n【社会保険料】`);
-  calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(logData.socialInsGross)}円`);
-  calcLog.push(`- 適用標準報酬月額: ${logData.stdAmount === null ? "（未入力）" : formatCurrency(logData.stdAmount) + "円"}`);
+  calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(debug.socialInsGross)}円`);
+  calcLog.push(`- 適用標準報酬月額: ${debug.stdAmount === null ? "（未入力）" : formatCurrency(debug.stdAmount) + "円"}`);
   calcLog.push(
-    `- 適用保険料率 (健保:${logData.hRate}% / 厚年:${logData.pRate}% / 介護:${logData.nRate}% / 支援金:${logData.cRate}% / 雇用:${logData.eRate}‰)`
+    `- 適用保険料率 (健保:${debug.hRate}% / 厚年:${debug.pRate}% / 介護:${debug.nRate}% / 支援金:${debug.cRate}% / 雇用:${debug.eRate}‰)`
   );
 
-  if (status === "stdAmountMissing") {
-    calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算を中断します。`);
-    return { ...result, calcLog };
+  if (coreResult === null) {
+    if (error === "stdAmountMissing") {
+      calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算を中断します。`);
+    } else {
+      if (debug.gradeInfo) {
+        const { sGrade, eGrade, gDiff, stdAmount: sa, estStdAmount: ea } = debug.gradeInfo;
+        if (gDiff >= 2) {
+          calcLog.push(`⚠ 標準報酬月額（${formatCurrency(sa)}円/等級${sGrade}）と推定値（${formatCurrency(ea)}円/等級${eGrade}）の差が${gDiff}等級あります。届出内容を確認してください。`);
+        } else {
+          calcLog.push(`△ 標準報酬月額（${formatCurrency(sa)}円）と推定値（${formatCurrency(ea)}円）に差異があります。`);
+        }
+      }
+      if (row.isDoubleSocialIns)
+        calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
+      const logIns = debug.ins || {};
+      calcLog.push(`  -> 健康保険料: ${formatCurrency(logIns.health ?? 0)}円`);
+      calcLog.push(`  -> 厚生年金料: ${formatCurrency(logIns.pension ?? 0)}円`);
+      if ((logIns.nursing ?? 0) > 0)
+        calcLog.push(`  -> 介護保険料: ${formatCurrency(logIns.nursing)}円`);
+      if ((logIns.childCare ?? 0) > 0)
+        calcLog.push(
+          `  -> 子ども・子育て支援金: ${formatCurrency(logIns.childCare)}円`
+        );
+      calcLog.push(
+        `  -> 雇用保険料: ${formatCurrency(debug.employment ?? 0)}円 (対象額:${formatCurrency(debug.employmentInsGross ?? 0)}円)`
+      );
+      calcLog.push(`- 社会保険料合計: ${formatCurrency(debug.socialTotal ?? 0)}円\n`);
+      if (debug.incomeTaxResultLog?.length > 0) {
+        calcLog.push(...debug.incomeTaxResultLog);
+      }
+    }
+    return { ...row, totalDeductions: null, netPay: null, calcLog };
   }
 
-  if (logData.gradeInfo) {
-    const { sGrade, eGrade, gDiff, stdAmount: sa, estStdAmount: ea } = logData.gradeInfo;
+  const totalDeductions = coreResult.socialTotal + coreResult.incomeTax + residentTax + coreResult.totalCustomDeds;
+  const netPay = coreResult.grossPay - totalDeductions;
+
+  const ageAlerts = (yearStr && master?.dob)
+    ? getAgeAlerts(master.dob, yearStr, monthKey)
+    : [];
+
+  if (debug.gradeInfo) {
+    const { sGrade, eGrade, gDiff, stdAmount: sa, estStdAmount: ea } = debug.gradeInfo;
     if (gDiff >= 2) {
       calcLog.push(`⚠ 標準報酬月額（${formatCurrency(sa)}円/等級${sGrade}）と推定値（${formatCurrency(ea)}円/等級${eGrade}）の差が${gDiff}等級あります。届出内容を確認してください。`);
     } else {
@@ -1389,7 +1400,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   if (row.isDoubleSocialIns)
     calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
 
-  const logIns = logData.ins || {};
+  const logIns = debug.ins || {};
   calcLog.push(`  -> 健康保険料: ${formatCurrency(logIns.health ?? 0)}円`);
   calcLog.push(`  -> 厚生年金料: ${formatCurrency(logIns.pension ?? 0)}円`);
   if ((logIns.nursing ?? 0) > 0)
@@ -1399,31 +1410,27 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       `  -> 子ども・子育て支援金: ${formatCurrency(logIns.childCare)}円`
     );
   calcLog.push(
-    `  -> 雇用保険料: ${formatCurrency(logData.employment ?? 0)}円 (対象額:${formatCurrency(logData.employmentInsGross ?? 0)}円)`
+    `  -> 雇用保険料: ${formatCurrency(debug.employment ?? 0)}円 (対象額:${formatCurrency(debug.employmentInsGross ?? 0)}円)`
   );
-  calcLog.push(`- 社会保険料合計: ${formatCurrency(logData.socialTotal ?? 0)}円\n`);
+  calcLog.push(`- 社会保険料合計: ${formatCurrency(debug.socialTotal ?? 0)}円\n`);
 
-  if (logData.incomeTaxResultLog?.length > 0) {
-    calcLog.push(...logData.incomeTaxResultLog);
-  }
-
-  if (status === "incomeTaxNull") {
-    return { ...result, calcLog };
+  if (debug.incomeTaxResultLog?.length > 0) {
+    calcLog.push(...debug.incomeTaxResultLog);
   }
 
   calcLog.push(`- 住民税: ${formatCurrency(residentTax)}円`);
 
-  (logData.deductionAmounts || []).forEach((def) => {
+  (debug.deductionAmounts || []).forEach((def) => {
     if (def.amount > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(def.amount)}円`);
   });
 
   calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${result.totalDeductions === null ? "計算不可" : formatCurrency(result.totalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${result.netPay === null ? "計算不可" : formatCurrency(result.netPay)}円`);
+  calcLog.push(`- 控除合計: ${formatCurrency(totalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${formatCurrency(netPay)}円`);
 
-  if (logData.ageAlerts?.length > 0) {
+  if (ageAlerts?.length > 0) {
     calcLog.push(`\n【年齢到達アラート】`);
-    logData.ageAlerts.forEach((a) => {
+    ageAlerts.forEach((a) => {
       if (a.type === "nursing40")
         calcLog.push(
           `- ${a.label}：介護保険料の徴収開始を確認してください。`
@@ -1443,7 +1450,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     });
   }
 
-  return { ...result, calcLog };
+  return { ...row, ...coreResult, totalDeductions, netPay, calcLog };
 };
 
 const calculateBonusStd = ({ grossPay, priorHealthBonusStdTotal }) => {
@@ -4014,9 +4021,32 @@ const App = () => {
                   <span className="text-[9px] font-mono text-slate-400 truncate pr-2">
                     ID: {t.id.replace('tenant_', '')}
                   </span>
-                  <span className="text-[10px] font-bold text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                    開く ➔
-                  </span>
+                  {/* ▼ 編集ボタンと「開く」ボタンを並べる ▼ */}
+                  <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation(); // 台帳を開く動作を止める
+                        const newName = window.prompt("顧問先の名前を変更します", t.name);
+                        if (newName && newName.trim() !== "" && newName !== t.name) {
+                          // Firestoreのテナント名を更新
+                          const docRef = getDocRef(`artifacts/${appId}/tenants`, t.id);
+                          setDoc(docRef, { name: newName.trim() }, { merge: true })
+                            .then(() => {
+                              // 画面上のリストも更新する
+                              setTenants(prev => prev.map(pt => pt.id === t.id ? { ...pt, name: newName.trim() } : pt));
+                            })
+                            .catch(() => alert("名前の変更に失敗しました"));
+                        }
+                      }}
+                      className="text-slate-400 hover:text-blue-600 flex items-center gap-1 text-[10px] font-bold transition-colors bg-slate-50 hover:bg-blue-50 px-2 py-1 rounded"
+                      title="名前を変更"
+                    >
+                      <Edit2 size={12} /> 編集
+                    </button>
+                    <span className="text-[10px] font-bold text-blue-500 whitespace-nowrap">
+                      開く ➔
+                    </span>
+                  </div>
                 </div>
               </div>
             ))}

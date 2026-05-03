@@ -1446,6 +1446,77 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   return { ...result, calcLog };
 };
 
+const calculateBonusStd = ({ grossPay, priorHealthBonusStdTotal }) => {
+  const bonusStdRaw = Math.floor(grossPay / 1000) * 1000;
+  const healthBonusStd = Math.min(bonusStdRaw, Math.max(0, 5730000 - priorHealthBonusStdTotal));
+  const pensionBonusStd = Math.min(bonusStdRaw, 1500000);
+  return { bonusStdRaw, healthBonusStd, pensionBonusStd };
+};
+
+const calculateBonusIns = ({
+  healthBonusStd, pensionBonusStd, grossPay,
+  hasHealth, hasPension, hasNursing, hasEmployment,
+  hRate, pRate, nRate, cRate, eRate,
+}) => {
+  const health = hasHealth ? Math.floor(healthBonusStd * (hRate / 100)) : 0;
+  const nursing = hasNursing ? Math.floor(healthBonusStd * (nRate / 100)) : 0;
+  const pension = hasPension ? Math.floor(pensionBonusStd * (pRate / 100)) : 0;
+  const childCare = hasPension ? Math.floor(pensionBonusStd * (cRate / 100)) : 0;
+  const employment = hasEmployment ? Math.floor(grossPay * (eRate / 1000)) : 0;
+  const socialTotal = health + pension + nursing + childCare + employment;
+  return { health, pension, nursing, childCare, employment, socialTotal };
+};
+
+const calculateBonusTaxCore = ({
+  bonusAfterSocial, lastMonthSalaryAfterSocial, manualIncomeTax,
+  master, settings, yearStr, taxTables,
+}) => {
+  const taxResult = calculateBonusIncomeTax(bonusAfterSocial, lastMonthSalaryAfterSocial, master, settings, yearStr, taxTables);
+  const manualRequired = taxResult.manualRequired ?? false;
+  const incomeTax = taxResult.tax === null ? null : (manualRequired ? manualIncomeTax : taxResult.tax);
+  const taxWarning = taxResult.warning ?? null;
+  const isBlocking = taxResult.isBlocking || incomeTax === null || false;
+  const incomeTaxResultLog = taxResult.log ?? [];
+  return { incomeTax, taxWarning, isBlocking, manualRequired, incomeTaxResultLog };
+};
+
+const calculateBonusCore = ({
+  basePay, allowanceAmounts, deductionAmounts, residentTax,
+  rates: { health: hRate, pension: pRate, nursing: nRate, childCare: cRate, employment: eRate },
+  flags: { hasHealth, hasPension, hasNursing, hasEmployment },
+  tax: { manualIncomeTax, master, settings, yearStr, taxTables },
+  ins: { priorHealthBonusStdTotal, lastMonthSalaryAfterSocial },
+}) => {
+  const { grossPay, taxableGross } = calculateGross({ basePay, allowanceAmounts, standardRewardTable: null });
+  const { bonusStdRaw, healthBonusStd, pensionBonusStd } = calculateBonusStd({ grossPay, priorHealthBonusStdTotal });
+  const { health, pension, nursing, childCare, employment, socialTotal } = calculateBonusIns({
+    healthBonusStd, pensionBonusStd, grossPay,
+    hasHealth, hasPension, hasNursing, hasEmployment,
+    hRate, pRate, nRate, cRate, eRate,
+  });
+  const bonusAfterSocial = Math.max(0, taxableGross - socialTotal);
+  const { incomeTax, taxWarning, isBlocking, manualRequired, incomeTaxResultLog } = calculateBonusTaxCore({
+    bonusAfterSocial, lastMonthSalaryAfterSocial, manualIncomeTax,
+    master, settings, yearStr, taxTables,
+  });
+  if (incomeTax === null) {
+    return {
+      result: null,
+      error: "incomeTaxNull",
+      debug: { status: "incomeTaxNull", grossPay, taxableGross, bonusStdRaw, healthBonusStd, pensionBonusStd, health, pension, nursing, childCare, employment, socialTotal, bonusAfterSocial, incomeTaxResultLog, taxWarning, manualRequired },
+    };
+  }
+  let totalCustomDeds = 0;
+  deductionAmounts.forEach(({ amount }) => { totalCustomDeds += amount; });
+  const totalDeductions = socialTotal + incomeTax + residentTax + totalCustomDeds;
+  const netPay = grossPay - totalDeductions;
+  return {
+    result: { grossPay, taxableGross, health, pension, nursing, childCare, employment, socialTotal, incomeTax, taxWarning, isBlocking, manualRequired, residentTax, totalCustomDeds, totalDeductions, netPay, calcSuccess: true },
+    error: null,
+    debug: { status: "success", grossPay, taxableGross, bonusStdRaw, healthBonusStd, pensionBonusStd, health, pension, nursing, childCare, employment, socialTotal, bonusAfterSocial, incomeTaxResultLog, manualRequired },
+  };
+};
+
 const calculateBonusResult = ({
   master,
   bonusRow,
@@ -1482,41 +1553,42 @@ const calculateBonusResult = ({
   }
   const b = bonusRow;
   const calcLog = ["【賞与 計算ログ】"];
-  let bTotalAllowances = 0,
-    bTotalTaxableAllowances = 0;
-  const bAllowances = {},
-    bDeductions = {};
+  const bAllowances = {};
+  const bDeductions = {};
 
   calcLog.push(`- 賞与基本額: ${formatCurrency(b.basePay)}円`);
+  const allowanceAmounts = [];
   allowanceDefs.forEach((def) => {
     const amt = Number(b.allowanceAmounts?.[def.id]) || 0;
     bAllowances[def.id] = amt;
-    bTotalAllowances += amt;
-    if (def.isTaxable) bTotalTaxableAllowances += amt;
-    if (amt > 0)
-      calcLog.push(`  - 手当(${def.name}): ${formatCurrency(amt)}円`);
+    allowanceAmounts.push({ amount: amt, isTaxable: def.isTaxable, isSocialIns: true, isEmploymentIns: true });
+    if (amt > 0) calcLog.push(`  - 手当(${def.name}): ${formatCurrency(amt)}円`);
   });
 
-  const bGross = (Number(b.basePay) || 0) + bTotalAllowances;
-  const bTaxableGross = (Number(b.basePay) || 0) + bTotalTaxableAllowances;
-  calcLog.push(`- 賞与総支給額: ${formatCurrency(bGross)}円`);
+  const deductionAmounts = [];
+  deductionDefs.forEach((def) => {
+    const amt = Number(b.deductionAmounts?.[def.id]) || 0;
+    bDeductions[def.id] = amt;
+    deductionAmounts.push({ amount: amt });
+  });
 
   const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
-  const bhRate = settings?.rateSchedules?.health
+  const hRate = settings?.rateSchedules?.health
     ? getRateForMonth(settings.rateSchedules.health, monthKeyForRates)
     : lastMonthRow.healthRate || 5.0;
-  const bpRate = settings?.rateSchedules?.pension
+  const pRate = settings?.rateSchedules?.pension
     ? getRateForMonth(settings.rateSchedules.pension, monthKeyForRates)
     : lastMonthRow.pensionRate || 9.15;
-  const bnRate = settings?.rateSchedules?.nursing
+  const nRate = settings?.rateSchedules?.nursing
     ? getRateForMonth(settings.rateSchedules.nursing, monthKeyForRates)
     : lastMonthRow.nursingRate || 0.8;
-  const bcRate = settings?.rateSchedules?.childCare
+  const cRate = settings?.rateSchedules?.childCare
     ? getRateForMonth(settings.rateSchedules.childCare, monthKeyForRates)
     : lastMonthRow.childCareRate || 0.0;
-  const beRate = settings?.rateSchedules?.employment
+  const eRate = settings?.rateSchedules?.employment
     ? getRateForMonth(settings.rateSchedules.employment, monthKeyForRates)
     : lastMonthRow.employmentRate || 6.0;
+
 
   const hasHealth =
     master.healthIns !== undefined
@@ -1529,73 +1601,18 @@ const calculateBonusResult = ({
   const hasEmployment = master.employmentIns === 1;
   const hasNursing = hasHealth && lastMonthRow.hasNursingIns === 1;
 
-  calcLog.push(`\n【社会保険料（累計上限判定）】`);
-  const bonusStdRaw = Math.floor(bGross / 1000) * 1000;
-  calcLog.push(`- 賞与額(千円未満切捨): ${formatCurrency(bonusStdRaw)}円`);
-
   const manualPriorStd = Number(b.manualPriorHealthStd) || 0;
   let priorHealthBonusStdTotal = manualPriorStd;
-
-  if (manualPriorStd > 0) {
-    calcLog.push(
-      `- 他月分(手入力)の標準賞与額累計: ${formatCurrency(manualPriorStd)}円`
-    );
-  }
-
+  let b1Std = 0;
   if (bonusKey === "bonus2" && yearData.bonus) {
     let b1TotalAllowances = 0;
     allowanceDefs.forEach((def) => {
-      b1TotalAllowances +=
-        Number(yearData.bonus.allowanceAmounts?.[def.id]) || 0;
+      b1TotalAllowances += Number(yearData.bonus.allowanceAmounts?.[def.id]) || 0;
     });
     const b1Gross = (Number(yearData.bonus.basePay) || 0) + b1TotalAllowances;
-    const b1Std = Math.min(Math.floor(b1Gross / 1000) * 1000, 5730000);
+    b1Std = Math.min(Math.floor(b1Gross / 1000) * 1000, 5730000);
     priorHealthBonusStdTotal += b1Std;
-    calcLog.push(`- 同一年度内(賞与①)の標準賞与額: ${formatCurrency(b1Std)}円`);
   }
-
-  if (priorHealthBonusStdTotal > 0) {
-    calcLog.push(
-      `- 適用前の標準賞与額累計(健保): ${formatCurrency(
-        priorHealthBonusStdTotal
-      )}円`
-    );
-  }
-
-  const healthBonusStd = Math.min(
-    bonusStdRaw,
-    Math.max(0, 5730000 - priorHealthBonusStdTotal)
-  );
-  calcLog.push(
-    `- 健保 上限残枠判定結果: ${formatCurrency(healthBonusStd)}円対象`
-  );
-
-  const pensionBonusStd = Math.min(bonusStdRaw, 1500000);
-  calcLog.push(
-    `- 厚年 150万円上限判定結果: ${formatCurrency(pensionBonusStd)}円対象`
-  );
-
-  const bHealth = hasHealth ? Math.floor(healthBonusStd * (bhRate / 100)) : 0;
-  const bNursing = hasNursing ? Math.floor(healthBonusStd * (bnRate / 100)) : 0;
-  const bPension = hasPension
-    ? Math.floor(pensionBonusStd * (bpRate / 100))
-    : 0;
-  const bChildCare = hasPension
-    ? Math.floor(pensionBonusStd * (bcRate / 100))
-    : 0;
-  const bEmp = hasEmployment ? Math.floor(bGross * (beRate / 1000)) : 0;
-
-  const bSocialTotal = bHealth + bPension + bNursing + bChildCare + bEmp;
-  const bonusAfterSocial = Math.max(0, bTaxableGross - bSocialTotal);
-
-  calcLog.push(`  -> 健康保険料: ${formatCurrency(bHealth)}円`);
-  calcLog.push(`  -> 厚生年金料: ${formatCurrency(bPension)}円`);
-  if (bNursing > 0)
-    calcLog.push(`  -> 介護保険料: ${formatCurrency(bNursing)}円`);
-  if (bChildCare > 0)
-    calcLog.push(`  -> 子ども・子育て支援金: ${formatCurrency(bChildCare)}円`);
-  calcLog.push(`  -> 雇用保険料: ${formatCurrency(bEmp)}円`);
-  calcLog.push(`- 社会保険料合計: ${formatCurrency(bSocialTotal)}円\n`);
 
   let prevMonthKey = "12";
   if (b.payDate) {
@@ -1620,6 +1637,7 @@ const calculateBonusResult = ({
   );
   if (!prevMonthResult || prevMonthResult.calcSuccess !== true) {
     calcLog.push("⚠ 前月給与の計算未完了のため、賞与所得税の計算を中断しました。");
+    const bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
     return {
       basePay: Number(b.basePay) || 0,
       grossPay: bGross,
@@ -1631,77 +1649,79 @@ const calculateBonusResult = ({
       calcLog,
     };
   }
-  const lastMonthSalaryAfterSocial = Math.max(
-    0,
-    prevTaxableGross - prevMonthResult.socialTotal
-  );
+  const lastMonthSalaryAfterSocial = Math.max(0, prevTaxableGross - prevMonthResult.socialTotal);
 
-  const taxResult = calculateBonusIncomeTax(
-    bonusAfterSocial,
-    lastMonthSalaryAfterSocial,
-    master,
-    settings,
-    yearStr,
-    taxTables
-  );
+  const bResidentTax = Number(b.residentTax) || 0;
+  const core = calculateBonusCore({
+    basePay: Number(b.basePay) || 0,
+    allowanceAmounts,
+    deductionAmounts,
+    residentTax: bResidentTax,
+    rates: { health: hRate, pension: pRate, nursing: nRate, childCare: cRate, employment: eRate },
+    flags: { hasHealth, hasPension, hasNursing, hasEmployment },
+    tax: { manualIncomeTax: Number(b.incomeTax) || 0, master, settings, yearStr, taxTables },
+    ins: { priorHealthBonusStdTotal, lastMonthSalaryAfterSocial },
+  });
 
-  if (taxResult.log) calcLog.push(...taxResult.log);
+  const { result: coreResult, debug: logData, error } = core;
 
-  const bIncomeTax = taxResult.tax === null ? null : (taxResult.manualRequired ? (Number(b.incomeTax) || 0) : taxResult.tax);
-  const isBlocking = taxResult.isBlocking || bIncomeTax === null || false;
-  if (taxResult.manualRequired && taxResult.tax !== null)
-    calcLog.push(`※ 手入力値(${formatCurrency(bIncomeTax)}円)を優先`);
+  const buildStdLog = () => {
+    calcLog.push(`\n【社会保険料（累計上限判定）】`);
+    calcLog.push(`- 賞与額(千円未満切捨): ${formatCurrency(logData.bonusStdRaw)}円`);
+    if (manualPriorStd > 0)
+      calcLog.push(`- 他月分(手入力)の標準賞与額累計: ${formatCurrency(manualPriorStd)}円`);
+    if (b1Std > 0)
+      calcLog.push(`- 同一年度内(賞与①)の標準賞与額: ${formatCurrency(b1Std)}円`);
+    if (priorHealthBonusStdTotal > 0)
+      calcLog.push(`- 適用前の標準賞与額累計(健保): ${formatCurrency(
+        priorHealthBonusStdTotal
+      )}円`);
+    calcLog.push(`- 健保 上限残枠判定結果: ${formatCurrency(logData.healthBonusStd)}円対象`);
+    calcLog.push(`- 厚年 150万円上限判定結果: ${formatCurrency(logData.pensionBonusStd)}円対象`);
+    calcLog.push(`  -> 健康保険料: ${formatCurrency(logData.health)}円`);
+    calcLog.push(`  -> 厚生年金料: ${formatCurrency(logData.pension)}円`);
+    if (logData.nursing > 0)
+      calcLog.push(`  -> 介護保険料: ${formatCurrency(logData.nursing)}円`);
+    if (logData.childCare > 0)
+      calcLog.push(`  -> 子ども・子育て支援金: ${formatCurrency(logData.childCare)}円`);
+    calcLog.push(`  -> 雇用保険料: ${formatCurrency(logData.employment)}円`);
+    calcLog.push(`- 社会保険料合計: ${formatCurrency(logData.socialTotal)}円\n`);
+  };
 
-  if (bIncomeTax === null) {
+  calcLog.push(`- 賞与総支給額: ${formatCurrency(logData.grossPay)}円`);
+  buildStdLog();
+  if (logData.incomeTaxResultLog) calcLog.push(...logData.incomeTaxResultLog);
+
+  if (error === "incomeTaxNull") {
     return {
       basePay: Number(b.basePay) || 0,
-      grossPay: bGross,
+      grossPay: logData.grossPay,
       health: null, pension: null, nursing: null, childCare: null,
       employment: null, socialTotal: null,
       incomeTax: null, totalDeductions: null, netPay: null,
       isBlocking: true,
-      taxWarning: taxResult.warning,
+      taxWarning: logData.taxWarning,
       calcLog,
     };
   }
 
-  const bResidentTax = Number(b.residentTax) || 0;
-  if (bResidentTax > 0)
-    calcLog.push(`- 住民税: ${formatCurrency(bResidentTax)}円`);
-
-  let bTotalCustomDeds = 0;
+  if (logData.manualRequired && coreResult.incomeTax !== null)
+    calcLog.push(`※ 手入力値(${formatCurrency(coreResult.incomeTax)}円)を優先`);
+  if (coreResult.residentTax > 0)
+    calcLog.push(`- 住民税: ${formatCurrency(coreResult.residentTax)}円`);
   deductionDefs.forEach((def) => {
-    const amt = Number(b.deductionAmounts?.[def.id]) || 0;
-    bDeductions[def.id] = amt;
-    bTotalCustomDeds += amt;
+    const amt = bDeductions[def.id];
     if (amt > 0) calcLog.push(`- 控除(${def.name}): ${formatCurrency(amt)}円`);
   });
-
-  const bTotalDeductions = bIncomeTax === null
-    ? null
-    : bSocialTotal + bIncomeTax + bResidentTax + bTotalCustomDeds;
-  const bNetPay = bTotalDeductions === null ? null : bGross - bTotalDeductions;
-
   calcLog.push(`\n【支給結果】`);
-  calcLog.push(`- 控除合計: ${bTotalDeductions === null ? "計算不可" : formatCurrency(bTotalDeductions)}円`);
-  calcLog.push(`- 差引支給額: ${bNetPay === null ? "計算不可" : formatCurrency(bNetPay)}円`);
+  calcLog.push(`- 控除合計: ${coreResult.totalDeductions === null ? "計算不可" : formatCurrency(coreResult.totalDeductions)}円`);
+  calcLog.push(`- 差引支給額: ${coreResult.netPay === null ? "計算不可" : formatCurrency(coreResult.netPay)}円`);
 
   return {
     basePay: Number(b.basePay) || 0,
-    grossPay: bGross,
-    health: bHealth,
-    pension: bPension,
-    nursing: bNursing,
-    childCare: bChildCare,
-    employment: bEmp,
-    incomeTax: bIncomeTax,
-    residentTax: bResidentTax,
-    totalDeductions: bTotalDeductions,
-    netPay: bNetPay,
+    ...coreResult,
     allowances: bAllowances,
     deductions: bDeductions,
-    taxWarning: taxResult.warning,
-    isBlocking,
     calcLog,
   };
 };

@@ -3628,263 +3628,186 @@ const App = () => {
   }, [settings?.deductionDefinitions, employees]);
 
   const renderPayslip = (empId, emp, monthKey) => {
-    const slipYearData =
-      emp.data?.years?.[selectedYear] ||
-      createInitialYearData(selectedYear, settings);
-    const isBonus = monthKey === "bonus" || monthKey === "bonus2";
+  const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+  const isBonus = monthKey === "bonus" || monthKey === "bonus2";
 
-    let rowData = {};
-    let calcResult = {};
-    let titleText = "給与明細書";
-    let targetMonthText = "";
-    let payDateText = "";
+  let rowData = {};
+  let calcResult = {};
+  let titleText = "給与明細書";
+  let targetMonthText = "";
+  let payDateText = "";
 
-    const allowanceDefs =
-      settings?.allowanceDefinitions?.length > 0
-        ? settings.allowanceDefinitions
-        : emp.master?.allowanceDefinitions || [];
-    const deductionDefs =
-      settings?.deductionDefinitions?.length > 0
-        ? settings.deductionDefinitions
-        : emp.master?.deductionDefinitions || [];
+  const allowanceDefs = settings?.allowanceDefinitions?.length > 0
+      ? settings.allowanceDefinitions
+      : emp.master?.allowanceDefinitions || [];
+  const deductionDefs = settings?.deductionDefinitions?.length > 0
+      ? settings.deductionDefinitions
+      : emp.master?.deductionDefinitions || [];
 
-    if (isBonus) {
-      rowData = slipYearData[monthKey] || {};
-      titleText =
-        monthKey === "bonus" ? "賞与明細書（１回目）" : "賞与明細書（２回目）";
-      targetMonthText = "賞与";
-      payDateText = rowData.payDate || "未設定";
+  if (isBonus) {
+    rowData = slipYearData[monthKey] || {};
+    titleText = monthKey === "bonus" ? "賞与明細書（１回目）" : "賞与明細書（２回目）";
+    targetMonthText = "賞与";
+    payDateText = rowData.payDate || "未設定";
 
-      calcResult = calculateBonusResult({
-        master: emp.master,
-        bonusRow: rowData,
-        bonusKey: monthKey,
-        settings,
-        yearData: slipYearData,
-        allowanceDefs,
-        deductionDefs,
-        monthKeyForRates: getBonusRateMonth(rowData),
-        yearStr: selectedYear,
-        taxTables,
-        monthlyLocks,
-      });
-    } else {
-      rowData = slipYearData.monthly[monthKey] || {};
-      calcResult = calculateMonthlyResult(
-        emp.master,
-        rowData,
-        settings,
-        monthKey,
-        selectedYear,
-        taxTables,
-        monthlyLocks
-      );
-      titleText = "給与明細書";
-      targetMonthText = rowData.salaryMonthText || "未設定";
-      payDateText = rowData.payDate || "未設定";
-    }
+    calcResult = calculateBonusResult({
+      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings, yearData: slipYearData,
+      allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(rowData), yearStr: selectedYear, taxTables, monthlyLocks,
+    });
+  } else {
+    rowData = slipYearData.monthly[monthKey] || {};
+    calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey, selectedYear, taxTables, monthlyLocks);
+    titleText = "給与明細書";
+    targetMonthText = rowData.salaryMonthText || "未設定";
+    payDateText = rowData.payDate || "未設定";
+  }
 
-    return (
-      <div
-        key={empId}
-        className="slip-page border-2 border-slate-800 p-8 text-slate-800 bg-white mb-8 print:mb-0 shadow-sm print:shadow-none"
-      >
-        <h1 className="text-2xl font-black text-center tracking-widest mb-8 border-b-2 border-slate-800 pb-2">
-          {titleText}
-        </h1>
+  // --- 表示用データの配列化（行を綺麗に揃えるため） ---
+  const attendanceItems = isBonus ? [] : [
+    { label: "出勤日数", value: rowData.workingDays },
+    { label: "総労働時間", value: rowData.workingHours },
+    { label: "時間外労働", value: rowData.overtimeHours },
+    { label: "深夜労働", value: rowData.lateNightHours },
+    { label: "休日労働", value: rowData.holidayHours },
+  ];
 
-        <div className="flex justify-between items-start mb-6 text-sm font-bold">
-          <div className="space-y-1">
-            {!isBonus && (
-              <div className="flex gap-4">
-                <span className="w-16">支給月</span>: {parseInt(monthKey, 10)}
-                月支給
-              </div>
-            )}
-            <div className="flex gap-4">
-              <span className="w-16">対象{isBonus ? "" : "月分"}</span>:{" "}
-              {targetMonthText}
-            </div>
-            <div className="flex gap-4">
-              <span className="w-16">支給日</span>: {payDateText}
-            </div>
-          </div>
-          <div className="text-right space-y-1">
-            <div className="text-lg mb-1 font-black">
-              {settings.companyName || "会社名未設定"}
-            </div>
-            {settings.companyAddress && (
-              <div className="text-[10px] text-slate-500">
-                {settings.companyAddress}
-              </div>
-            )}
-            {settings.companyPhone && (
-              <div className="text-[10px] text-slate-500">
-                TEL: {settings.companyPhone}
-              </div>
-            )}
-            <div className="flex justify-end gap-4 mt-2 pt-2">
-              <span className="text-slate-500">社員コード</span>{" "}
-              {emp.master.employeeCode || "-"}
-            </div>
-            <div className="text-xl font-black mt-1">
-              <span className="border-b border-slate-400 pb-0.5">
-                {emp.master.name}
-              </span>{" "}
-              <span className="text-base font-normal">様</span>
-            </div>
-          </div>
+  const paymentItems = [
+    { label: "基本給", value: formatCurrency(rowData.basePay) },
+    ...allowanceDefs.map(def => ({ label: def.name, value: formatCurrency(rowData.allowanceAmounts?.[def.id]) }))
+  ];
+
+  const deductionItems = [
+    { label: "健康保険料", value: formatCurrency(calcResult.health) },
+    { label: "厚生年金保険料", value: formatCurrency(calcResult.pension) },
+    ...(calcResult.nursing > 0 ? [{ label: "介護保険料", value: formatCurrency(calcResult.nursing) }] : []),
+    { label: "雇用保険料", value: formatCurrency(calcResult.employment) },
+    ...(calcResult.childCare > 0 ? [{ label: "子ども・子育て", value: formatCurrency(calcResult.childCare) }] : []),
+    { label: "所得税", value: formatCurrency(calcResult.incomeTax) },
+    { label: "住民税", value: formatCurrency(rowData.residentTax) },
+    ...deductionDefs.map(def => ({ label: def.name, value: formatCurrency(rowData.deductionAmounts?.[def.id]) }))
+  ];
+
+  // 最低8行は確保し、明細書の高さを一定に保つ
+  const maxRows = Math.max(attendanceItems.length, paymentItems.length, deductionItems.length, 8);
+  const rows = Array.from({ length: maxRows });
+
+  return (
+    <div
+      key={empId}
+      className="slip-page bg-white text-black max-w-[210mm] mx-auto p-8 border border-gray-300 shadow-lg mb-10 print:border-none print:shadow-none print:w-full print:max-w-none print:p-0 print:mb-0 break-inside-avoid"
+    >
+      {/* タイトルと年月 */}
+      <div className="flex justify-between items-end border-b-2 border-black pb-2 mb-6">
+        <h1 className="text-3xl font-serif font-black tracking-widest pl-2">{titleText}</h1>
+        <div className="text-sm font-bold pr-2">
+          {targetMonthText} ({payDateText} 支給)
         </div>
-
-        <div
-          className={`grid ${
-            isBonus ? "grid-cols-2" : "grid-cols-3"
-          } gap-0 border-t-2 border-l-2 border-slate-800 mb-6 text-[13px]`}
-        >
-          {!isBonus && (
-            <div className="border-r-2 border-slate-800">
-              <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
-                勤怠
-              </div>
-              <div className="p-3 space-y-1.5 min-h-[220px]">
-                {[
-                  "出勤日数",
-                  "欠勤日数",
-                  "有休取得",
-                  "総労働時間",
-                  "時間外労働",
-                  "深夜労働",
-                  "休日労働",
-                ].map((label) => (
-                  <div
-                    key={label}
-                    className="flex justify-between border-b border-slate-300 border-dashed pb-0.5 text-slate-500"
-                  >
-                    <span>{label}</span>
-                    <span>-</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="border-r-2 border-slate-800 flex flex-col">
-            <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
-              支給
-            </div>
-            <div className="p-3 space-y-1.5 flex-1 min-h-[220px]">
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>基本給</span>
-                <span>{formatCurrency(rowData.basePay)}</span>
-              </div>
-              {allowanceDefs.map((def) => (
-                <div
-                  key={def.id}
-                  className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"
-                >
-                  <span>{def.name}</span>
-                  <span>
-                    {formatCurrency(rowData.allowanceAmounts?.[def.id])}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="p-3 flex justify-between font-black border-t-2 border-slate-800 bg-blue-50/50">
-              <span>支給合計</span>
-              <span>{formatCurrency(calcResult.grossPay)}</span>
-            </div>
-          </div>
-
-          <div className="border-r-2 border-slate-800 flex flex-col">
-            <div className="bg-slate-100 font-bold text-center py-1.5 border-b-2 border-slate-800">
-              控除
-            </div>
-            <div className="p-3 space-y-1.5 flex-1 min-h-[220px]">
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>健康保険料</span>
-                <span>{formatCurrency(calcResult.health)}</span>
-              </div>
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>厚生年金保険料</span>
-                <span>{formatCurrency(calcResult.pension)}</span>
-              </div>
-              {calcResult.nursing > 0 && (
-                <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                  <span>介護保険料</span>
-                  <span>{formatCurrency(calcResult.nursing)}</span>
-                </div>
-              )}
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>雇用保険料</span>
-                <span>{formatCurrency(calcResult.employment)}</span>
-              </div>
-              {calcResult.childCare > 0 && (
-                <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                  <span>子ども・子育て支援金</span>
-                  <span>{formatCurrency(calcResult.childCare)}</span>
-                </div>
-              )}
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>所得税</span>
-                <span>{formatCurrency(calcResult.incomeTax)}</span>
-              </div>
-              <div className="flex justify-between border-b border-slate-300 border-dashed pb-0.5">
-                <span>住民税</span>
-                <span>{formatCurrency(rowData.residentTax)}</span>
-              </div>
-              {deductionDefs.map((def) => (
-                <div
-                  key={def.id}
-                  className="flex justify-between border-b border-slate-300 border-dashed pb-0.5"
-                >
-                  <span>{def.name}</span>
-                  <span>
-                    {formatCurrency(rowData.deductionAmounts?.[def.id])}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="p-3 flex justify-between font-black border-t-2 border-slate-800 bg-red-50/50">
-              <span>控除合計</span>
-              <span>{formatCurrency(calcResult.totalDeductions)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex justify-between items-end mt-4">
-          <div className="w-[50%] flex flex-col gap-2">
-            <div className="text-[10px] text-slate-500 p-2 border border-slate-300 rounded min-h-[48px] whitespace-pre-wrap">
-              {settings.memo || "備考："}
-            </div>
-            {/* ★修正1：月次でも taxWarning があれば表示する */}
-            {calcResult.taxWarning && (
-              <div className="text-xs text-red-700 font-bold bg-red-50 border border-red-200 rounded p-2 mt-2">
-                ⚠️ {calcResult.taxWarning}
-              </div>
-            )}
-          </div>
-          <div className="w-[45%] flex justify-between items-center bg-slate-100 p-3 border-2 border-slate-800 font-black text-xl">
-            <span>差引支給額</span>
-            <span>¥{formatCurrency(calcResult.netPay)}</span>
-          </div>
-        </div>
-
-        {calcResult.calcLog && (
-          <details className="mt-6 bg-slate-50 border border-slate-200 rounded-lg no-print transition-all">
-            <summary className="p-3 text-xs font-bold text-slate-600 cursor-pointer outline-none hover:bg-slate-100 flex items-center gap-2">
-              <Info size={14} className="text-indigo-500" />{" "}
-              計算の裏側を見る（監査用ログ）
-            </summary>
-            <div className="p-4 border-t border-slate-200 text-[11px] font-mono text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed">
-              {calcResult.calcLog.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </div>
-          </details>
-        )}
       </div>
-    );
-  };
+
+      {/* 社員情報 ＆ 会社情報 */}
+      <div className="flex justify-between items-start mb-6 px-2">
+        <div className="w-1/2">
+          <div className="text-sm text-gray-600 mb-1">社員コード: {emp.master.employeeCode || "-"}</div>
+          <div className="text-2xl font-bold border-b border-black inline-block min-w-[250px] pb-1">
+            {emp.master.name} <span className="text-base font-normal ml-2">様</span>
+          </div>
+        </div>
+        <div className="w-1/2 text-right text-sm leading-relaxed">
+          <div className="font-bold text-lg mb-1">{settings.companyName || "会社名未設定"}</div>
+          {settings.companyAddress && <div className="text-gray-700">{settings.companyAddress}</div>}
+          {settings.companyPhone && <div className="text-gray-700">TEL: {settings.companyPhone}</div>}
+        </div>
+      </div>
+
+      {/* 警告メッセージ */}
+      {calcResult.taxWarning && (
+        <div className="text-xs text-red-700 font-bold border-2 border-red-500 p-2 mb-4">
+          ⚠ {calcResult.taxWarning}
+        </div>
+      )}
+
+      {/* 明細テーブル */}
+      <div className="border-2 border-black">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-gray-100 border-b-2 border-black divide-x border-gray-400">
+              {!isBonus && (
+                <th colSpan="2" className="py-2 w-1/4 border-r border-gray-400 text-center font-bold">勤怠</th>
+              )}
+              <th colSpan="2" className={`py-2 ${isBonus ? 'w-1/2' : 'w-1/4'} border-r border-gray-400 text-center font-bold`}>支給</th>
+              <th colSpan="2" className={`py-2 ${isBonus ? 'w-1/2' : 'w-1/4'} text-center font-bold`}>控除</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((_, i) => (
+              <tr key={i} className="border-b border-gray-300 border-dashed last:border-b-0 divide-x divide-gray-300">
+                {/* 勤怠カラム */}
+                {!isBonus && (
+                  <>
+                    <td className="px-2 py-1.5 bg-gray-50/50 w-[12.5%]">{attendanceItems[i]?.label || ""}</td>
+                    <td className="px-2 py-1.5 text-right w-[12.5%] border-r border-gray-400 font-mono">{attendanceItems[i]?.value || ""}</td>
+                  </>
+                )}
+                {/* 支給カラム */}
+                <td className="px-2 py-1.5 bg-gray-50/50 w-[12.5%]">{paymentItems[i]?.label || ""}</td>
+                <td className="px-2 py-1.5 text-right w-[12.5%] border-r border-gray-400 font-mono">{paymentItems[i]?.value || ""}</td>
+                {/* 控除カラム */}
+                <td className="px-2 py-1.5 bg-gray-50/50 w-[12.5%]">{deductionItems[i]?.label || ""}</td>
+                <td className="px-2 py-1.5 text-right w-[12.5%] font-mono">{deductionItems[i]?.value || ""}</td>
+              </tr>
+            ))}
+            {/* 合計行 */}
+            <tr className="border-t-2 border-black divide-x divide-gray-400 font-bold bg-gray-100">
+              {!isBonus && (
+                <td colSpan="2" className="px-2 py-2 border-r border-gray-400"></td>
+              )}
+              <td className="px-2 py-2">支給合計</td>
+              <td className="px-2 py-2 text-right border-r border-gray-400 font-mono text-base">
+                {formatCurrency(calcResult.grossPay)}
+              </td>
+              <td className="px-2 py-2">控除合計</td>
+              <td className="px-2 py-2 text-right font-mono text-base">
+                {formatCurrency(calcResult.totalDeductions)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* 備考 ＆ 差引支給額 */}
+      <div className="flex justify-between items-end mt-6">
+        <div className="w-1/2 pr-4">
+          <div className="text-xs text-gray-500 mb-1">備考</div>
+          <div className="border border-gray-400 p-2 min-h-[60px] text-xs whitespace-pre-wrap">
+            {settings.memo}
+          </div>
+        </div>
+        <div className="w-1/2 flex border-2 border-black">
+          <div className="w-2/5 bg-gray-100 flex items-center justify-center font-bold text-sm border-r border-black tracking-widest">
+            差引支給額
+          </div>
+          <div className="w-3/5 text-right p-3 text-3xl font-black font-mono tracking-tighter">
+            <span className="text-xl mr-1 font-sans font-bold">¥</span>{formatCurrency(calcResult.netPay)}
+          </div>
+        </div>
+      </div>
+      
+      {calcResult.calcLog && (
+        <details className="mt-6 bg-slate-50 border border-slate-200 rounded-lg no-print transition-all">
+          <summary className="p-3 text-xs font-bold text-slate-600 cursor-pointer outline-none hover:bg-slate-100 flex items-center gap-2">
+            <Info size={14} className="text-indigo-500" />{" "}
+            計算の裏側を見る（監査用ログ）
+          </summary>
+          <div className="p-4 border-t border-slate-200 text-[11px] font-mono text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed">
+            {calcResult.calcLog.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+};
 
   if (loading)
     return (
@@ -11140,12 +11063,20 @@ const App = () => {
         main ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
         @media print {
-          @page { size: landscape; margin: 10mm; }
+          /* A4用紙設定（縦向きの場合は portrait、横向きの場合は landscape にします） */
+          @page { size: A4 portrait; margin: 15mm; }
           body * { visibility: hidden; }
           .print-area, .print-area * { visibility: visible; }
           .print-area { position: absolute; top: 0; left: 0; width: 100%; margin: 0; padding: 0; box-shadow: none !important; border: none !important; }
           .no-print, .no-print * { display: none !important; }
-          .slip-page { page-break-after: always; break-after: page; }
+          
+          /* A4の紙幅に合わせて強制的にスケールさせる */
+          .slip-page { 
+            page-break-after: always; 
+            break-after: page;
+            width: 100% !important;
+            max-width: 100% !important;
+          }
           .slip-page:last-child { page-break-after: auto; break-after: auto; }
         }
 

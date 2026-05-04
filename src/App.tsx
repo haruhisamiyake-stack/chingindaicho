@@ -1808,14 +1808,14 @@ const App = () => {
 
   // テナントスコープのショートカット
   const getTenantCol = (pathKey) => {
-    if (!tenantId) throw new Error("user未認証");
+    if (!tenantId) throw new Error("tenant未選択");
     const map = {
       employees: () => getCol(...PATHS.employees(tenantId)),
     };
     return map[pathKey]();
   };
   const getTenantDoc = (pathKey) => {
-    if (!tenantId) throw new Error("user未認証");
+    if (!tenantId) throw new Error("tenant未選択");
     const map = {
       settings:     () => getDocRef(...PATHS.settings(tenantId)),
       monthlyLocks: () => getDocRef(...PATHS.monthlyLocks(tenantId)),
@@ -2430,6 +2430,13 @@ const App = () => {
       setSelectedEmployeeId(Object.keys(employees)[0]);
     }
   }, [employees, selectedEmployeeId]);
+
+  // テナント切替時：編集系ステートをクリア
+  useEffect(() => {
+    setSelectedEmployeeId(null);
+    setEditingEmployeeId(null);
+    setEditingMaster(null);
+  }, [selectedTenantId]);
 
   // 【修正⑦】データ移行処理（旧データが存在し、settingsが未設定の場合に自動コピー）
   useEffect(() => {

@@ -1589,12 +1589,18 @@ const calculateBonusResult = ({
 
   const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
   const _westernYearB = reiwaToWestern(yearStr) || 2026;
-  const targetYearMonth = `${_westernYearB}-${monthKeyForRates}`;
-  const hRate = resolveRate(lastMonthRow.healthRate, settings?.rateSchedules?.health, targetYearMonth, 5.0);
-  const pRate = resolveRate(lastMonthRow.pensionRate, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
-  const nRate = resolveRate(lastMonthRow.nursingRate, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
-  const cRate = resolveRate(lastMonthRow.childCareRate, settings?.rateSchedules?.childCare, targetYearMonth, 0.0);
-  const eRate = resolveRate(lastMonthRow.employmentRate, settings?.rateSchedules?.employment, targetYearMonth, 6.0);
+  const bonusTargetYearMonth = bonusRow.payDate
+    ? bonusRow.payDate.slice(0, 7)
+    : `${_westernYearB}-${monthKeyForRates}`;
+  const bonusMonthKey = bonusRow.payDate
+    ? bonusRow.payDate.slice(5, 7)
+    : monthKeyForRates;
+  const bonusMonthRow = yearData.monthly?.[bonusMonthKey] || {};
+  const hRate = resolveRate(bonusMonthRow.healthRate, settings?.rateSchedules?.health, bonusTargetYearMonth, 5.0);
+  const pRate = resolveRate(bonusMonthRow.pensionRate, settings?.rateSchedules?.pension, bonusTargetYearMonth, 9.15);
+  const nRate = resolveRate(bonusMonthRow.nursingRate, settings?.rateSchedules?.nursing, bonusTargetYearMonth, 0.8);
+  const cRate = resolveRate(bonusMonthRow.childCareRate, settings?.rateSchedules?.childCare, bonusTargetYearMonth, 0.0);
+  const eRate = resolveRate(bonusMonthRow.employmentRate, settings?.rateSchedules?.employment, bonusTargetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -1606,7 +1612,7 @@ const calculateBonusResult = ({
       ? master.pensionIns === 1
       : master.socialIns === 1;
   const hasEmployment = master.employmentIns === 1;
-  const hasNursing = hasHealth && lastMonthRow.hasNursingIns === 1;
+  const hasNursing = hasHealth && bonusMonthRow.hasNursingIns === 1;
 
   const manualPriorStd = Number(b.manualPriorHealthStd) || 0;
   let priorHealthBonusStdTotal = manualPriorStd;

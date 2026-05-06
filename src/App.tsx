@@ -53,12 +53,29 @@ const MONTHS = [
 
 // --- 初期設定データ定義 ---
 const DEFAULT_RATE_SCHEDULES = {
-  health: [{ startMonth: "01", rate: 5.0 }],
-  pension: [{ startMonth: "01", rate: 9.15 }],
-  nursing: [{ startMonth: "01", rate: 0.8 }],
-  childCare: [{ startMonth: "01", rate: 0.0 }],
-  employment: [{ startMonth: "01", rate: 6.0 }],
+  health: [{ startYearMonth: "2000-01", rate: 5.0 }],
+  pension: [{ startYearMonth: "2000-01", rate: 9.15 }],
+  nursing: [{ startYearMonth: "2000-01", rate: 0.8 }],
+  childCare: [{ startYearMonth: "2000-01", rate: 0.0 }],
+  employment: [{ startYearMonth: "2000-01", rate: 6.0 }],
 };
+// rateSchedules 旧形式(startMonth)→新形式(startYearMonth)互換変換
+const migrateRateSchedules = (rateSchedules, editableYear) => {
+  const westernYear = reiwaToWestern(editableYear) || 2026;
+  const keys = ['health', 'pension', 'nursing', 'childCare', 'employment'];
+  const result = {};
+  keys.forEach(key => {
+    const sched = rateSchedules[key] || [];
+    result[key] = sched.map(row => {
+      if (row.startYearMonth) return row;
+      const m = String(row.startMonth || '01').padStart(2, '0');
+      return { startYearMonth: `${westernYear}-${m}`, rate: row.rate };
+    });
+    if (result[key].length === 0) result[key] = DEFAULT_RATE_SCHEDULES[key];
+  });
+  return result;
+};
+
 
 const DEFAULT_STD_REWARD_TABLE = [
   { grade: 1, min: 0, max: 63000, monthlyAmount: 58000 },
@@ -315,6 +332,13 @@ const normalizeYear = (yStr) => {
   const numPart = String(yStr).replace("R", "");
   return `R${numPart.padStart(2, "0")}`;
 };
+// 和暦(Reiwa)を西暦(YYYY)に変換
+const reiwaToWestern = (rStr) => {
+  if (!rStr) return null;
+  const n = parseInt(String(rStr).replace(/^R/, ''), 10);
+  return isNaN(n) ? null : 2018 + n;
+};
+
 
 const buildYearsList = (employees, settings) => {
   const yearSet = new Set();
@@ -347,14 +371,14 @@ const buildYearsList = (employees, settings) => {
 };
 
 // --- ヘルパー関数 ---
-const getRateForMonth = (schedule = [], monthKey) => {
+const getRateForMonth = (schedule = [], targetYearMonth) => {
   if (!schedule || schedule.length === 0) return 0;
   const sorted = [...schedule].sort(
-    (a, b) => Number(a.startMonth) - Number(b.startMonth)
+    (a, b) => (a.startYearMonth || "").localeCompare(b.startYearMonth || "")
   );
   let currentRate = Number(sorted[0].rate) || 0;
   sorted.forEach((row) => {
-    if (Number(row.startMonth) <= Number(monthKey)) {
+    if ((row.startYearMonth || "") <= targetYearMonth) {
       currentRate = Number(row.rate) || 0;
     }
   });
@@ -362,12 +386,12 @@ const getRateForMonth = (schedule = [], monthKey) => {
 };
 
 // 優先順位: 個別月設定 > 全体設定(rateSchedules) > デフォルト値
-const resolveRate = (individualValue, schedule, monthKey, defaultValue) => {
+const resolveRate = (individualValue, schedule, targetYearMonth, defaultValue) => {
   if (individualValue !== undefined && individualValue !== null && individualValue !== "") {
     return Number(individualValue);
   }
   if (schedule && schedule.length > 0) {
-    return getRateForMonth(schedule, monthKey);
+    return getRateForMonth(schedule, targetYearMonth);
   }
   return defaultValue;
 };
@@ -1259,11 +1283,13 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     amount: Number(row.deductionAmounts?.[def.id]) || 0,
   }));
 
-  const hRate = resolveRate(row.healthRate, settings?.rateSchedules?.health, monthKey, 5.0);
-  const pRate = resolveRate(row.pensionRate, settings?.rateSchedules?.pension, monthKey, 9.15);
-  const nRate = resolveRate(row.nursingRate, settings?.rateSchedules?.nursing, monthKey, 0.8);
-  const cRate = resolveRate(row.childCareRate, settings?.rateSchedules?.childCare, monthKey, 0.0);
-  const eRate = resolveRate(row.employmentRate, settings?.rateSchedules?.employment, monthKey, 6.0);
+  const _westernYear = reiwaToWestern(yearStr) || 2026;
+  const targetYearMonth = `${_westernYear}-${monthKey}`;
+  const hRate = resolveRate(row.healthRate, settings?.rateSchedules?.health, targetYearMonth, 5.0);
+  const pRate = resolveRate(row.pensionRate, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
+  const nRate = resolveRate(row.nursingRate, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
+  const cRate = resolveRate(row.childCareRate, settings?.rateSchedules?.childCare, targetYearMonth, 0.0);
+  const eRate = resolveRate(row.employmentRate, settings?.rateSchedules?.employment, targetYearMonth, 6.0);
 
   const hasHealth =
     master.healthIns !== undefined
@@ -1562,11 +1588,13 @@ const calculateBonusResult = ({
   });
 
   const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
-  const hRate = resolveRate(lastMonthRow.healthRate, settings?.rateSchedules?.health, monthKeyForRates, 5.0);
-  const pRate = resolveRate(lastMonthRow.pensionRate, settings?.rateSchedules?.pension, monthKeyForRates, 9.15);
-  const nRate = resolveRate(lastMonthRow.nursingRate, settings?.rateSchedules?.nursing, monthKeyForRates, 0.8);
-  const cRate = resolveRate(lastMonthRow.childCareRate, settings?.rateSchedules?.childCare, monthKeyForRates, 0.0);
-  const eRate = resolveRate(lastMonthRow.employmentRate, settings?.rateSchedules?.employment, monthKeyForRates, 6.0);
+  const _westernYearB = reiwaToWestern(yearStr) || 2026;
+  const targetYearMonth = `${_westernYearB}-${monthKeyForRates}`;
+  const hRate = resolveRate(lastMonthRow.healthRate, settings?.rateSchedules?.health, targetYearMonth, 5.0);
+  const pRate = resolveRate(lastMonthRow.pensionRate, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
+  const nRate = resolveRate(lastMonthRow.nursingRate, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
+  const cRate = resolveRate(lastMonthRow.childCareRate, settings?.rateSchedules?.childCare, targetYearMonth, 0.0);
+  const eRate = resolveRate(lastMonthRow.employmentRate, settings?.rateSchedules?.employment, targetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -2385,10 +2413,10 @@ const App = () => {
         setSettings({
           ...DEFAULT_SETTINGS,
           ...d,
-          rateSchedules: {
-            ...DEFAULT_RATE_SCHEDULES,
-            ...(d.rateSchedules || {}),
-          },
+          rateSchedules: migrateRateSchedules(
+            { ...DEFAULT_RATE_SCHEDULES, ...(d.rateSchedules || {}) },
+            d.editableYear || DEFAULT_SETTINGS.editableYear
+          ),
           standardRewardTable: Array.isArray(d.standardRewardTable) && d.standardRewardTable.length > 0
             ? d.standardRewardTable
             : DEFAULT_STD_REWARD_TABLE,
@@ -6451,7 +6479,7 @@ const App = () => {
                                   ]
                                     ? getRateForMonth(
                                         settings.rateSchedules[rateKey],
-                                        m
+                                        `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`
                                       )
                                     : currentYearData.monthly[m]?.[
                                         rateKey + "Rate"
@@ -7591,13 +7619,13 @@ const App = () => {
                         employment: "雇用保険料率 (‰)",
                       };
                       const schedule = settings.rateSchedules?.[typeKey] || [
-                        { startMonth: "01", rate: 0 },
+                        { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
                       ];
 
                       const addSchedule = () => {
                         const newSched = [
                           ...schedule,
-                          { startMonth: "01", rate: 0 },
+                          { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
                         ];
                         handleSettingChange("rateSchedules", {
                           ...settings.rateSchedules,
@@ -7608,7 +7636,7 @@ const App = () => {
                         const newSched = [...schedule];
                         newSched.splice(idx, 1);
                         if (newSched.length === 0)
-                          newSched.push({ startMonth: "01", rate: 0 });
+                          newSched.push({ startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 });
                         handleSettingChange("rateSchedules", {
                           ...settings.rateSchedules,
                           [typeKey]: newSched,
@@ -7637,23 +7665,18 @@ const App = () => {
                                 key={idx}
                                 className="flex items-center gap-2"
                               >
-                                <select
-                                  value={item.startMonth}
+                                <input
+                                  type="month"
+                                  value={item.startYearMonth || ""}
                                   onChange={(e) =>
                                     updateSchedule(
                                       idx,
-                                      "startMonth",
+                                      "startYearMonth",
                                       e.target.value
                                     )
                                   }
-                                  className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400"
-                                >
-                                  {MONTHS.map((m) => (
-                                    <option key={m} value={m}>
-                                      {parseInt(m, 10)}月支給分から
-                                    </option>
-                                  ))}
-                                </select>
+                                  className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36"
+                                />
                                 <input
                                   type="number"
                                   step="0.01"
@@ -8865,7 +8888,8 @@ const App = () => {
           };
 
           const addRow = (typeKey) => {
-            const newLocal = { ...local, [typeKey]: [...(local[typeKey] || []), { startMonth: "01", rate: 0 }] };
+            const _defYear = reiwaToWestern(settings?.editableYear) || 2026;
+            const newLocal = { ...local, [typeKey]: [...(local[typeKey] || []), { startYearMonth: `${_defYear}-01`, rate: 0 }] };
             setLocalRateSchedules(newLocal);
           };
 
@@ -8884,12 +8908,12 @@ const App = () => {
               }
               const seenMonths = new Set();
               rows.forEach((r, i) => {
-                if (!r.startMonth) errors.push(label + " " + (i+1) + "行目：適用開始月を選択してください");
+                if (!r.startYearMonth) errors.push(label + " " + (i+1) + "行目：適用開始年月を入力してください");
                 if (r.rate === "" || r.rate === undefined || r.rate === null) errors.push(label + " " + (i+1) + "行目：料率を入力してください");
                 if (Number(r.rate) < 0) errors.push(label + " " + (i+1) + "行目：料率は0以上にしてください");
-                if (r.startMonth) {
-                  if (seenMonths.has(r.startMonth)) errors.push(label + "：" + parseInt(r.startMonth, 10) + "月が重複しています");
-                  seenMonths.add(r.startMonth);
+                if (r.startYearMonth) {
+                  if (seenMonths.has(r.startYearMonth)) errors.push(label + "：" + r.startYearMonth + "が重複しています");
+                  seenMonths.add(r.startYearMonth);
                 }
               });
             });
@@ -8900,7 +8924,7 @@ const App = () => {
             setRateTableErrors([]);
             const sorted = {};
             rateTypes.forEach(({ key }) => {
-              sorted[key] = [...(local[key] || [])].sort((a, b) => Number(a.startMonth) - Number(b.startMonth));
+              sorted[key] = [...(local[key] || [])].sort((a, b) => (a.startYearMonth || '').localeCompare(b.startYearMonth || ''));
             });
             setLocalRateSchedules(sorted);
             handleSettingChange("rateSchedules", sorted);
@@ -8937,7 +8961,7 @@ const App = () => {
 
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-xs text-amber-800 space-y-1">
                   <p>・料率の適用優先順位：<strong>①個別月設定（賃金台帳の各月に直接入力した料率）</strong> ＞ ②このマスタ設定 ＞ ③システムデフォルト値</p>
-                  <p>・各料率タイプに「適用開始月」を複数登録できます。指定月以降はその料率が適用されます（年内の月次変更に対応）。</p>
+                  <p>・各料率タイプに「適用開始年月」を複数登録できます。指定年月以降はその料率が適用されます（年度をまたぐ変更に対応）。</p>
                   <p>・ロック済みの月は過去データを保護します。料率変更は未ロック月にのみ影響します。</p>
                   <p>・「雇用保険料率」は <strong>‰（千分率）</strong> で入力してください（例：6.0‰ = 0.6%）。その他は <strong>%（百分率）</strong> です。</p>
                 </div>
@@ -8953,7 +8977,7 @@ const App = () => {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {rateTypes.map(({ key, label, unit, defaultRate }) => {
-                    const rows = local[key] || [{ startMonth: "01", rate: defaultRate }];
+                    const rows = local[key] || [{ startYearMonth: `${reiwaToWestern(settings?.editableYear) || 2026}-01`, rate: defaultRate }];
                     return (
                       <div key={key} className="border border-slate-200 rounded-xl overflow-hidden">
                         <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex items-center justify-between">
@@ -8963,7 +8987,7 @@ const App = () => {
                         <table className="w-full text-xs border-collapse">
                           <thead>
                             <tr className="bg-slate-100 text-slate-500 font-black">
-                              <th className="p-2 border-b border-r text-center w-28">適用開始月</th>
+                              <th className="p-2 border-b border-r text-center w-36">適用開始年月</th>
                               <th className="p-2 border-b border-r text-right">料率 ({unit})</th>
                               <th className="p-2 border-b text-center w-10"></th>
                             </tr>
@@ -8972,13 +8996,12 @@ const App = () => {
                             {rows.map((row, idx) => (
                               <tr key={idx} className="hover:bg-slate-50">
                                 <td className="p-1 border-b border-r text-center">
-                                  <select
-                                    value={row.startMonth || "01"}
-                                    onChange={(e) => updateRow(key, idx, "startMonth", e.target.value)}
+                                  <input
+                                    type="month"
+                                    value={row.startYearMonth || ""}
+                                    onChange={(e) => updateRow(key, idx, "startYearMonth", e.target.value)}
                                     className="w-full text-center bg-transparent outline-none border border-slate-200 rounded px-1 py-0.5 focus:border-emerald-400"
-                                  >
-                                    {MONTHS.map(m => <option key={m} value={m}>{parseInt(m, 10)}月</option>)}
-                                  </select>
+                                  />
                                 </td>
                                 <td className="p-1 border-b border-r">
                                   <input

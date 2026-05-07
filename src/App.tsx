@@ -6813,7 +6813,8 @@ const App = () => {
                                           />
                                           手動
                                         </label>}
-                                        {false && manualEnabled ? (
+                                        {false && (
+                                          manualEnabled ? (
                                           <input
                                             type="number"
                                             step="0.001"
@@ -6826,7 +6827,7 @@ const App = () => {
                                           <span className="font-bold text-indigo-400">
                                             {rateDisplay}
                                           </span>
-                                        )}
+                                        ))}
                                         {snapshotVal !== undefined && snapshotVal !== null && snapshotVal !== "" && (
                                           <div className="text-[7px] text-amber-600 font-normal">
                                             締:{snapshotDisplay}{unit}
@@ -8022,7 +8023,8 @@ const App = () => {
                                           />
                                           手動
                                         </label>}
-                                        {false && manualEnabled ? (
+                                        {false && (
+                                          manualEnabled ? (
                                           <input
                                             type="number"
                                             step="0.001"
@@ -8035,7 +8037,7 @@ const App = () => {
                                           <span className="font-bold text-indigo-400">
                                             {Number.isFinite(Number(rateVal)) ? Number(rateVal).toFixed(3) : "-"}
                                           </span>
-                                        )}
+                                        ))}
                                       </div>
                                     </td>
                                   );

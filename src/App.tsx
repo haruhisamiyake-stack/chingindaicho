@@ -387,7 +387,8 @@ const getRateForMonth = (schedule = [], targetYearMonth) => {
   return currentRate;
 };
 
-// 優先順位: 締め時スナップショット > 個別月設定 > 全体設定(rateSchedules) > デフォルト値
+// 優先順位: 締め時スナップショット > 会社個別/全体の料率スケジュール > デフォルト値
+// ※ individualValue は現在、通常の社会保険料率計算では原則 null を渡す設計
 const resolveRate = (individualValue, snapshotValue, schedule, targetYearMonth, defaultValue) => {
   if (snapshotValue !== undefined && snapshotValue !== null && snapshotValue !== "") {
     return Number(snapshotValue);
@@ -1290,14 +1291,19 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
 
   const _westernYear = reiwaToWestern(yearStr) || 2026;
   const targetYearMonth = `${_westernYear}-${monthKey}`;
-  const hRate = resolveRate(row.healthRateManualEnabled ? row.healthRate : null, row.lockedSnapshotRates?.health, settings?.rateSchedules?.health, targetYearMonth, 5.0);
-  const pRate = resolveRate(row.pensionRateManualEnabled ? row.pensionRate : null, row.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
-  const nRate = resolveRate(row.nursingRateManualEnabled ? row.nursingRate : null, row.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
-  const cRate = resolveRate(row.childCareRateManualEnabled ? row.childCareRate : null, row.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, targetYearMonth, 0.115);
   const businessType = settings?.businessType || "general";
   const _eSchedKey = businessType === "construction" ? "employmentConstruction" : "employmentGeneral";
-  const _eSchedule = settings?.rateSchedules?.[_eSchedKey] || settings?.rateSchedules?.employment; // legacy fallback (migration compatibility only)
-  const eRate = resolveRate(row.employmentRateManualEnabled ? row.employmentRate : null, row.lockedSnapshotRates?.employment, _eSchedule, targetYearMonth, 6.0);
+  const healthSchedule = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
+  const pensionSchedule = settings?.customRateSchedules?.pension?.enabled ? settings.customRateSchedules.pension.schedules : settings?.rateSchedules?.pension;
+  const nursingSchedule = settings?.customRateSchedules?.nursing?.enabled ? settings.customRateSchedules.nursing.schedules : settings?.rateSchedules?.nursing;
+  const childCareSchedule = settings?.customRateSchedules?.childCare?.enabled ? settings.customRateSchedules.childCare.schedules : settings?.rateSchedules?.childCare;
+  const _eGlobalSchedule = settings?.rateSchedules?.[_eSchedKey] || settings?.rateSchedules?.employment; // legacy fallback (migration compatibility only)
+  const employmentSchedule = settings?.customRateSchedules?.[_eSchedKey]?.enabled ? settings.customRateSchedules[_eSchedKey].schedules : _eGlobalSchedule;
+  const hRate = resolveRate(null, row.lockedSnapshotRates?.health, healthSchedule, targetYearMonth, 5.0);
+  const pRate = resolveRate(null, row.lockedSnapshotRates?.pension, pensionSchedule, targetYearMonth, 9.15);
+  const nRate = resolveRate(null, row.lockedSnapshotRates?.nursing, nursingSchedule, targetYearMonth, 0.8);
+  const cRate = resolveRate(null, row.lockedSnapshotRates?.childCare, childCareSchedule, targetYearMonth, 0.115);
+  const eRate = resolveRate(null, row.lockedSnapshotRates?.employment, employmentSchedule, targetYearMonth, 6.0);
 
   const hasHealth =
     master.healthIns !== undefined
@@ -1604,14 +1610,19 @@ const calculateBonusResult = ({
     ? bonusRow.payDate.slice(5, 7)
     : monthKeyForRates;
   const bonusMonthRow = yearData.monthly?.[bonusMonthKey] || {};
-  const hRate = resolveRate(bonusMonthRow.healthRateManualEnabled ? bonusMonthRow.healthRate : null, bonusMonthRow.lockedSnapshotRates?.health, settings?.rateSchedules?.health, bonusTargetYearMonth, 5.0);
-  const pRate = resolveRate(bonusMonthRow.pensionRateManualEnabled ? bonusMonthRow.pensionRate : null, bonusMonthRow.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, bonusTargetYearMonth, 9.15);
-  const nRate = resolveRate(bonusMonthRow.nursingRateManualEnabled ? bonusMonthRow.nursingRate : null, bonusMonthRow.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, bonusTargetYearMonth, 0.8);
-  const cRate = resolveRate(bonusMonthRow.childCareRateManualEnabled ? bonusMonthRow.childCareRate : null, bonusMonthRow.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, bonusTargetYearMonth, 0.115);
   const businessType = settings?.businessType || "general";
   const _eSchedKey = businessType === "construction" ? "employmentConstruction" : "employmentGeneral";
-  const _eSchedule = settings?.rateSchedules?.[_eSchedKey] || settings?.rateSchedules?.employment; // legacy fallback (migration compatibility only)
-  const eRate = resolveRate(bonusMonthRow.employmentRateManualEnabled ? bonusMonthRow.employmentRate : null, bonusMonthRow.lockedSnapshotRates?.employment, _eSchedule, bonusTargetYearMonth, 6.0);
+  const healthSchedule = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
+  const pensionSchedule = settings?.customRateSchedules?.pension?.enabled ? settings.customRateSchedules.pension.schedules : settings?.rateSchedules?.pension;
+  const nursingSchedule = settings?.customRateSchedules?.nursing?.enabled ? settings.customRateSchedules.nursing.schedules : settings?.rateSchedules?.nursing;
+  const childCareSchedule = settings?.customRateSchedules?.childCare?.enabled ? settings.customRateSchedules.childCare.schedules : settings?.rateSchedules?.childCare;
+  const _eGlobalSchedule = settings?.rateSchedules?.[_eSchedKey] || settings?.rateSchedules?.employment; // legacy fallback (migration compatibility only)
+  const employmentSchedule = settings?.customRateSchedules?.[_eSchedKey]?.enabled ? settings.customRateSchedules[_eSchedKey].schedules : _eGlobalSchedule;
+  const hRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.health, healthSchedule, bonusTargetYearMonth, 5.0);
+  const pRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.pension, pensionSchedule, bonusTargetYearMonth, 9.15);
+  const nRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.nursing, nursingSchedule, bonusTargetYearMonth, 0.8);
+  const cRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.childCare, childCareSchedule, bonusTargetYearMonth, 0.115);
+  const eRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.employment, employmentSchedule, bonusTargetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -2587,12 +2598,20 @@ const App = () => {
     const snapshotPromises = Object.entries(employees || {}).map(async ([empId, emp]) => {
       const row = emp.data?.years?.[yearStr]?.monthly?.[monthKey];
       if (!row) return;
+      const _snapBizType = settings?.businessType || "general";
+      const _snapEKey = _snapBizType === "construction" ? "employmentConstruction" : "employmentGeneral";
+      const _snapHealthSched = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
+      const _snapPensionSched = settings?.customRateSchedules?.pension?.enabled ? settings.customRateSchedules.pension.schedules : settings?.rateSchedules?.pension;
+      const _snapNursingSched = settings?.customRateSchedules?.nursing?.enabled ? settings.customRateSchedules.nursing.schedules : settings?.rateSchedules?.nursing;
+      const _snapChildCareSched = settings?.customRateSchedules?.childCare?.enabled ? settings.customRateSchedules.childCare.schedules : settings?.rateSchedules?.childCare;
+      const _snapEGlobalSched = settings?.rateSchedules?.[_snapEKey] || settings?.rateSchedules?.employment;
+      const _snapEmploymentSched = settings?.customRateSchedules?.[_snapEKey]?.enabled ? settings.customRateSchedules[_snapEKey].schedules : _snapEGlobalSched;
       const lockedSnapshotRates = {
-        health: resolveRate(row.healthRateManualEnabled ? row.healthRate : null, null, settings?.rateSchedules?.health, targetYearMonth, 5.0),
-        pension: resolveRate(row.pensionRateManualEnabled ? row.pensionRate : null, null, settings?.rateSchedules?.pension, targetYearMonth, 9.15),
-        nursing: resolveRate(row.nursingRateManualEnabled ? row.nursingRate : null, null, settings?.rateSchedules?.nursing, targetYearMonth, 0.8),
-        childCare: resolveRate(row.childCareRateManualEnabled ? row.childCareRate : null, null, settings?.rateSchedules?.childCare, targetYearMonth, 0.115),
-        employment: resolveRate(row.employmentRateManualEnabled ? row.employmentRate : null, null, settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment, targetYearMonth, 6.0),
+        health: resolveRate(null, null, _snapHealthSched, targetYearMonth, 5.0),
+        pension: resolveRate(null, null, _snapPensionSched, targetYearMonth, 9.15),
+        nursing: resolveRate(null, null, _snapNursingSched, targetYearMonth, 0.8),
+        childCare: resolveRate(null, null, _snapChildCareSched, targetYearMonth, 0.115),
+        employment: resolveRate(null, null, _snapEmploymentSched, targetYearMonth, 6.0),
       };
       await saveDoc(PATHS.employee(tenantId, empId), {
         data: { years: { [yearStr]: { monthly: { [monthKey]: { lockedSnapshotRates } } } } }
@@ -7758,6 +7777,11 @@ const App = () => {
                       const schedule = settings.rateSchedules?.[typeKey] || [
                         { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
                       ];
+                      const customRSEnabled = settings?.customRateSchedules?.[typeKey]?.enabled === true;
+                      const customSchedule = settings?.customRateSchedules?.[typeKey]?.schedules || [
+                        { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
+                      ];
+                      const unitLabel = typeKey.includes("employment") ? "‰" : "%";
 
                       const addSchedule = () => {
                         const newSched = [
@@ -7787,67 +7811,141 @@ const App = () => {
                           [typeKey]: newSched,
                         });
                       };
+                      const addCustomSchedule = () => {
+                        const newSched = [
+                          ...customSchedule,
+                          { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
+                        ];
+                        handleSettingChange("customRateSchedules", {
+                          ...settings?.customRateSchedules,
+                          [typeKey]: { ...(settings?.customRateSchedules?.[typeKey] || {}), schedules: newSched },
+                        });
+                      };
+                      const removeCustomSchedule = (idx) => {
+                        const newSched = [...customSchedule];
+                        newSched.splice(idx, 1);
+                        if (newSched.length === 0)
+                          newSched.push({ startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 });
+                        handleSettingChange("customRateSchedules", {
+                          ...settings?.customRateSchedules,
+                          [typeKey]: { ...(settings?.customRateSchedules?.[typeKey] || {}), schedules: newSched },
+                        });
+                      };
+                      const updateCustomSchedule = (idx, field, val) => {
+                        const newSched = [...customSchedule];
+                        newSched[idx] = { ...newSched[idx], [field]: val };
+                        handleSettingChange("customRateSchedules", {
+                          ...settings?.customRateSchedules,
+                          [typeKey]: { ...(settings?.customRateSchedules?.[typeKey] || {}), schedules: newSched },
+                        });
+                      };
 
                       return (
                         <div
                           key={typeKey}
-                          className="bg-slate-50 p-4 rounded border border-slate-200"
+                          className={`p-4 rounded border ${customRSEnabled ? "bg-blue-50 border-blue-300" : "bg-slate-50 border-slate-200"}`}
                         >
-                          <h4 className="font-bold text-sm text-indigo-700 mb-3 border-b border-indigo-100 pb-1">
-                            {labels[typeKey]}
-                          </h4>
-                          <div className="space-y-2">
-                            {schedule.map((item, idx) => (
-                              <div
-                                key={idx}
-                                className="flex items-center gap-2"
-                              >
-                                <input
-                                  type="month"
-                                  value={item.startYearMonth || ""}
-                                  onChange={(e) =>
-                                    updateSchedule(
-                                      idx,
-                                      "startYearMonth",
-                                      e.target.value
-                                    )
-                                  }
-                                  className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36"
-                                />
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  value={item.rate}
-                                  onChange={(e) =>
-                                    updateSchedule(
-                                      idx,
-                                      "rate",
-                                      Number(e.target.value)
-                                    )
-                                  }
-                                  className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-indigo-400 font-mono"
-                                />
-                                <span className="text-xs text-slate-500">
-                                  {typeKey === "employment" ? "‰" : "%"}
-                                </span>
-                                {schedule.length > 1 && (
-                                  <button
-                                    onClick={() => removeSchedule(idx)}
-                                    className="text-red-400 hover:text-red-600 p-1 ml-auto"
-                                  >
-                                    <Trash2 size={14} />
-                                  </button>
-                                )}
-                              </div>
-                            ))}
+                          <div className="flex items-start justify-between mb-3 border-b border-indigo-100 pb-1">
+                            <h4 className="font-bold text-sm text-indigo-700">
+                              {labels[typeKey]}
+                            </h4>
+                            <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-600 whitespace-nowrap ml-3">
+                              <input
+                                type="checkbox"
+                                checked={customRSEnabled}
+                                onChange={(e) =>
+                                  handleSettingChange("customRateSchedules", {
+                                    ...settings?.customRateSchedules,
+                                    [typeKey]: {
+                                      ...(settings?.customRateSchedules?.[typeKey] || {}),
+                                      enabled: e.target.checked,
+                                      schedules: settings?.customRateSchedules?.[typeKey]?.schedules || [...schedule],
+                                    },
+                                  })
+                                }
+                                className="w-3.5 h-3.5 accent-blue-500"
+                              />
+                              この会社だけ個別料率を使用
+                            </label>
                           </div>
-                          <button
-                            onClick={addSchedule}
-                            className="mt-3 text-xs font-bold text-indigo-600 hover:text-indigo-500 flex items-center gap-1 transition-colors"
-                          >
-                            <PlusCircle size={12} /> 変更月を追加
-                          </button>
-                          {typeKey === "employment" && (
+                          {customRSEnabled ? (
+                            <div>
+                              <p className="text-[10px] text-blue-600 font-bold mb-2">この会社の個別料率を使用中</p>
+                              <div className="space-y-2">
+                                {customSchedule.map((item, idx) => (
+                                  <div key={idx} className="flex items-center gap-2">
+                                    <input
+                                      type="month"
+                                      value={item.startYearMonth || ""}
+                                      onChange={(e) => updateCustomSchedule(idx, "startYearMonth", e.target.value)}
+                                      className="border border-blue-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-blue-500 w-36"
+                                    />
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={item.rate}
+                                      onChange={(e) => updateCustomSchedule(idx, "rate", Number(e.target.value))}
+                                      className="border border-blue-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-blue-500 font-mono text-blue-800"
+                                    />
+                                    <span className="text-xs text-slate-500">{unitLabel}</span>
+                                    {customSchedule.length > 1 && (
+                                      <button
+                                        onClick={() => removeCustomSchedule(idx)}
+                                        className="text-red-400 hover:text-red-600 p-1 ml-auto"
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              <button
+                                onClick={addCustomSchedule}
+                                className="mt-3 text-xs font-bold text-blue-600 hover:text-blue-500 flex items-center gap-1 transition-colors"
+                              >
+                                <PlusCircle size={12} /> 変更月を追加
+                              </button>
+                            </div>
+                          ) : (
+                            <div>
+                              <p className="text-[10px] text-slate-400 italic mb-2">全体設定を使用中</p>
+                              <div className="space-y-2 opacity-60">
+                                {schedule.map((item, idx) => (
+                                  <div key={idx} className="flex items-center gap-2">
+                                    <input
+                                      type="month"
+                                      value={item.startYearMonth || ""}
+                                      onChange={(e) => updateSchedule(idx, "startYearMonth", e.target.value)}
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36"
+                                    />
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={item.rate}
+                                      onChange={(e) => updateSchedule(idx, "rate", Number(e.target.value))}
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-indigo-400 font-mono"
+                                    />
+                                    <span className="text-xs text-slate-500">{unitLabel}</span>
+                                    {schedule.length > 1 && (
+                                      <button
+                                        onClick={() => removeSchedule(idx)}
+                                        className="text-red-400 hover:text-red-600 p-1 ml-auto"
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              <button
+                                onClick={addSchedule}
+                                className="mt-3 text-xs font-bold text-indigo-600 hover:text-indigo-500 flex items-center gap-1 transition-colors"
+                              >
+                                <PlusCircle size={12} /> 変更月を追加
+                              </button>
+                            </div>
+                          )}
+                          {typeKey.includes("employment") && (
                             <p className="text-[10px] text-slate-500 mt-2">
                               ※雇用保険料率は千分率(‰)です。例: 6.0‰ = 0.6%
                             </p>

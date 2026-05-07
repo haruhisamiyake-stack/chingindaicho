@@ -8936,7 +8936,7 @@ const App = () => {
               >
                                {" "}
                 <div
-                  className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[85vh]"
+                  className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[85vh] print-area print:max-h-none print:overflow-visible print:rounded-none"
                   onClick={(e) => e.stopPropagation()}
                 >
                                    {" "}
@@ -8956,7 +8956,7 @@ const App = () => {
                                      {" "}
                   </div>
                                    {" "}
-                  <div className="p-6 overflow-y-auto">
+                  <div className="p-6 overflow-y-auto print:overflow-visible">
                                        {" "}
                     <div className="flex flex-wrap gap-4 mb-6 text-sm font-bold bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
                                            {" "}
@@ -9004,11 +9004,11 @@ const App = () => {
                                            {" "}
                       <div className="flex gap-2 items-center">
                                                {" "}
-                        <span className="text-slate-400">行数:</span>          
+                        <span className="text-slate-400">登録件数:</span>          
                                      {" "}
                         <span className="font-mono text-slate-700">
                                                    {" "}
-                          {taxTables[viewingTaxTableId].rows.length} 行        
+                          {taxTables[viewingTaxTableId].rows.length} 件        
                                          {" "}
                         </span>
                                              {" "}
@@ -9016,7 +9016,42 @@ const App = () => {
                                          {" "}
                     </div>
                                        {" "}
-                    <div className="max-h-[50vh] overflow-y-auto overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar">
+                    <div className="flex gap-3 my-3">
+                      <button
+                        onClick={() => {
+                          const table = taxTables[viewingTaxTableId];
+                          let csv = "";
+                          if (table.type === "monthly") {
+                            csv = "下限,上限,甲0,甲1,甲2,甲3,甲4,甲5,甲6,甲7,乙欄種別,乙欄値\n";
+                            csv += table.rows.map(r =>
+                              [r.min, r.max >= 999999999 ? "" : r.max, ...(r.kou || []), r.otsu?.type || "", r.otsu?.value ?? ""].join(",")
+                            ).join("\n");
+                          } else {
+                            csv = "税率,甲0下限,甲0上限,甲1下限,甲1上限,甲2下限,甲2上限,甲3下限,甲3上限,甲4下限,甲4上限,甲5下限,甲5上限,甲6下限,甲6上限,甲7下限,甲7上限,乙下限,乙上限\n";
+                            csv += table.rows.map(r =>
+                              [(r.rate * 100).toFixed(3), ...(r.kouRanges || []).flatMap(rng => [rng.min, rng.max >= 999999999 ? "" : rng.max]), r.otsuRange?.min ?? "", r.otsuRange ? (r.otsuRange.max >= 999999999 ? "" : r.otsuRange.max) : ""].join(",")
+                            ).join("\n");
+                          }
+                          const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `tax_${table.year}_${table.type}.csv`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="px-4 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded border border-emerald-200 transition-colors flex items-center gap-1"
+                      >
+                        <Download size={12} /> 確認用CSV出力
+                      </button>
+                      <button
+                        onClick={() => window.print()}
+                        className="px-4 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 rounded border border-slate-200 transition-colors flex items-center gap-1"
+                      >
+                        <Printer size={12} /> 印刷用表示
+                      </button>
+                    </div>
+                    <div className="max-h-[600px] overflow-y-auto overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar print:max-h-none print:overflow-visible">
                                            {" "}
                       <table className="w-full text-xs text-right whitespace-nowrap bg-white relative">
                                                {" "}
@@ -9077,6 +9112,18 @@ const App = () => {
                                                            {" "}
                               <th className="p-3 border-r border-slate-700 text-center text-blue-200">
                                 扶養3人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養4人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養5人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養6人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養7人
                               </th>
                                                            {" "}
                               <th className="p-3 text-center bg-amber-600 text-amber-50">
@@ -9163,6 +9210,18 @@ const App = () => {
                                                                        {" "}
                                     <td className="p-2 border-r font-mono">
                                       {r.kou[3]}
+                                    </td>
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou?.[4] ?? "-"}
+                                    </td>
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou?.[5] ?? "-"}
+                                    </td>
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou?.[6] ?? "-"}
+                                    </td>
+                                    <td className="p-2 border-r font-mono">
+                                      {r.kou?.[7] ?? "-"}
                                     </td>
                                                                        {" "}
                                     <td className="p-2 font-mono font-bold text-amber-700 bg-amber-50/30">

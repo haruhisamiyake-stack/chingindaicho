@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, fetchDocs, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
 import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "firebase/auth";
@@ -385,10 +385,13 @@ const getRateForMonth = (schedule = [], targetYearMonth) => {
   return currentRate;
 };
 
-// 優先順位: 個別月設定 > 全体設定(rateSchedules) > デフォルト値
-const resolveRate = (individualValue, schedule, targetYearMonth, defaultValue) => {
+// 優先順位: 個別月設定 > 締め時スナップショット > 全体設定(rateSchedules) > デフォルト値
+const resolveRate = (individualValue, snapshotValue, schedule, targetYearMonth, defaultValue) => {
   if (individualValue !== undefined && individualValue !== null && individualValue !== "") {
     return Number(individualValue);
+  }
+  if (snapshotValue !== undefined && snapshotValue !== null && snapshotValue !== "") {
+    return Number(snapshotValue);
   }
   if (schedule && schedule.length > 0) {
     return getRateForMonth(schedule, targetYearMonth);
@@ -1285,11 +1288,11 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
 
   const _westernYear = reiwaToWestern(yearStr) || 2026;
   const targetYearMonth = `${_westernYear}-${monthKey}`;
-  const hRate = resolveRate(row.healthRate, settings?.rateSchedules?.health, targetYearMonth, 5.0);
-  const pRate = resolveRate(row.pensionRate, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
-  const nRate = resolveRate(row.nursingRate, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
-  const cRate = resolveRate(row.childCareRate, settings?.rateSchedules?.childCare, targetYearMonth, 0.0);
-  const eRate = resolveRate(row.employmentRate, settings?.rateSchedules?.employment, targetYearMonth, 6.0);
+  const hRate = resolveRate(row.healthRate, row.lockedSnapshotRates?.health, settings?.rateSchedules?.health, targetYearMonth, 5.0);
+  const pRate = resolveRate(row.pensionRate, row.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, targetYearMonth, 9.15);
+  const nRate = resolveRate(row.nursingRate, row.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, targetYearMonth, 0.8);
+  const cRate = resolveRate(row.childCareRate, row.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, targetYearMonth, 0.0);
+  const eRate = resolveRate(row.employmentRate, row.lockedSnapshotRates?.employment, settings?.rateSchedules?.employment, targetYearMonth, 6.0);
 
   const hasHealth =
     master.healthIns !== undefined
@@ -1596,11 +1599,11 @@ const calculateBonusResult = ({
     ? bonusRow.payDate.slice(5, 7)
     : monthKeyForRates;
   const bonusMonthRow = yearData.monthly?.[bonusMonthKey] || {};
-  const hRate = resolveRate(bonusMonthRow.healthRate, settings?.rateSchedules?.health, bonusTargetYearMonth, 5.0);
-  const pRate = resolveRate(bonusMonthRow.pensionRate, settings?.rateSchedules?.pension, bonusTargetYearMonth, 9.15);
-  const nRate = resolveRate(bonusMonthRow.nursingRate, settings?.rateSchedules?.nursing, bonusTargetYearMonth, 0.8);
-  const cRate = resolveRate(bonusMonthRow.childCareRate, settings?.rateSchedules?.childCare, bonusTargetYearMonth, 0.0);
-  const eRate = resolveRate(bonusMonthRow.employmentRate, settings?.rateSchedules?.employment, bonusTargetYearMonth, 6.0);
+  const hRate = resolveRate(bonusMonthRow.healthRate, bonusMonthRow.lockedSnapshotRates?.health, settings?.rateSchedules?.health, bonusTargetYearMonth, 5.0);
+  const pRate = resolveRate(bonusMonthRow.pensionRate, bonusMonthRow.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, bonusTargetYearMonth, 9.15);
+  const nRate = resolveRate(bonusMonthRow.nursingRate, bonusMonthRow.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, bonusTargetYearMonth, 0.8);
+  const cRate = resolveRate(bonusMonthRow.childCareRate, bonusMonthRow.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, bonusTargetYearMonth, 0.0);
+  const eRate = resolveRate(bonusMonthRow.employmentRate, bonusMonthRow.lockedSnapshotRates?.employment, settings?.rateSchedules?.employment, bonusTargetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -2540,7 +2543,11 @@ const App = () => {
 
   const handleLockMonth = async (yearStr, monthKey) => {
     if (!selectedTenantId || !yearStr || !monthKey) return;
-    if (!window.confirm(`${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。よろしいですか？`)) return;
+    if (!window.confirm(
+      `${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。\n\n` +
+      `月締めを実行すると、この月で使用中の社会保険料率・雇用保険料率を各社員の月次データへ固定保存します。` +
+      `これにより、後日マスタ料率を変更しても、この月の計算結果は変わりにくくなります。\n\nよろしいですか？`
+    )) return;
     const key = `${yearStr}_${monthKey}`;
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
     const newEntry = {
@@ -2555,7 +2562,41 @@ const App = () => {
       ],
     };
     if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
-    await saveDoc(PATHS.monthlyLocks(tenantId), { [yearStr]: { ...(monthlyLocks?.[yearStr] || {}), [monthKey]: newEntry } }, { merge: true });
+
+    // 料率スナップショット：対象月の実使用料率を各社員データへ固定保存
+    const targetYearMonth = `${reiwaToWestern(yearStr) || 2026}-${monthKey}`;
+    const snapshotPromises = Object.entries(employees || {}).map(async ([empId, emp]) => {
+      const row = emp.data?.years?.[yearStr]?.monthly?.[monthKey];
+      if (!row) return;
+      const lockedSnapshotRates = {
+        health: resolveRate(row.healthRate, row.lockedSnapshotRates?.health, settings?.rateSchedules?.health, targetYearMonth, 5.0),
+        pension: resolveRate(row.pensionRate, row.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, targetYearMonth, 9.15),
+        nursing: resolveRate(row.nursingRate, row.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, targetYearMonth, 0.8),
+        childCare: resolveRate(row.childCareRate, row.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, targetYearMonth, 0.0),
+        employment: resolveRate(row.employmentRate, row.lockedSnapshotRates?.employment, settings?.rateSchedules?.employment, targetYearMonth, 6.0),
+      };
+      await saveDoc(PATHS.employee(tenantId, empId), {
+        data: { years: { [yearStr]: { monthly: { [monthKey]: { lockedSnapshotRates } } } } }
+      }, { merge: true });
+    });
+
+    try {
+      await Promise.all(snapshotPromises);
+      await saveDoc(
+        PATHS.monthlyLocks(tenantId),
+        {
+          [yearStr]: {
+            ...(monthlyLocks?.[yearStr] || {}),
+            [monthKey]: newEntry,
+          },
+        },
+        { merge: true }
+      );
+      alert(`月締めが完了しました。対象月の料率スナップショットを保存しました。`);
+    } catch (e) {
+      console.error(e);
+      alert("月締めに失敗しました。料率スナップショット保存中にエラーが発生したため、ロックは実行していません。");
+    }
   };
 
   const handleUnlockMonth = async (yearStr, monthKey, reason) => {

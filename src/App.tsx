@@ -2588,11 +2588,11 @@ const App = () => {
       const row = emp.data?.years?.[yearStr]?.monthly?.[monthKey];
       if (!row) return;
       const lockedSnapshotRates = {
-        health: resolveRate(row.healthRate, row.lockedSnapshotRates?.health, settings?.rateSchedules?.health, targetYearMonth, 5.0),
-        pension: resolveRate(row.pensionRate, row.lockedSnapshotRates?.pension, settings?.rateSchedules?.pension, targetYearMonth, 9.15),
-        nursing: resolveRate(row.nursingRate, row.lockedSnapshotRates?.nursing, settings?.rateSchedules?.nursing, targetYearMonth, 0.8),
-        childCare: resolveRate(row.childCareRate, row.lockedSnapshotRates?.childCare, settings?.rateSchedules?.childCare, targetYearMonth, 0.0),
-        employment: resolveRate(row.employmentRate, row.lockedSnapshotRates?.employment, settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment, targetYearMonth, 6.0),
+        health: resolveRate(row.healthRateManualEnabled ? row.healthRate : null, null, settings?.rateSchedules?.health, targetYearMonth, 5.0),
+        pension: resolveRate(row.pensionRateManualEnabled ? row.pensionRate : null, null, settings?.rateSchedules?.pension, targetYearMonth, 9.15),
+        nursing: resolveRate(row.nursingRateManualEnabled ? row.nursingRate : null, null, settings?.rateSchedules?.nursing, targetYearMonth, 0.8),
+        childCare: resolveRate(row.childCareRateManualEnabled ? row.childCareRate : null, null, settings?.rateSchedules?.childCare, targetYearMonth, 0.115),
+        employment: resolveRate(row.employmentRateManualEnabled ? row.employmentRate : null, null, settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment, targetYearMonth, 6.0),
       };
       await saveDoc(PATHS.employee(tenantId, empId), {
         data: { years: { [yearStr]: { monthly: { [monthKey]: { lockedSnapshotRates } } } } }
@@ -2666,7 +2666,7 @@ const App = () => {
         for (const monthKey of MONTHS) {
           const row = yearData.monthly[monthKey];
           if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-            const res = calculateMonthlyResult(m, row, { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, monthKey, yearStr, taxTables);
+            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables);
             if (res.incomeTax === null) {
               hasNullTax = true;
               break;
@@ -2676,14 +2676,14 @@ const App = () => {
         if (hasNullTax) break;
 
         if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
            if (bRes.incomeTax === null) {
              hasNullTax = true;
              break;
            }
         }
         if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
            if (bRes2.incomeTax === null) {
              hasNullTax = true;
              break;
@@ -3362,7 +3362,7 @@ const App = () => {
           master: emp.master,
           bonusRow: rowData,
           bonusKey: monthKey,
-          settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+          settings,
           yearData: currentYearDataObj,
           allowanceDefs:
             settings?.allowanceDefinitions ||
@@ -3382,7 +3382,7 @@ const App = () => {
         calcResult = calculateMonthlyResult(
           emp.master,
           rowData,
-          { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+          settings,
           monthKey,
           selectedYear,
           taxTables,
@@ -3546,7 +3546,7 @@ const App = () => {
       const monthlyResult = calculateMonthlyResult(
         master,
         row,
-        { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+        settings,
         m,
         selectedYear,
         taxTables,
@@ -3656,7 +3656,7 @@ const App = () => {
         master,
         bonusRow: b,
         bonusKey: key,
-        settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+        settings,
         yearData: currentYearData,
         allowanceDefs,
         deductionDefs,
@@ -3752,12 +3752,12 @@ const App = () => {
     payDateText = rowData.payDate || "未設定";
 
     calcResult = calculateBonusResult({
-      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, yearData: slipYearData,
+      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings, yearData: slipYearData,
       allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(rowData), yearStr: selectedYear, taxTables, monthlyLocks,
     });
   } else {
     rowData = slipYearData.monthly[monthKey] || {};
-    calcResult = calculateMonthlyResult(emp.master, rowData, { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, monthKey, selectedYear, taxTables, monthlyLocks);
+    calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey, selectedYear, taxTables, monthlyLocks);
     titleText = "給与明細書";
     targetMonthText = rowData.salaryMonthText || "未設定";
     payDateText = rowData.payDate || "未設定";
@@ -4840,7 +4840,7 @@ const App = () => {
                           const calcResult = calculateMonthlyResult(
                             emp.master,
                             rowData,
-                            { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+                            settings,
                             ledgerSelectedMonth,
                             selectedYear,
                             taxTables,
@@ -7096,7 +7096,7 @@ const App = () => {
                           master: emp.master,
                           bonusRow: rowData,
                           bonusKey: selectedListMonth,
-                          settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+                          settings,
                           yearData: currentYearDataObj,
                           allowanceDefs,
                           deductionDefs,
@@ -7111,7 +7111,7 @@ const App = () => {
                         calcResult = calculateMonthlyResult(
                           emp.master,
                           rowData,
-                          { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+                          settings,
                           selectedListMonth,
                           selectedYear,
                           taxTables,
@@ -7856,6 +7856,103 @@ const App = () => {
                       );
                     })}
                   </div>
+
+                  {/* 月次個別料率設定（社員別・手動上書き） */}
+                  {selectedEmployeeId && currentYearData ? (
+                    <div className="mt-6 border-t border-slate-200 pt-4">
+                      <h4 className="text-xs font-bold text-slate-600 mb-1">
+                        月次個別料率設定
+                        <span className="text-[10px] text-slate-400 font-normal ml-2">
+                          現在選択中の社員：全体設定を月別に上書きできます
+                        </span>
+                      </h4>
+                      <p className="text-[10px] text-slate-400 mb-3">
+                        ☑ 手動 にチェックを入れると、その月のみ個別料率を入力できます。チェックOFFの場合は全体設定から自動算出した料率を表示します。
+                      </p>
+                      <div className="overflow-x-auto">
+                        <table className="text-[10px] border-collapse w-full min-w-max">
+                          <thead>
+                            <tr>
+                              <th className="border border-gray-300 p-1.5 bg-slate-100 text-left text-[10px] sticky left-0 z-10 min-w-[90px]">料率</th>
+                              {MONTHS.map((m) => (
+                                <th key={m} className="border border-gray-300 p-1 bg-slate-100 text-center text-[10px] min-w-[60px]">
+                                  {parseInt(m, 10)}月
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[
+                              { rateKey: "health", label: "健保(%)", defaultVal: 5.0 },
+                              { rateKey: "pension", label: "厚年(%)", defaultVal: 9.15 },
+                              { rateKey: "nursing", label: "介護(%)", defaultVal: 0.8 },
+                              { rateKey: "childCare", label: "子育(%)", defaultVal: 0.115 },
+                              { rateKey: "employment", label: "雇保(‰)", defaultVal: 6.0 },
+                            ].map(({ rateKey, label, defaultVal }) => (
+                              <tr key={rateKey} className="bg-slate-50">
+                                <td className="border border-gray-300 p-1.5 sticky left-0 z-10 bg-slate-50 font-bold text-indigo-600 text-[10px]">
+                                  {label}
+                                </td>
+                                {MONTHS.map((m) => {
+                                  const row = currentYearData.monthly?.[m] || {};
+                                  const targetYearMonth = `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`;
+                                  const manualEnabled = row[rateKey + "RateManualEnabled"] === true;
+                                  const _eSched = rateKey === "employment"
+                                    ? (settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment)
+                                    : settings?.rateSchedules?.[rateKey];
+                                  const rateVal = resolveRate(
+                                    manualEnabled ? row[rateKey + "Rate"] : null,
+                                    null,
+                                    _eSched,
+                                    targetYearMonth,
+                                    defaultVal
+                                  );
+                                  const isMonthLocked = isYearLocked || currentYearData.monthly?.[m]?.isLocked;
+                                  return (
+                                    <td
+                                      key={m}
+                                      className={`border border-gray-300 p-0.5 text-center ${manualEnabled ? "bg-blue-50/60" : ""}`}
+                                    >
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
+                                          <input
+                                            type="checkbox"
+                                            checked={manualEnabled}
+                                            onChange={(e) => updateMonthly(selectedYear, m, rateKey + "RateManualEnabled", e.target.checked)}
+                                            disabled={isMonthLocked}
+                                            className="w-2.5 h-2.5 accent-blue-500"
+                                          />
+                                          手動
+                                        </label>
+                                        {manualEnabled ? (
+                                          <input
+                                            type="number"
+                                            step="0.001"
+                                            value={row[rateKey + "Rate"] ?? ""}
+                                            onChange={(e) => updateMonthly(selectedYear, m, rateKey + "Rate", e.target.value)}
+                                            disabled={isMonthLocked}
+                                            className={`w-full text-right outline-none font-mono text-[10px] px-0.5 border border-blue-300 rounded bg-white text-blue-800 ${isMonthLocked ? "cursor-not-allowed opacity-50" : ""}`}
+                                          />
+                                        ) : (
+                                          <span className="font-bold text-indigo-400">
+                                            {Number.isFinite(Number(rateVal)) ? Number(rateVal).toFixed(3) : "-"}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-4 text-[10px] text-slate-400">
+                      ※ 月次個別料率を設定するには、左の社員一覧から社員を選択してください。
+                    </p>
+                  )}
                 </section>
 
                 {/* 4. 支給・控除項目設定 */}
@@ -9009,10 +9106,12 @@ const App = () => {
         {/* --- 社会保険料率マスタ 独立画面 --- */}
         {activeTab === "rateTable" && (() => {
           const rateTypes = [
-            { key: "health",     label: "健康保険料率",         unit: "%",  defaultRate: 5.0 },
-            { key: "pension",    label: "厚生年金保険料率",     unit: "%",  defaultRate: 9.15 },
-            { key: "nursing",    label: "介護保険料率",         unit: "%",  defaultRate: 0.8 },
-            { key: "childCare",  label: "子ども・子育て支援金", unit: "%",  defaultRate: 0.0 },
+            { key: "health",                 label: "健康保険料率",               unit: "%",  defaultRate: 5.0 },
+            { key: "pension",                label: "厚生年金保険料率",           unit: "%",  defaultRate: 9.15 },
+            { key: "nursing",                label: "介護保険料率",               unit: "%",  defaultRate: 0.8 },
+            { key: "childCare",              label: "子ども・子育て支援金",       unit: "%",  defaultRate: 0.0 },
+            { key: "employmentGeneral",      label: "雇用保険料率（一般の事業）", unit: "‰",  defaultRate: 5.5 },
+            { key: "employmentConstruction", label: "雇用保険料率（建設業）",     unit: "‰",  defaultRate: 6.5 },
           ];
 
           const local = localRateSchedules || DEFAULT_RATE_SCHEDULES;
@@ -9247,7 +9346,7 @@ const App = () => {
                     const res = calculateMonthlyResult(
                       emp.master,
                       row,
-                      { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+                      settings,
                       m,
                       selectedYear,
                       taxTables,
@@ -9284,7 +9383,7 @@ const App = () => {
                     master: emp.master,
                     bonusRow,
                     bonusKey,
-                    settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" },
+                    settings,
                     yearData,
                     allowanceDefs,
                     deductionDefs,
@@ -10292,10 +10391,10 @@ const App = () => {
                       if (isBonus) {
                         row = yearData[printTargetMonth] || {};
                         if (!row.payDate && !row.basePay && Object.keys(row.allowanceAmounts || {}).length === 0) return null;
-                        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: printTargetMonth, settings: { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, yearData, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
+                        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: printTargetMonth, settings, yearData, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
                       } else {
                         row = yearData.monthly?.[printTargetMonth] || {};
-                        calc = calculateMonthlyResult(m, row, { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, printTargetMonth, selectedYear, taxTables, monthlyLocks);
+                        calc = calculateMonthlyResult(m, row, settings, printTargetMonth, selectedYear, taxTables, monthlyLocks);
                       }
                       
                       if (calc.grossPay > 0 || Number(row.basePay) > 0) {
@@ -11030,7 +11129,7 @@ const App = () => {
         if (!_isBonus) {
           const _yd = _emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
           const _rd = _yd.monthly?.[selectedListMonth] || {};
-          _isBlocking = calculateMonthlyResult(_emp.master, _rd, { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
+          _isBlocking = calculateMonthlyResult(_emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
         }
         return (
         <div
@@ -11077,7 +11176,7 @@ const App = () => {
           const hasBlockingEmployee = !_isBonusMonth && activeEmployees.some(([id, emp]) => {
             const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
             const _rd = _yd.monthly?.[selectedListMonth] || {};
-            return calculateMonthlyResult(emp.master, _rd, { ...settings, businessType: currentTenant?.businessType || settings?.businessType || "general" }, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
+            return calculateMonthlyResult(emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
           });
           return (
             <div

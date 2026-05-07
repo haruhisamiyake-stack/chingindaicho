@@ -6767,9 +6767,9 @@ const App = () => {
                               >
                                 <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-slate-50 font-bold text-indigo-500 flex justify-between items-center text-[11px]">
                                   {labels[rateKey]}{" "}
-                                  <span className="text-[8px] bg-indigo-100 text-indigo-500 px-1 border rounded font-normal">
+                                  {false && <span className="text-[8px] bg-indigo-100 text-indigo-500 px-1 border rounded font-normal">
                                     手動設定可
-                                  </span>
+                                  </span>}
                                 </td>
                                 {MONTHS.map((m) => {
                                   const defaultRates = {
@@ -6803,7 +6803,7 @@ const App = () => {
                                       className={`border border-gray-300 p-0.5 text-center text-[10px] ${manualEnabled ? "bg-blue-50/60" : ""}`}
                                     >
                                       <div className="flex flex-col items-center gap-0.5">
-                                        <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
+                                        {false && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
                                           <input
                                             type="checkbox"
                                             checked={manualEnabled}
@@ -6812,8 +6812,8 @@ const App = () => {
                                             className="w-2.5 h-2.5 accent-blue-500"
                                           />
                                           手動
-                                        </label>
-                                        {manualEnabled ? (
+                                        </label>}
+                                        {false && manualEnabled ? (
                                           <input
                                             type="number"
                                             step="0.001"
@@ -7956,7 +7956,7 @@ const App = () => {
                   </div>
 
                   {/* 月次個別料率設定（社員別・手動上書き） */}
-                  {selectedEmployeeId && currentYearData ? (
+                  {false && (selectedEmployeeId && currentYearData ? (
                     <div className="mt-6 border-t border-slate-200 pt-4">
                       <h4 className="text-xs font-bold text-slate-600 mb-1">
                         月次個別料率設定
@@ -8012,7 +8012,7 @@ const App = () => {
                                       className={`border border-gray-300 p-0.5 text-center ${manualEnabled ? "bg-blue-50/60" : ""}`}
                                     >
                                       <div className="flex flex-col items-center gap-0.5">
-                                        <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
+                                        {false && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
                                           <input
                                             type="checkbox"
                                             checked={manualEnabled}
@@ -8021,8 +8021,8 @@ const App = () => {
                                             className="w-2.5 h-2.5 accent-blue-500"
                                           />
                                           手動
-                                        </label>
-                                        {manualEnabled ? (
+                                        </label>}
+                                        {false && manualEnabled ? (
                                           <input
                                             type="number"
                                             step="0.001"
@@ -8050,7 +8050,7 @@ const App = () => {
                     <p className="mt-4 text-[10px] text-slate-400">
                       ※ 月次個別料率を設定するには、左の社員一覧から社員を選択してください。
                     </p>
-                  )}
+                  ))}
                 </section>
 
                 {/* 4. 支給・控除項目設定 */}

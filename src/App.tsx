@@ -51,6 +51,8 @@ const MONTHS = [
   "12",
 ];
 
+const ENABLE_LEGACY_MONTHLY_RATE_UI = false;
+
 // --- 初期設定データ定義 ---
 const DEFAULT_RATE_SCHEDULES = {
   health: [{ startYearMonth: "2025-03", rate: 5.085 }],
@@ -58,8 +60,8 @@ const DEFAULT_RATE_SCHEDULES = {
   nursing: [{ startYearMonth: "2025-03", rate: 0.795 }],
   childCare: [{ startYearMonth: "2026-03", rate: 0.115 }],
   employment: [{ startYearMonth: "2000-01", rate: 6.0 }],
-  employmentGeneral: [{ startYearMonth: "2000-01", rate: 5.5 }],
-  employmentConstruction: [{ startYearMonth: "2000-01", rate: 6.5 }],
+  employmentGeneral: [{ startYearMonth: "2025-04", rate: 5.5 }],
+  employmentConstruction: [{ startYearMonth: "2025-04", rate: 6.5 }],
 };
 // rateSchedules 旧形式(startMonth)→新形式(startYearMonth)互換変換
 const migrateRateSchedules = (rateSchedules, editableYear) => {
@@ -6767,7 +6769,7 @@ const App = () => {
                               >
                                 <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-slate-50 font-bold text-indigo-500 flex justify-between items-center text-[11px]">
                                   {labels[rateKey]}{" "}
-                                  {false && <span className="text-[8px] bg-indigo-100 text-indigo-500 px-1 border rounded font-normal">
+                                  {ENABLE_LEGACY_MONTHLY_RATE_UI && <span className="text-[8px] bg-indigo-100 text-indigo-500 px-1 border rounded font-normal">
                                     手動設定可
                                   </span>}
                                 </td>
@@ -6803,7 +6805,7 @@ const App = () => {
                                       className={`border border-gray-300 p-0.5 text-center text-[10px] ${manualEnabled ? "bg-blue-50/60" : ""}`}
                                     >
                                       <div className="flex flex-col items-center gap-0.5">
-                                        {false && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
+                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
                                           <input
                                             type="checkbox"
                                             checked={manualEnabled}
@@ -6813,7 +6815,7 @@ const App = () => {
                                           />
                                           手動
                                         </label>}
-                                        {false && (
+                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && (
                                           manualEnabled ? (
                                           <input
                                             type="number"
@@ -7871,7 +7873,6 @@ const App = () => {
                           </div>
                           {customRSEnabled ? (
                             <div>
-                              <p className="text-[10px] text-blue-600 font-bold mb-2">この会社の個別料率を使用中</p>
                               <div className="space-y-2">
                                 {customSchedule.map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-2">
@@ -7888,7 +7889,7 @@ const App = () => {
                                       onChange={(e) => updateCustomSchedule(idx, "rate", Number(e.target.value))}
                                       className="border border-blue-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-blue-500 font-mono text-blue-800"
                                     />
-                                    <span className="text-xs text-slate-500">{unitLabel}</span>
+                                    <span className="text-xs text-slate-500">{unitLabel}{unitLabel === "‰" && `（${(item.rate / 10).toFixed(2)}%）`}</span>
                                     {customSchedule.length > 1 && (
                                       <button
                                         onClick={() => removeCustomSchedule(idx)}
@@ -7909,7 +7910,6 @@ const App = () => {
                             </div>
                           ) : (
                             <div>
-                              <p className="text-[10px] text-slate-400 italic mb-2">全体設定を使用中</p>
                               <div className="space-y-2 opacity-60">
                                 {schedule.map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-2">
@@ -7917,16 +7917,18 @@ const App = () => {
                                       type="month"
                                       value={item.startYearMonth || ""}
                                       onChange={(e) => updateSchedule(idx, "startYearMonth", e.target.value)}
-                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36"
+                                      disabled
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36 cursor-not-allowed"
                                     />
                                     <input
                                       type="number"
                                       step="0.01"
                                       value={item.rate}
                                       onChange={(e) => updateSchedule(idx, "rate", Number(e.target.value))}
-                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-indigo-400 font-mono"
+                                      disabled
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-indigo-400 font-mono cursor-not-allowed"
                                     />
-                                    <span className="text-xs text-slate-500">{unitLabel}</span>
+                                    <span className="text-xs text-slate-500">{unitLabel}{unitLabel === "‰" && `（${(item.rate / 10).toFixed(2)}%）`}</span>
                                     {schedule.length > 1 && (
                                       <button
                                         onClick={() => removeSchedule(idx)}
@@ -7957,7 +7959,7 @@ const App = () => {
                   </div>
 
                   {/* 月次個別料率設定（社員別・手動上書き） */}
-                  {false && (selectedEmployeeId && currentYearData ? (
+                  {ENABLE_LEGACY_MONTHLY_RATE_UI && (selectedEmployeeId && currentYearData ? (
                     <div className="mt-6 border-t border-slate-200 pt-4">
                       <h4 className="text-xs font-bold text-slate-600 mb-1">
                         月次個別料率設定
@@ -8013,7 +8015,7 @@ const App = () => {
                                       className={`border border-gray-300 p-0.5 text-center ${manualEnabled ? "bg-blue-50/60" : ""}`}
                                     >
                                       <div className="flex flex-col items-center gap-0.5">
-                                        {false && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
+                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
                                           <input
                                             type="checkbox"
                                             checked={manualEnabled}
@@ -8023,7 +8025,7 @@ const App = () => {
                                           />
                                           手動
                                         </label>}
-                                        {false && (
+                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && (
                                           manualEnabled ? (
                                           <input
                                             type="number"

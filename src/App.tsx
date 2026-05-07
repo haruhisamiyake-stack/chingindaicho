@@ -1866,9 +1866,11 @@ const App = () => {
   const [newTenantModalOpen, setNewTenantModalOpen] = useState(false);
   const [newTenantName, setNewTenantName] = useState("");
   const [newTenantClientCode, setNewTenantClientCode] = useState("");
+  const [newTenantPrefectureType, setNewTenantPrefectureType] = useState("okayama");
   const [editTenantModalTarget, setEditTenantModalTarget] = useState(null);
   const [editTenantName, setEditTenantName] = useState("");
   const [editTenantClientCode, setEditTenantClientCode] = useState("");
+  const [editTenantPrefectureType, setEditTenantPrefectureType] = useState("okayama");
 
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
@@ -2310,7 +2312,7 @@ const App = () => {
     if (!snap.empty) {
       const tenantDoc = snap.docs[0];
       const tenantData = tenantDoc.data();
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "" })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null })));
       setSelectedTenantId(null);
       if (!tenantData.migrationDone) {
         await _migrateUserDataToTenant(uid, tenantDoc.id);
@@ -2379,7 +2381,7 @@ const App = () => {
     if (!isAuthReady || !userId) return;
     const tenantsQuery = queryCol(getCol(...PATHS.tenants()), whereEq("ownerUid", "==", userId));
     const unsubTenants = subscribe(tenantsQuery, (snap) => {
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "" })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null })));
     });
     return () => unsubTenants();
   }, [isAuthReady, userId]);
@@ -4040,6 +4042,11 @@ const App = () => {
                     <h3 className="text-sm font-black text-slate-800 group-hover:text-blue-700 transition-colors line-clamp-2 leading-snug">
                       {t.name || "名称未設定"}
                     </h3>
+                    {t.prefectureType === "outside_okayama" && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 mt-1">
+                        ⚠ 岡山県以外
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -4055,6 +4062,7 @@ const App = () => {
                         setEditTenantModalTarget(t);
                         setEditTenantName(t.name || "");
                         setEditTenantClientCode(t.clientCode || "");
+                        setEditTenantPrefectureType(t.prefectureType || "okayama");
                       }}
                       className="text-slate-400 hover:text-blue-600 flex items-center gap-1 text-[10px] font-bold transition-colors bg-slate-50 hover:bg-blue-50 px-2 py-1 rounded"
                       title="名前を変更"
@@ -4124,6 +4132,23 @@ const App = () => {
                       className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                     />
                   </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">所在地区分</label>
+                    <select
+                      value={newTenantPrefectureType}
+                      onChange={(e) => setNewTenantPrefectureType(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="okayama">岡山県</option>
+                      <option value="outside_okayama">岡山県以外</option>
+                    </select>
+                    {newTenantPrefectureType === "outside_okayama" && (
+                      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2 mt-2 font-bold">
+                        ⚠ 岡山県以外の顧問先です。<br />
+                        全体の社会保険料率マスタは岡山県前提のため、会社別・月別の個別料率設定を確認してください。
+                      </p>
+                    )}
+                  </div>
                 </div>
                 <div className="flex justify-end gap-3 mt-8">
                   <button
@@ -4131,6 +4156,7 @@ const App = () => {
                       setNewTenantModalOpen(false);
                       setNewTenantName("");
                       setNewTenantClientCode("");
+                      setNewTenantPrefectureType("okayama");
                     }}
                     className="px-5 py-2 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-100 transition-colors"
                   >
@@ -4145,12 +4171,13 @@ const App = () => {
                         return;
                       }
                       const newId = `tenant_${Date.now()}`;
-                      saveDoc(PATHS.tenant(newId), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString() })
+                      saveDoc(PATHS.tenant(newId), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString(), prefectureType: newTenantPrefectureType })
                         .then(() => saveDoc(PATHS.settings(newId), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim() }))
                         .then(() => {
                           setNewTenantModalOpen(false);
                           setNewTenantName("");
                           setNewTenantClientCode("");
+                          setNewTenantPrefectureType("okayama");
                           setSelectedTenantId(newId);
                           setActiveTab("ledger");
                         })
@@ -4193,10 +4220,27 @@ const App = () => {
                       className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                     />
                   </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">所在地区分</label>
+                    <select
+                      value={editTenantPrefectureType}
+                      onChange={(e) => setEditTenantPrefectureType(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="okayama">岡山県</option>
+                      <option value="outside_okayama">岡山県以外</option>
+                    </select>
+                    {editTenantPrefectureType === "outside_okayama" && (
+                      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2 mt-2 font-bold">
+                        ⚠ 岡山県以外の顧問先です。<br />
+                        全体の社会保険料率マスタは岡山県前提のため、会社別・月別の個別料率設定を確認してください。
+                      </p>
+                    )}
+                  </div>
                 </div>
                 <div className="flex justify-end gap-3 mt-8">
                   <button
-                    onClick={() => { setEditTenantModalTarget(null); setEditTenantName(""); setEditTenantClientCode(""); }}
+                    onClick={() => { setEditTenantModalTarget(null); setEditTenantName(""); setEditTenantClientCode(""); setEditTenantPrefectureType("okayama"); }}
                     className="px-5 py-2 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-100 transition-colors"
                   >
                     キャンセル
@@ -4216,12 +4260,13 @@ const App = () => {
                         return;
                       }
                       const tid = editTenantModalTarget.id;
-                      saveDoc(PATHS.tenant(tid), { name: editTenantName.trim(), clientCode: editTenantClientCode.trim(), updatedAt: new Date().toISOString() }, { merge: true })
+                      saveDoc(PATHS.tenant(tid), { name: editTenantName.trim(), clientCode: editTenantClientCode.trim(), updatedAt: new Date().toISOString(), prefectureType: editTenantPrefectureType }, { merge: true })
                         .then(() => {
-                          setTenants(prev => prev.map(pt => pt.id === tid ? { ...pt, name: editTenantName.trim(), clientCode: editTenantClientCode.trim() } : pt));
+                          setTenants(prev => prev.map(pt => pt.id === tid ? { ...pt, name: editTenantName.trim(), clientCode: editTenantClientCode.trim(), prefectureType: editTenantPrefectureType } : pt));
                           setEditTenantModalTarget(null);
                           setEditTenantName("");
                           setEditTenantClientCode("");
+                          setEditTenantPrefectureType("okayama");
                         })
                         .catch(() => alert("顧問先の変更に失敗しました"));
                     }}
@@ -4254,18 +4299,6 @@ const App = () => {
             クラウド賃金台帳システム2
           </p>
         </div>
-
-        {/* ▼▼▼ 修正：顧問先ポータルへ戻るボタン ▼▼▼ */}
-        <div className="p-4 border-b border-slate-800 bg-blue-900/30">
-          <button
-            onClick={() => setActiveTab("portal")}
-            className="w-full flex justify-between items-center px-4 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-sm transition-all shadow-md active:scale-95 border border-blue-500"
-          >
-            <span className="flex items-center gap-2"><Building size={18} /> 顧問先一覧へ戻る</span>
-            <span className="text-[10px] bg-blue-800 px-2 py-0.5 rounded border border-blue-500 shadow-inner">切替</span>
-          </button>
-        </div>
-        {/* ▲▲▲ ここまで修正 ▲▲▲ */}
 
         <nav className="p-4 space-y-2 border-b border-slate-800">
           <button
@@ -4332,18 +4365,13 @@ const App = () => {
         </nav>
 
         <div className="mt-auto p-4 border-t border-slate-800 bg-slate-950">
-          <div
-            className={`text-center px-3 py-2 rounded-md text-[10px] font-black tracking-widest uppercase border transition-all ${
-              saveStatus
-                ? "bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]"
-                : "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
-            }`}
+          <button
+            onClick={() => setActiveTab("portal")}
+            className="w-full flex justify-between items-center px-4 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-sm transition-all shadow-md active:scale-95 border border-blue-500"
           >
-            {saveStatus || "Cloud Ready"}
-          </div>
-          <div className="mt-2 text-center text-[9px] text-slate-600 font-mono">
-            ORG: {userId?.substring(0, 10) || "..."}
-          </div>
+            <span className="flex items-center gap-2"><Building size={18} /> 顧問先一覧へ戻る</span>
+            <span className="text-[10px] bg-blue-800 px-2 py-0.5 rounded border border-blue-500 shadow-inner">切替</span>
+          </button>
         </div>
       </aside>
       

@@ -1862,6 +1862,13 @@ const App = () => {
   const [selectedTenantId, setSelectedTenantId] = useState(null);
   const tenantId = selectedTenantId;
   const [tenantSearchQuery, setTenantSearchQuery] = useState("");
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [newTenantModalOpen, setNewTenantModalOpen] = useState(false);
+  const [newTenantName, setNewTenantName] = useState("");
+  const [newTenantClientCode, setNewTenantClientCode] = useState("");
+  const [editTenantModalTarget, setEditTenantModalTarget] = useState(null);
+  const [editTenantName, setEditTenantName] = useState("");
+  const [editTenantClientCode, setEditTenantClientCode] = useState("");
 
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
@@ -2303,7 +2310,7 @@ const App = () => {
     if (!snap.empty) {
       const tenantDoc = snap.docs[0];
       const tenantData = tenantDoc.data();
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント" })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "" })));
       setSelectedTenantId(null);
       if (!tenantData.migrationDone) {
         await _migrateUserDataToTenant(uid, tenantDoc.id);
@@ -2334,7 +2341,7 @@ const App = () => {
       await saveDoc(PATHS.tenant(newTenantId), { migrationDone: true, migrationV2Done: true }, { merge: true });
     }
 
-    setTenants([{ id: newTenantId, name: "株式会社 新規テナント" }]);
+    setTenants([{ id: newTenantId, name: "株式会社 新規テナント", clientCode: "" }]);
     setSelectedTenantId(null);
   };
 
@@ -2372,7 +2379,7 @@ const App = () => {
     if (!isAuthReady || !userId) return;
     const tenantsQuery = queryCol(getCol(...PATHS.tenants()), whereEq("ownerUid", "==", userId));
     const unsubTenants = subscribe(tenantsQuery, (snap) => {
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント" })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "" })));
     });
     return () => unsubTenants();
   }, [isAuthReady, userId]);
@@ -3927,10 +3934,17 @@ const App = () => {
   // ▼▼▼ 新規追加：ポータル（ルート）画面の独立レンダリング ▼▼▼
   if (activeTab === "portal") {
     // ★ 検索キーワードで顧問先を絞り込む
-    const filteredTenants = tenants.filter(t => 
-      (t.name || "").toLowerCase().includes(tenantSearchQuery.toLowerCase()) || 
-      (t.id || "").toLowerCase().includes(tenantSearchQuery.toLowerCase())
-    );
+    const filteredTenants = tenants
+      .filter(t =>
+        (t.name || "").toLowerCase().includes(tenantSearchQuery.toLowerCase()) ||
+        (t.id || "").toLowerCase().includes(tenantSearchQuery.toLowerCase())
+      )
+      .sort((a, b) => {
+        if (!a.clientCode && !b.clientCode) return 0;
+        if (!a.clientCode) return 1;
+        if (!b.clientCode) return -1;
+        return a.clientCode.localeCompare(b.clientCode, "ja", { numeric: true });
+      });
 
     return (
       <div className="h-screen bg-slate-100 font-sans text-sm overflow-y-auto flex flex-col custom-scrollbar">
@@ -3942,27 +3956,35 @@ const App = () => {
             <p className="text-xs text-slate-400 mt-1 ml-10">税理士法人アストラスト</p>
           </div>
           <div className="flex items-center gap-4">
-            <button
-              onClick={() => setActiveTab("taxTable")}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
-            >
-              <TableIcon size={16} /> 源泉徴収税額表
-            </button>
-            <button
-              onClick={() => setActiveTab("stdRewardTable")}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
-            >
-              <Database size={16} /> 標準報酬月額表
-            </button>
-            <button
-              onClick={() => setActiveTab("rateTable")}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
-            >
-              <Percent size={16} /> 社会保険料率マスタ
-            </button>
-            <div className="w-px h-6 bg-slate-700 mx-2"></div>
-            <div className="text-slate-400 text-[10px] font-bold font-mono">
-              ORG ID: {userId?.substring(0, 10) || "..."}
+            <div className="relative">
+              <button
+                onClick={() => setSettingsMenuOpen(v => !v)}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
+              >
+                <Settings size={16} /> 設定
+              </button>
+              {settingsMenuOpen && (
+                <div className="absolute right-0 mt-1 w-52 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 overflow-hidden">
+                  <button
+                    onClick={() => { setActiveTab("taxTable"); setSettingsMenuOpen(false); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-slate-300 hover:bg-slate-700 hover:text-white text-xs font-bold transition-colors"
+                  >
+                    <TableIcon size={14} /> 源泉徴収税額表
+                  </button>
+                  <button
+                    onClick={() => { setActiveTab("stdRewardTable"); setSettingsMenuOpen(false); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-slate-300 hover:bg-slate-700 hover:text-white text-xs font-bold transition-colors"
+                  >
+                    <Database size={14} /> 標準報酬月額表
+                  </button>
+                  <button
+                    onClick={() => { setActiveTab("rateTable"); setSettingsMenuOpen(false); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-slate-300 hover:bg-slate-700 hover:text-white text-xs font-bold transition-colors"
+                  >
+                    <Percent size={14} /> 社会保険料率マスタ
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -3989,18 +4011,7 @@ const App = () => {
                 />
               </div>
               <button
-                onClick={() => {
-                  const name = window.prompt("新しい顧問先の会社名を入力してください");
-                  if (name && name.trim()) {
-                    const newId = `tenant_${Date.now()}`;
-                    saveDoc(PATHS.tenant(newId), { name: name.trim(), ownerUid: userId, createdAt: new Date().toISOString() })
-                      .then(() => {
-                         setSelectedTenantId(newId);
-                         setActiveTab("ledger");
-                      })
-                      .catch(e => alert("顧問先の追加に失敗しました"));
-                  }
-                }}
+                onClick={() => setNewTenantModalOpen(true)}
                 className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-bold text-sm shadow-md transition-all active:scale-95 whitespace-nowrap"
               >
                 <PlusCircle size={16} /> 新規登録
@@ -4022,11 +4033,16 @@ const App = () => {
                   <div className="p-2.5 rounded-lg bg-slate-50 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors shrink-0">
                     <Building size={20} />
                   </div>
-                  <h3 className="text-sm font-black text-slate-800 group-hover:text-blue-700 transition-colors line-clamp-2 leading-snug pt-1">
-                    {t.name || "名称未設定"}
-                  </h3>
+                  <div className="flex flex-col gap-0.5 pt-1 min-w-0">
+                    {t.clientCode && (
+                      <span className="text-[10px] font-black text-blue-600 font-mono">No.{t.clientCode}</span>
+                    )}
+                    <h3 className="text-sm font-black text-slate-800 group-hover:text-blue-700 transition-colors line-clamp-2 leading-snug">
+                      {t.name || "名称未設定"}
+                    </h3>
+                  </div>
                 </div>
-                
+
                 <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
                   <span className="text-[9px] font-mono text-slate-400 truncate pr-2">
                     ID: {t.id.replace('tenant_', '')}
@@ -4036,14 +4052,9 @@ const App = () => {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        const newName = window.prompt("顧問先の名前を変更します", t.name);
-                        if (newName && newName.trim() !== "" && newName !== t.name) {
-                          saveDoc(PATHS.tenant(t.id), { name: newName.trim() }, { merge: true })
-                            .then(() => {
-                              setTenants(prev => prev.map(pt => pt.id === t.id ? { ...pt, name: newName.trim() } : pt));
-                            })
-                            .catch(() => alert("名前の変更に失敗しました"));
-                        }
+                        setEditTenantModalTarget(t);
+                        setEditTenantName(t.name || "");
+                        setEditTenantClientCode(t.clientCode || "");
                       }}
                       className="text-slate-400 hover:text-blue-600 flex items-center gap-1 text-[10px] font-bold transition-colors bg-slate-50 hover:bg-blue-50 px-2 py-1 rounded"
                       title="名前を変更"
@@ -4084,6 +4095,144 @@ const App = () => {
               </div>
             )}
           </div>
+
+          {newTenantModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+              <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md mx-4">
+                <h2 className="text-lg font-black text-slate-800 mb-6">顧問先を新規登録</h2>
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">顧問先名 <span className="text-red-500">*</span></label>
+                    <input
+                      type="text"
+                      value={newTenantName}
+                      onChange={(e) => setNewTenantName(e.target.value)}
+                      placeholder="例：株式会社サンプル"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                    {newTenantName === "" && (
+                      <p className="text-xs text-red-500 mt-1 font-bold">顧問先名は必須です</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">クライアント番号（任意）</label>
+                    <input
+                      type="text"
+                      value={newTenantClientCode}
+                      onChange={(e) => setNewTenantClientCode(e.target.value)}
+                      placeholder="例：001"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-3 mt-8">
+                  <button
+                    onClick={() => {
+                      setNewTenantModalOpen(false);
+                      setNewTenantName("");
+                      setNewTenantClientCode("");
+                    }}
+                    className="px-5 py-2 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-100 transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    disabled={!newTenantName.trim()}
+                    onClick={() => {
+                      const code = newTenantClientCode.trim();
+                      if (code && tenants.some(t => String(t.clientCode || "").trim() === code)) {
+                        alert("同じクライアント番号が既に登録されています。別の番号を入力してください。");
+                        return;
+                      }
+                      const newId = `tenant_${Date.now()}`;
+                      saveDoc(PATHS.tenant(newId), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString() })
+                        .then(() => saveDoc(PATHS.settings(newId), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim() }))
+                        .then(() => {
+                          setNewTenantModalOpen(false);
+                          setNewTenantName("");
+                          setNewTenantClientCode("");
+                          setSelectedTenantId(newId);
+                          setActiveTab("ledger");
+                        })
+                        .catch(() => alert("顧問先の追加に失敗しました"));
+                    }}
+                    className="px-5 py-2 rounded-lg text-sm font-bold bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    登録
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {editTenantModalTarget && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+              <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md mx-4">
+                <h2 className="text-lg font-black text-slate-800 mb-6">顧問先を編集</h2>
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">顧問先名 <span className="text-red-500">*</span></label>
+                    <input
+                      type="text"
+                      value={editTenantName}
+                      onChange={(e) => setEditTenantName(e.target.value)}
+                      placeholder="例：株式会社サンプル"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                    {editTenantName.trim() === "" && (
+                      <p className="text-xs text-red-500 mt-1 font-bold">顧問先名は必須です</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">クライアント番号（任意）</label>
+                    <input
+                      type="text"
+                      value={editTenantClientCode}
+                      onChange={(e) => setEditTenantClientCode(e.target.value)}
+                      placeholder="例：001"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-3 mt-8">
+                  <button
+                    onClick={() => { setEditTenantModalTarget(null); setEditTenantName(""); setEditTenantClientCode(""); }}
+                    className="px-5 py-2 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-100 transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    disabled={!editTenantName.trim()}
+                    onClick={() => {
+                      const code = editTenantClientCode.trim();
+                      if (
+                        code &&
+                        tenants.some(t =>
+                          t.id !== editTenantModalTarget.id &&
+                          String(t.clientCode || "").trim() === code
+                        )
+                      ) {
+                        alert("同じクライアント番号が既に登録されています。別の番号を入力してください。");
+                        return;
+                      }
+                      const tid = editTenantModalTarget.id;
+                      saveDoc(PATHS.tenant(tid), { name: editTenantName.trim(), clientCode: editTenantClientCode.trim(), updatedAt: new Date().toISOString() }, { merge: true })
+                        .then(() => {
+                          setTenants(prev => prev.map(pt => pt.id === tid ? { ...pt, name: editTenantName.trim(), clientCode: editTenantClientCode.trim() } : pt));
+                          setEditTenantModalTarget(null);
+                          setEditTenantName("");
+                          setEditTenantClientCode("");
+                        })
+                        .catch(() => alert("顧問先の変更に失敗しました"));
+                    }}
+                    className="px-5 py-2 rounded-lg text-sm font-bold bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    保存
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -6521,22 +6670,37 @@ const App = () => {
                                   </span>
                                 </td>
                                 {MONTHS.map((m) => {
-                                  const rateVal = settings?.rateSchedules?.[
-                                    rateKey
-                                  ]
-                                    ? getRateForMonth(
-                                        settings.rateSchedules[rateKey],
-                                        `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`
-                                      )
-                                    : currentYearData.monthly[m]?.[
-                                        rateKey + "Rate"
-                                      ] || 0;
+                                  const defaultRates = {
+                                    health: 5.0,
+                                    pension: 9.15,
+                                    nursing: 0.8,
+                                    childCare: 0.0,
+                                    employment: 6.0,
+                                  };
+                                  const row = currentYearData.monthly[m] || {};
+                                  const targetYearMonth = `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`;
+                                  const rateVal = resolveRate(
+                                    row[rateKey + "Rate"],
+                                    row.lockedSnapshotRates?.[rateKey],
+                                    settings?.rateSchedules?.[rateKey],
+                                    targetYearMonth,
+                                    defaultRates[rateKey]
+                                  );
+                                  const unit = rateKey === "employment" ? "‰" : "%";
+                                  const snapshotVal = currentYearData.monthly[m]?.lockedSnapshotRates?.[rateKey];
+                                  const rateDisplay = Number.isFinite(Number(rateVal)) ? Number(rateVal).toFixed(2) : "-";
+                                  const snapshotDisplay = Number.isFinite(Number(snapshotVal)) ? Number(snapshotVal).toFixed(2) : "-";
                                   return (
                                     <td
                                       key={m}
                                       className="border border-gray-300 p-0.5 text-center font-bold text-indigo-500 text-[10px]"
                                     >
-                                      {rateVal.toFixed(2)}
+                                      {rateDisplay}
+                                      {snapshotVal !== undefined && snapshotVal !== null && snapshotVal !== "" && (
+                                        <div className="text-[8px] text-amber-600 font-normal mt-0.5">
+                                          締め時固定: {snapshotDisplay}{unit}
+                                        </div>
+                                      )}
                                     </td>
                                   );
                                 })}

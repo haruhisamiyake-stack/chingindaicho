@@ -1511,6 +1511,21 @@ const calculateBonusTaxCore = ({
   return { incomeTax, taxWarning, isBlocking, manualRequired, incomeTaxResultLog };
 };
 
+const calculateGross = ({ basePay, allowanceAmounts }) => {
+  const base = Number(basePay) || 0;
+  let totalAllowances = 0;
+  let totalTaxableAllowances = 0;
+  (allowanceAmounts || []).forEach((a) => {
+    const amount = Number(a.amount) || 0;
+    totalAllowances += amount;
+    if (a.isTaxable) totalTaxableAllowances += amount;
+  });
+  return {
+    grossPay: base + totalAllowances,
+    taxableGross: base + totalTaxableAllowances,
+  };
+};
+
 const calculateBonusCore = ({
   basePay, allowanceAmounts, deductionAmounts, residentTax,
   rates: { health: hRate, pension: pRate, nursing: nRate, childCare: cRate, employment: eRate },
@@ -2414,16 +2429,24 @@ const App = () => {
     if (!isAuthReady || !userId || !tenantId) return;
 
     // 従業員データの購読
+    let hasLoadedEmpsOnce = false;
     const unsubEmps = subscribe(getTenantCol("employees"), (snap) => {
       if (snap.empty) {
-        const newId = `emp_${Date.now()}`;
-        const newEmp = createInitialEmployee("社員①", "001", settings);
-        saveDoc(PATHS.employee(tenantId, newId), {
-          ...newEmp,
-          updatedAt: new Date().toISOString(),
-        }).catch(console.error);
+        if (!hasLoadedEmpsOnce) {
+          const newId = `emp_${Date.now()}`;
+          const newEmp = createInitialEmployee("社員①", "001", settings);
+          saveDoc(PATHS.employee(tenantId, newId), {
+            ...newEmp,
+            updatedAt: new Date().toISOString(),
+          }).catch(console.error);
+        } else {
+          setEmployees({});
+          setSelectedEmployeeId(null);
+          setLoading(false);
+        }
         return;
       }
+      hasLoadedEmpsOnce = true;
 
       const emps = {};
       snap.forEach((doc) => {

@@ -2431,6 +2431,12 @@ const App = () => {
     }
   };
 
+  const handleLogout = async () => {
+    const auth = getAuth(app);
+    await signOut(auth);
+    setUserId(null);
+  };
+
   // ★ tenantsコレクション購読（ポータルリスト自動更新）
   useEffect(() => {
     if (!isAuthReady || !userId) return;
@@ -4050,6 +4056,12 @@ const App = () => {
                 </div>
               )}
             </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-rose-700 text-slate-300 hover:text-white rounded-lg font-bold text-xs transition-colors border border-slate-700"
+            >
+              ログアウト
+            </button>
           </div>
         </header>
         

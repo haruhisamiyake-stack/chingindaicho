@@ -2880,7 +2880,8 @@ const App = () => {
         master: editingMaster,
       },
     }));
-    const empData = employees[editingEmployeeId].data;
+    const empData = employees[editingEmployeeId]?.data;
+    if (!empData) return;
     handleSave(editingEmployeeId, editingMaster, empData);
     setEditingEmployeeId(null);
     setEditingMaster(null);
@@ -2916,18 +2917,19 @@ const App = () => {
       return;
     setSaveStatus("削除中..."); 
 
+    const remainingIds = Object.keys(employees).filter((id) => id !== empId);
     setEmployees((prev) => {
       const next = { ...prev };
       delete next[empId];
-
-      const remainingIds = Object.keys(next);
-
-      if (selectedEmployeeId === empId) {
-        setSelectedEmployeeId(remainingIds.length > 0 ? remainingIds[0] : null);
-      }
-
       return next;
-    }); 
+    });
+    if (selectedEmployeeId === empId) {
+      setSelectedEmployeeId(remainingIds.length > 0 ? remainingIds[0] : null);
+    }
+    if (editingEmployeeId === empId) {
+      setEditingEmployeeId(null);
+      setEditingMaster(null);
+    }
 
     if (selectedTenantId) {
       try {

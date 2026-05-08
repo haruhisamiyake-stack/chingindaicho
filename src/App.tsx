@@ -1897,6 +1897,10 @@ const App = () => {
   const [tenants, setTenants] = useState([]);
   const [selectedTenantId, setSelectedTenantId] = useState(null);
   const tenantId = selectedTenantId;
+  const effectiveSettings = {
+    ...settings,
+    businessType: tenants.find(t => t.id === selectedTenantId)?.businessType || settings?.businessType || "general",
+  };
   const [tenantSearchQuery, setTenantSearchQuery] = useState("");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [newTenantModalOpen, setNewTenantModalOpen] = useState(false);
@@ -2350,7 +2354,7 @@ const App = () => {
     if (!snap.empty) {
       const tenantDoc = snap.docs[0];
       const tenantData = tenantDoc.data();
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null, businessType: d.data().businessType || "general" })));
       setSelectedTenantId(null);
       if (!tenantData.migrationDone) {
         await _migrateUserDataToTenant(uid, tenantDoc.id);
@@ -2419,7 +2423,7 @@ const App = () => {
     if (!isAuthReady || !userId) return;
     const tenantsQuery = queryCol(getCol(...PATHS.tenants()), whereEq("ownerUid", "==", userId));
     const unsubTenants = subscribe(tenantsQuery, (snap) => {
-      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null })));
+      setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null, businessType: d.data().businessType || "general" })));
     });
     return () => unsubTenants();
   }, [isAuthReady, userId]);
@@ -2623,7 +2627,7 @@ const App = () => {
     const snapshotPromises = Object.entries(employees || {}).map(async ([empId, emp]) => {
       const row = emp.data?.years?.[yearStr]?.monthly?.[monthKey];
       if (!row) return;
-      const _snapBizType = settings?.businessType || "general";
+      const _snapBizType = effectiveSettings?.businessType || "general";
       const _snapEKey = _snapBizType === "construction" ? "employmentConstruction" : "employmentGeneral";
       const _snapHealthSched = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
       const _snapPensionSched = settings?.customRateSchedules?.pension?.enabled ? settings.customRateSchedules.pension.schedules : settings?.rateSchedules?.pension;
@@ -2710,7 +2714,7 @@ const App = () => {
         for (const monthKey of MONTHS) {
           const row = yearData.monthly[monthKey];
           if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-            const res = calculateMonthlyResult(m, row, settings, monthKey, yearStr, taxTables);
+            const res = calculateMonthlyResult(m, row, effectiveSettings, monthKey, yearStr, taxTables);
             if (res.incomeTax === null) {
               hasNullTax = true;
               break;
@@ -2720,14 +2724,14 @@ const App = () => {
         if (hasNullTax) break;
 
         if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
            if (bRes.incomeTax === null) {
              hasNullTax = true;
              break;
            }
         }
         if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
            if (bRes2.incomeTax === null) {
              hasNullTax = true;
              break;
@@ -3408,7 +3412,7 @@ const App = () => {
           master: emp.master,
           bonusRow: rowData,
           bonusKey: monthKey,
-          settings,
+          settings: effectiveSettings,
           yearData: currentYearDataObj,
           allowanceDefs:
             settings?.allowanceDefinitions ||
@@ -3428,7 +3432,7 @@ const App = () => {
         calcResult = calculateMonthlyResult(
           emp.master,
           rowData,
-          settings,
+          effectiveSettings,
           monthKey,
           selectedYear,
           taxTables,
@@ -3592,7 +3596,7 @@ const App = () => {
       const monthlyResult = calculateMonthlyResult(
         master,
         row,
-        settings,
+        effectiveSettings,
         m,
         selectedYear,
         taxTables,
@@ -3702,7 +3706,7 @@ const App = () => {
         master,
         bonusRow: b,
         bonusKey: key,
-        settings,
+        settings: effectiveSettings,
         yearData: currentYearData,
         allowanceDefs,
         deductionDefs,
@@ -3798,12 +3802,12 @@ const App = () => {
     payDateText = rowData.payDate || "未設定";
 
     calcResult = calculateBonusResult({
-      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings, yearData: slipYearData,
+      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings: effectiveSettings, yearData: slipYearData,
       allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(rowData), yearStr: selectedYear, taxTables, monthlyLocks,
     });
   } else {
     rowData = slipYearData.monthly[monthKey] || {};
-    calcResult = calculateMonthlyResult(emp.master, rowData, settings, monthKey, selectedYear, taxTables, monthlyLocks);
+    calcResult = calculateMonthlyResult(emp.master, rowData, effectiveSettings, monthKey, selectedYear, taxTables, monthlyLocks);
     titleText = "給与明細書";
     targetMonthText = rowData.salaryMonthText || "未設定";
     payDateText = rowData.payDate || "未設定";
@@ -4886,7 +4890,7 @@ const App = () => {
                           const calcResult = calculateMonthlyResult(
                             emp.master,
                             rowData,
-                            settings,
+                            effectiveSettings,
                             ledgerSelectedMonth,
                             selectedYear,
                             taxTables,
@@ -6808,7 +6812,7 @@ const App = () => {
                                   };
                                   const row = currentYearData.monthly[m] || {};
                                   const targetYearMonth = `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`;
-                                  const _bizType = settings?.businessType || "general";
+                                  const _bizType = effectiveSettings?.businessType || "general";
                                   const _eKey = _bizType === "construction" ? "employmentConstruction" : "employmentGeneral";
                                   const _customKey = rateKey === "employment" ? _eKey : rateKey;
                                   const _customEnabled = settings?.customRateSchedules?.[_customKey]?.enabled;
@@ -7115,7 +7119,7 @@ const App = () => {
                           master: emp.master,
                           bonusRow: rowData,
                           bonusKey: selectedListMonth,
-                          settings,
+                          settings: effectiveSettings,
                           yearData: currentYearDataObj,
                           allowanceDefs,
                           deductionDefs,
@@ -7130,7 +7134,7 @@ const App = () => {
                         calcResult = calculateMonthlyResult(
                           emp.master,
                           rowData,
-                          settings,
+                          effectiveSettings,
                           selectedListMonth,
                           selectedYear,
                           taxTables,
@@ -9504,7 +9508,7 @@ const App = () => {
                     const res = calculateMonthlyResult(
                       emp.master,
                       row,
-                      settings,
+                      effectiveSettings,
                       m,
                       selectedYear,
                       taxTables,
@@ -9541,7 +9545,7 @@ const App = () => {
                     master: emp.master,
                     bonusRow,
                     bonusKey,
-                    settings,
+                    settings: effectiveSettings,
                     yearData,
                     allowanceDefs,
                     deductionDefs,
@@ -10549,10 +10553,10 @@ const App = () => {
                       if (isBonus) {
                         row = yearData[printTargetMonth] || {};
                         if (!row.payDate && !row.basePay && Object.keys(row.allowanceAmounts || {}).length === 0) return null;
-                        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: printTargetMonth, settings, yearData, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
+                        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: printTargetMonth, settings: effectiveSettings, yearData, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
                       } else {
                         row = yearData.monthly?.[printTargetMonth] || {};
-                        calc = calculateMonthlyResult(m, row, settings, printTargetMonth, selectedYear, taxTables, monthlyLocks);
+                        calc = calculateMonthlyResult(m, row, effectiveSettings, printTargetMonth, selectedYear, taxTables, monthlyLocks);
                       }
                       
                       if (calc.grossPay > 0 || Number(row.basePay) > 0) {
@@ -11287,7 +11291,7 @@ const App = () => {
         if (!_isBonus) {
           const _yd = _emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
           const _rd = _yd.monthly?.[selectedListMonth] || {};
-          _isBlocking = calculateMonthlyResult(_emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
+          _isBlocking = calculateMonthlyResult(_emp.master, _rd, effectiveSettings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
         }
         return (
         <div
@@ -11334,7 +11338,7 @@ const App = () => {
           const hasBlockingEmployee = !_isBonusMonth && activeEmployees.some(([id, emp]) => {
             const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
             const _rd = _yd.monthly?.[selectedListMonth] || {};
-            return calculateMonthlyResult(emp.master, _rd, settings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
+            return calculateMonthlyResult(emp.master, _rd, effectiveSettings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
           });
           return (
             <div

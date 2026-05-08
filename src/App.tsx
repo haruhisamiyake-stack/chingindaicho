@@ -1060,6 +1060,13 @@ const formatCurrency = (val) => {
   return Number(val).toLocaleString();
 };
 
+const roundEmploymentInsurance = (amount) => {
+  const n = Number(amount) || 0;
+  const floor = Math.floor(n);
+  const fraction = n - floor;
+  return fraction <= 0.5 ? floor : floor + 1;
+};
+
 const calculateMonthlyCore = ({
   basePay,
   allowanceAmounts,
@@ -1093,7 +1100,7 @@ const calculateMonthlyCore = ({
       : stdBase;
 
   const employment = hasEmployment
-    ? Math.floor(employmentInsGross * (eRate / 1000))
+    ? roundEmploymentInsurance(employmentInsGross * (eRate / 1000))
     : 0;
 
   const stdAmountMissing = (hasHealth || hasPension) && stdAmount === null;
@@ -1493,7 +1500,7 @@ const calculateBonusIns = ({
   const nursing = hasNursing ? Math.floor(healthBonusStd * (nRate / 100)) : 0;
   const pension = hasPension ? Math.floor(pensionBonusStd * (pRate / 100)) : 0;
   const childCare = hasPension ? Math.floor(pensionBonusStd * (cRate / 100)) : 0;
-  const employment = hasEmployment ? Math.floor(grossPay * (eRate / 1000)) : 0;
+  const employment = hasEmployment ? roundEmploymentInsurance(grossPay * (eRate / 1000)) : 0;
   const socialTotal = health + pension + nursing + childCare + employment;
   return { health, pension, nursing, childCare, employment, socialTotal };
 };

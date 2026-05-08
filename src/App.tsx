@@ -1922,6 +1922,8 @@ const App = () => {
   const [editTenantClientCode, setEditTenantClientCode] = useState("");
   const [editTenantPrefectureType, setEditTenantPrefectureType] = useState("okayama");
   const [newTenantBusinessType, setNewTenantBusinessType] = useState("general");
+  const [newTenantClosingDay, setNewTenantClosingDay] = useState("末");
+  const [newTenantPaymentDay, setNewTenantPaymentDay] = useState("翌月15");
   const [editTenantBusinessType, setEditTenantBusinessType] = useState("general");
 
   const [employees, setEmployees] = useState({});
@@ -4249,6 +4251,43 @@ const App = () => {
                       </p>
                     )}
                   </div>
+                  <div className="flex gap-3">
+                    <div className="flex-1">
+                      <label className="block text-xs font-bold text-slate-600 mb-1">給与締日 <span className="text-red-500">*</span></label>
+                      <select
+                        value={newTenantClosingDay}
+                        onChange={(e) => setNewTenantClosingDay(e.target.value)}
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      >
+                        {["末", "5", "10", "15", "20", "25"].map((d) => (
+                          <option key={d} value={d}>{d}日締め</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-xs font-bold text-slate-600 mb-1">給与支給日 <span className="text-red-500">*</span></label>
+                      <select
+                        value={newTenantPaymentDay}
+                        onChange={(e) => setNewTenantPaymentDay(e.target.value)}
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      >
+                        {["当月10","当月15","当月20","当月25","当月末","翌月5","翌月10","翌月15","翌月20","翌月25","翌月末"].map((d) => (
+                          <option key={d} value={d}>{d}払い</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  {(() => {
+                    const previewSettings = { closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay };
+                    const ex = calculateInitialDates(settings?.editableYear || "R08", "04", previewSettings);
+                    return (
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5 text-xs text-blue-800 font-bold">
+                        <span className="text-blue-500 font-black">計算期間プレビュー（4月支給の例）</span><br />
+                        {ex.salaryMonthText}・支給日 {ex.payDate || "未設定"}<br />
+                        計算期間: {ex.periodStart || "—"} 〜 {ex.periodEnd || "—"}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div className="flex justify-end gap-3 mt-8">
                   <button
@@ -4258,6 +4297,8 @@ const App = () => {
                       setNewTenantClientCode("");
                       setNewTenantPrefectureType("okayama");
                       setNewTenantBusinessType("general");
+                      setNewTenantClosingDay("末");
+                      setNewTenantPaymentDay("翌月15");
                     }}
                     className="px-5 py-2 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-100 transition-colors"
                   >
@@ -4273,13 +4314,15 @@ const App = () => {
                       }
                       const newId = `tenant_${Date.now()}`;
                       saveDoc(PATHS.tenant(newId), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString(), prefectureType: newTenantPrefectureType, businessType: newTenantBusinessType })
-                        .then(() => saveDoc(PATHS.settings(newId), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim() }))
+                        .then(() => saveDoc(PATHS.settings(newId), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim(), closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay }))
                         .then(() => {
                           setNewTenantModalOpen(false);
                           setNewTenantName("");
                           setNewTenantClientCode("");
                           setNewTenantPrefectureType("okayama");
                           setNewTenantBusinessType("general");
+                          setNewTenantClosingDay("末");
+                          setNewTenantPaymentDay("翌月15");
                           setSelectedTenantId(newId);
                           setActiveTab("ledger");
                         })

@@ -1533,7 +1533,7 @@ const calculateBonusCore = ({
   tax: { manualIncomeTax, master, settings, yearStr, taxTables },
   ins: { priorHealthBonusStdTotal, lastMonthSalaryAfterSocial },
 }) => {
-  const { grossPay, taxableGross } = calculateGross({ basePay, allowanceAmounts, standardRewardTable: null });
+  const { grossPay, taxableGross } = calculateGross({ basePay, allowanceAmounts });
   const { bonusStdRaw, healthBonusStd, pensionBonusStd } = calculateBonusStd({ grossPay, priorHealthBonusStdTotal });
   const { health, pension, nursing, childCare, employment, socialTotal } = calculateBonusIns({
     healthBonusStd, pensionBonusStd, grossPay,
@@ -6808,58 +6808,30 @@ const App = () => {
                                   };
                                   const row = currentYearData.monthly[m] || {};
                                   const targetYearMonth = `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`;
-                                  const manualEnabled = row[rateKey + "RateManualEnabled"] === true;
-                                  const _eSchedDisp = rateKey === "employment"
-                                    ? (settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment)
-                                    : settings?.rateSchedules?.[rateKey];
-                                  const rateVal = resolveRate(
-                                    manualEnabled ? row[rateKey + "Rate"] : null,
-                                    row.lockedSnapshotRates?.[rateKey],
-                                    _eSchedDisp,
-                                    targetYearMonth,
-                                    defaultRates[rateKey]
-                                  );
+                                  const _bizType = settings?.businessType || "general";
+                                  const _eKey = _bizType === "construction" ? "employmentConstruction" : "employmentGeneral";
+                                  const _customKey = rateKey === "employment" ? _eKey : rateKey;
+                                  const _customEnabled = settings?.customRateSchedules?.[_customKey]?.enabled;
+                                  const _dispSched = _customEnabled
+                                    ? settings.customRateSchedules[_customKey].schedules
+                                    : (rateKey === "employment"
+                                        ? (settings?.rateSchedules?.[_eKey] || settings?.rateSchedules?.employment)
+                                        : settings?.rateSchedules?.[rateKey]);
+                                  const snapshotVal = row.lockedSnapshotRates?.[rateKey];
+                                  const rateVal = resolveRate(null, snapshotVal, _dispSched, targetYearMonth, defaultRates[rateKey]);
                                   const unit = rateKey === "employment" ? "‰" : "%";
-                                  const snapshotVal = currentYearData.monthly[m]?.lockedSnapshotRates?.[rateKey];
                                   const rateDisplay = Number.isFinite(Number(rateVal)) ? Number(rateVal).toFixed(3) : "-";
-                                  const snapshotDisplay = Number.isFinite(Number(snapshotVal)) ? Number(snapshotVal).toFixed(3) : "-";
-                                  const isMonthLocked = isYearLocked || currentYearData.monthly[m]?.isLocked;
+                                  const isSnapshotActive = snapshotVal !== undefined && snapshotVal !== null && snapshotVal !== "";
+                                  const rateSource = isSnapshotActive ? "固定" : _customEnabled ? "個別" : "全体";
+                                  const sourceColor = isSnapshotActive ? "text-amber-600" : _customEnabled ? "text-blue-500" : "text-slate-400";
                                   return (
                                     <td
                                       key={m}
-                                      className={`border border-gray-300 p-0.5 text-center text-[10px] ${manualEnabled ? "bg-blue-50/60" : ""}`}
+                                      className="border border-gray-300 p-0.5 text-center text-[10px]"
                                     >
-                                      <div className="flex flex-col items-center gap-0.5">
-                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && <label className={`flex items-center gap-0.5 text-[7px] cursor-pointer ${isMonthLocked ? "opacity-40" : "text-slate-400"}`}>
-                                          <input
-                                            type="checkbox"
-                                            checked={manualEnabled}
-                                            onChange={(e) => updateMonthly(selectedYear, m, rateKey + "RateManualEnabled", e.target.checked)}
-                                            disabled={isMonthLocked}
-                                            className="w-2.5 h-2.5 accent-blue-500"
-                                          />
-                                          手動
-                                        </label>}
-                                        {ENABLE_LEGACY_MONTHLY_RATE_UI && (
-                                          manualEnabled ? (
-                                          <input
-                                            type="number"
-                                            step="0.001"
-                                            value={row[rateKey + "Rate"] ?? ""}
-                                            onChange={(e) => updateMonthly(selectedYear, m, rateKey + "Rate", e.target.value)}
-                                            disabled={isMonthLocked}
-                                            className={`w-full text-right outline-none font-mono text-[10px] px-0.5 border border-blue-300 rounded bg-white text-blue-800 ${isMonthLocked ? "cursor-not-allowed opacity-50" : ""}`}
-                                          />
-                                        ) : (
-                                          <span className="font-bold text-indigo-400">
-                                            {rateDisplay}
-                                          </span>
-                                        ))}
-                                        {snapshotVal !== undefined && snapshotVal !== null && snapshotVal !== "" && (
-                                          <div className="text-[7px] text-amber-600 font-normal">
-                                            締:{snapshotDisplay}{unit}
-                                          </div>
-                                        )}
+                                      <div className="flex flex-col items-center gap-0">
+                                        <span className="font-mono font-bold text-slate-700 leading-tight">{rateDisplay}</span>
+                                        <span className={`text-[7px] font-bold leading-tight ${sourceColor}`}>{rateSource}</span>
                                       </div>
                                     </td>
                                   );

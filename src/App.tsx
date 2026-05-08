@@ -1,7 +1,8 @@
 ﻿// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, fetchDocs, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "firebase/auth";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
+import LoginScreen from "./LoginScreen";
 import { BONUS_NTA_ROWS } from "./data/bonusNtaTable";
 import {
   Calculator,
@@ -1878,6 +1879,8 @@ const App = () => {
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
   
 
   // テナントスコープのショートカット
@@ -2415,13 +2418,16 @@ const App = () => {
     });
   }, []);
 
-  const handleGoogleLogin = async () => {
-    const auth = getAuth(app);
-    const provider = new GoogleAuthProvider();
+  const handleEmailLogin = async (email, password) => {
+    setAuthError("");
+    setAuthLoading(true);
     try {
-      await signInWithPopup(auth, provider);
-    } catch (e) {
-      console.error("ログインエラー:", e);
+      const auth = getAuth(app);
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err) {
+      setAuthError("メールアドレスまたはパスワードが違います。");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -3974,25 +3980,14 @@ const App = () => {
       </div>
     );
 
-  // ★ 新設：未ログイン時の画面
+  // 未ログイン時の画面
   if (!userId) {
     return (
-      <div className="h-screen flex flex-col items-center justify-center bg-slate-900 text-white font-sans">
-        <div className="bg-slate-800 p-10 rounded-2xl shadow-2xl flex flex-col items-center max-w-md w-full border border-slate-700">
-          <Calculator className="text-emerald-400 mb-6" size={64} />
-          <h1 className="text-3xl font-black tracking-widest mb-2 uppercase">Payroll Cloud</h1>
-          <p className="text-sm text-slate-400 mb-10 font-bold tracking-widest">税理士法人アストラスト</p>
-          <button 
-            onClick={handleGoogleLogin}
-            className="w-full bg-white text-slate-800 px-8 py-4 rounded-xl font-black text-sm shadow-lg hover:bg-slate-100 hover:scale-[1.02] transition-all flex justify-center items-center gap-3"
-          >
-            <User size={18} className="text-indigo-500" /> Googleアカウントでログイン
-          </button>
-        </div>
-        <div className="mt-8 text-xs text-slate-500 font-bold flex items-center gap-2">
-          <ShieldCheck size={14} /> クラウド賃金台帳システム - セキュア接続
-        </div>
-      </div>
+      <LoginScreen
+        onLogin={handleEmailLogin}
+        loading={authLoading}
+        error={authError}
+      />
     );
   }
 

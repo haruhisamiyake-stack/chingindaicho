@@ -4961,7 +4961,7 @@ const App = () => {
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                                    <User size={16} /> 個人別（1年分）          
+                                    <User size={16} /> 社員別年間台帳          
                        {" "}
                 </button>
                                {" "}
@@ -4973,7 +4973,7 @@ const App = () => {
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                                    <Users size={16} /> 月別（全社員）          
+                                    <Users size={16} /> 支給控除一覧表（月別・全社員）          
                        {" "}
                 </button>
                              {" "}
@@ -5004,8 +5004,13 @@ const App = () => {
               )}
                          {" "}
             </div>
-                        {/* ▼ 月別（全社員）ビューのテーブル ▼ */}           {" "}
+                        {/* ▼ 支給控除一覧表（月別・全社員）ビューのテーブル：帳票出力センターの「支給控除一覧表」と同一用途 ▼ */}           {" "}
             {ledgerViewMode === "monthly" && (
+              <>
+              <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold rounded-lg px-3 py-2 mb-3">
+                月ごとの全社員の支給額・控除額・差引支給額を一覧で確認・入力する帳票です。<br />
+                帳票出力センターの「支給控除一覧表（月別・全社員）」と同じ用途です（こちらは編集可能、帳票出力センターは印刷プレビュー）。
+              </div>
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col mb-4">
                                                                {" "}
                 <div className="p-4 bg-indigo-900 text-white flex justify-between items-center">
@@ -5016,7 +5021,7 @@ const App = () => {
                                                                  {" "}
                     <h2 className="font-black text-sm tracking-widest uppercase">
                                             {parseInt(ledgerSelectedMonth, 10)}
-                      月支給分 全社員一括入力                    {" "}
+                      月支給分 支給控除一覧表（全社員）                    {" "}
                     </h2>
                                                                            {" "}
                   </div>
@@ -5289,8 +5294,9 @@ const App = () => {
                 </div>
                              {" "}
               </div>
+              </>
             )}
-                        {/* ▼ 既存の個人別（1年分）ビュー ▼ */}
+                        {/* ▼ 既存の社員別年間台帳ビュー ▼ */}
             <div className={ledgerViewMode === "annual" ? "block" : "hidden"}>
               {isYearLocked && (
                 <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg font-bold text-sm flex items-center gap-2 shadow-sm mb-4">
@@ -10748,7 +10754,7 @@ const App = () => {
                       printDocType === "monthlySummary" ? "bg-amber-50 border-amber-500 text-amber-700 shadow-sm" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
                     }`}
                   >
-                    支給控除一覧表 (月別まとめ)
+                    支給控除一覧表（月別・全社員）
                   </button>
                   <button
                     onClick={() => setPrintDocType("ledger")}
@@ -10756,7 +10762,7 @@ const App = () => {
                       printDocType === "ledger" ? "bg-emerald-50 border-emerald-500 text-emerald-700 shadow-sm" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
                     }`}
                   >
-                    賃金台帳 (個人別)
+                    賃金台帳（社員別年間台帳）
                   </button>
                 </div>
               </div>

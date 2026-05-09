@@ -1116,8 +1116,11 @@ const calculateMonthlyCore = ({
         grossPay,
         allowanceAmounts,
         socialInsGross,
+        employmentInsGross,
         stdAmount,
         hRate, pRate, nRate, cRate, eRate,
+        employment,
+        hasEmployment,
       },
     };
   }
@@ -1258,6 +1261,50 @@ const calculateMonthlyCore = ({
   };
 };
 
+// 月次給与の社会保険料ログを生成する純関数。
+// 「対象外（未加入）」「計算不可（標準報酬月額未設定）」「実額表示」を加入区分ごとに切り分ける。
+// 外部クロージャに依存せず、必要な値はすべて引数経由で受け取る（calcLog は副作用先として渡される配列）。
+const pushSocialInsLogs = ({
+  calcLog,
+  debug,
+  hasHealth,
+  hasPension,
+  hasEmployment,
+  hasNursingIns,
+  stdAmtSet,
+}) => {
+  const logIns = debug.ins || {};
+  if (!hasHealth) {
+    calcLog.push(`  -> 健康保険料: 対象外（健康保険未加入）`);
+  } else if (!stdAmtSet) {
+    calcLog.push(`  -> 健康保険料: 計算不可（標準報酬月額未設定）`);
+  } else {
+    calcLog.push(`  -> 健康保険料: ${formatCurrency(logIns.health ?? 0)}円`);
+  }
+  if (!hasPension) {
+    calcLog.push(`  -> 厚生年金料: 対象外（厚生年金未加入）`);
+  } else if (!stdAmtSet) {
+    calcLog.push(`  -> 厚生年金料: 計算不可（標準報酬月額未設定）`);
+  } else {
+    calcLog.push(`  -> 厚生年金料: ${formatCurrency(logIns.pension ?? 0)}円`);
+  }
+  if (hasHealth && hasNursingIns) {
+    if (!stdAmtSet) {
+      calcLog.push(`  -> 介護保険料: 計算不可（標準報酬月額未設定）`);
+    } else if ((logIns.nursing ?? 0) > 0) {
+      calcLog.push(`  -> 介護保険料: ${formatCurrency(logIns.nursing)}円`);
+    }
+  }
+  if (hasPension && (logIns.childCare ?? 0) > 0) {
+    calcLog.push(`  -> 子ども・子育て支援金: ${formatCurrency(logIns.childCare)}円`);
+  }
+  if (hasEmployment) {
+    calcLog.push(`  -> 雇用保険料: ${formatCurrency(debug.employment ?? 0)}円 (対象額:${formatCurrency(debug.employmentInsGross ?? 0)}円)`);
+  } else {
+    calcLog.push(`  -> 雇用保険料: 対象外（雇用保険未加入）`);
+  }
+};
+
 const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}, monthlyLocks = {}) => {
   if (!master || !row) return {};
 
@@ -1381,7 +1428,17 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   calcLog.push(`- 総支給額: ${formatCurrency(debug.grossPay)}円`);
   calcLog.push(`\n【社会保険料】`);
   calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(debug.socialInsGross)}円`);
-  calcLog.push(`- 適用標準報酬月額: ${debug.stdAmount === null ? "（未入力）" : formatCurrency(debug.stdAmount) + "円"}`);
+  // 標準報酬月額の表示を「未加入で対象外」「加入だが未設定」「設定済み」の3ケースに分離。
+  const _hasAnySocialIns = hasHealth || hasPension;
+  const _stdAmtSet = debug.stdAmount !== null && debug.stdAmount !== undefined && debug.stdAmount > 0;
+  const _hasNursingIns = row.hasNursingIns === 1;
+  if (!_hasAnySocialIns) {
+    calcLog.push(`- 適用標準報酬月額: 対象外（健保・厚年とも未加入）`);
+  } else if (!_stdAmtSet) {
+    calcLog.push(`- 適用標準報酬月額: ⚠ 未設定（健保／厚年は計算不可）`);
+  } else {
+    calcLog.push(`- 適用標準報酬月額: ${formatCurrency(debug.stdAmount)}円`);
+  }
   calcLog.push(
     `- 適用保険料率 (健保:${debug.hRate}% / 厚年:${debug.pRate}% / 介護:${debug.nRate}% / 支援金:${debug.cRate}% / 雇用:${debug.eRate}‰)`
   );
@@ -1389,6 +1446,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   if (coreResult === null) {
     if (error === "stdAmountMissing") {
       calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算を中断します。`);
+      pushSocialInsLogs({ calcLog, debug, hasHealth, hasPension, hasEmployment, hasNursingIns: _hasNursingIns, stdAmtSet: _stdAmtSet });
     } else {
       if (debug.gradeInfo) {
         const { sGrade, eGrade, gDiff, stdAmount: sa, estStdAmount: ea } = debug.gradeInfo;
@@ -1400,18 +1458,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       }
       if (row.isDoubleSocialIns)
         calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
-      const logIns = debug.ins || {};
-      calcLog.push(`  -> 健康保険料: ${formatCurrency(logIns.health ?? 0)}円`);
-      calcLog.push(`  -> 厚生年金料: ${formatCurrency(logIns.pension ?? 0)}円`);
-      if ((logIns.nursing ?? 0) > 0)
-        calcLog.push(`  -> 介護保険料: ${formatCurrency(logIns.nursing)}円`);
-      if ((logIns.childCare ?? 0) > 0)
-        calcLog.push(
-          `  -> 子ども・子育て支援金: ${formatCurrency(logIns.childCare)}円`
-        );
-      calcLog.push(
-        `  -> 雇用保険料: ${formatCurrency(debug.employment ?? 0)}円 (対象額:${formatCurrency(debug.employmentInsGross ?? 0)}円)`
-      );
+      pushSocialInsLogs({ calcLog, debug, hasHealth, hasPension, hasEmployment, hasNursingIns: _hasNursingIns, stdAmtSet: _stdAmtSet });
       calcLog.push(`- 社会保険料合計: ${formatCurrency(debug.socialTotal ?? 0)}円\n`);
       if (debug.incomeTaxResultLog?.length > 0) {
         calcLog.push(...debug.incomeTaxResultLog);
@@ -1439,18 +1486,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   if (row.isDoubleSocialIns)
     calcLog.push(`※ 退職時等：社保2ヶ月分徴収フラグON`);
 
-  const logIns = debug.ins || {};
-  calcLog.push(`  -> 健康保険料: ${formatCurrency(logIns.health ?? 0)}円`);
-  calcLog.push(`  -> 厚生年金料: ${formatCurrency(logIns.pension ?? 0)}円`);
-  if ((logIns.nursing ?? 0) > 0)
-    calcLog.push(`  -> 介護保険料: ${formatCurrency(logIns.nursing)}円`);
-  if ((logIns.childCare ?? 0) > 0)
-    calcLog.push(
-      `  -> 子ども・子育て支援金: ${formatCurrency(logIns.childCare)}円`
-    );
-  calcLog.push(
-    `  -> 雇用保険料: ${formatCurrency(debug.employment ?? 0)}円 (対象額:${formatCurrency(debug.employmentInsGross ?? 0)}円)`
-  );
+  pushSocialInsLogs({ calcLog, debug, hasHealth, hasPension, hasEmployment, hasNursingIns: _hasNursingIns, stdAmtSet: _stdAmtSet });
   calcLog.push(`- 社会保険料合計: ${formatCurrency(debug.socialTotal ?? 0)}円\n`);
 
   if (debug.incomeTaxResultLog?.length > 0) {
@@ -2002,7 +2038,11 @@ const App = () => {
   const [aggMonth, setAggMonth] = useState("01"); // ★追加: 集計対象月 (毎月納付の場合)
 
   const [logModalData, setLogModalData] = useState(null); // ★追加: 計算ログモーダル用の状態
-  const [checkModalData, setCheckModalData] = useState(null); // ★追加: 月次チェックモーダル用の状態
+  const [checkModalData, setCheckModalData] = useState(null); // ★追加: 月次チェックモーダル用の状態（モーダル表示制御）
+  // ★月次チェック結果の年×月別履歴: { [year]: { [month]: { errors, warnings, infos, at } } }
+  // 月次締め画面のサマリー表示で参照。モーダルを閉じても消えず、月切替・年切替でも復元される。
+  // 将来的な「月別履歴」「再確認」拡張のための土台でもある。Firestore には保存しない（実行時のみ保持）。
+  const [monthlyCheckResults, setMonthlyCheckResults] = useState({});
   const [overrideModal, setOverrideModal] = useState(null); // { month, fieldKey, fieldLabel, calcValue }
   const [overrideInputValue, setOverrideInputValue] = useState("");
   const [overrideInputMemo, setOverrideInputMemo] = useState("");
@@ -3651,6 +3691,14 @@ const App = () => {
       warnings,
       infos,
     });
+    // 月別履歴にも保存（年×月キー）。モーダルが閉じてもサマリー表示用に残る。
+    setMonthlyCheckResults((prev) => ({
+      ...prev,
+      [selectedYear]: {
+        ...(prev?.[selectedYear] || {}),
+        [monthKey]: { errors, warnings, infos, at: Date.now() },
+      },
+    }));
   };
 
   const getDisplayValue = (month, fieldKey, calcValue) => {
@@ -10916,10 +10964,11 @@ const App = () => {
                   <ShieldCheck size={16} /> 月次チェックを実行
                 </button>
 
-                {/* ▼ チェック結果サマリー: handleMonthlyCheck が更新する checkModalData を参照（既存 state を流用、新ロジックなし） ▼ */}
+                {/* ▼ チェック結果サマリー: 年×月別の履歴 state を参照（モーダルを閉じた後・月切替後も維持） ▼ */}
                 {(() => {
-                  // checkModalData.month が現在の対象月と一致しない場合は「未実行」扱い（年度・月変更時に古い結果を出さない）
-                  const isStale = !checkModalData || checkModalData.month !== monthlyCloseMonth;
+                  // 対象年度×対象月の結果が存在しなければ「未実行」扱い
+                  const _result = monthlyCheckResults?.[selectedYear]?.[monthlyCloseMonth];
+                  const isStale = !_result;
                   const _isBonusList = monthlyCloseMonth === "bonus" || monthlyCloseMonth === "bonus2";
                   // 対象社員数・計算済み人数・手入力修正件数（既存データから安全に集計）
                   const activeEmps = Object.entries(employees).filter(([, emp]) => {
@@ -10952,9 +11001,9 @@ const App = () => {
                     }
                   });
                   const isLocked = isMonthGloballyLocked(selectedYear, monthlyCloseMonth);
-                  const errCount = isStale ? 0 : checkModalData.errors.length;
-                  const warnCount = isStale ? 0 : checkModalData.warnings.length;
-                  const infoCount = isStale ? 0 : checkModalData.infos.length;
+                  const errCount = isStale ? 0 : _result.errors.length;
+                  const warnCount = isStale ? 0 : _result.warnings.length;
+                  const infoCount = isStale ? 0 : _result.infos.length;
                   const monthLabel = monthlyCloseMonth === "bonus" ? "賞与1" : monthlyCloseMonth === "bonus2" ? "賞与2" : `${parseInt(monthlyCloseMonth, 10)}月支給分`;
                   // ステータス判定
                   let statusLabel = "未実行";
@@ -10986,7 +11035,14 @@ const App = () => {
                       )}
                       {!isStale && (errCount > 0 || warnCount > 0) && (
                         <button
-                          onClick={() => { /* 既存モーダル経由で詳細を再表示 */ setCheckModalData({ ...checkModalData }); }}
+                          onClick={() => { /* 履歴 state から既存モーダルへ再注入（モーダルが閉じていても再表示できる） */
+                            setCheckModalData({
+                              month: monthlyCloseMonth,
+                              errors: _result.errors,
+                              warnings: _result.warnings,
+                              infos: _result.infos,
+                            });
+                          }}
                           className="mt-3 text-[10px] font-bold text-indigo-600 hover:text-indigo-500 underline"
                         >
                           詳細を確認する

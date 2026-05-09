@@ -2007,7 +2007,7 @@ const App = () => {
   const [overrideInputValue, setOverrideInputValue] = useState("");
   const [overrideInputMemo, setOverrideInputMemo] = useState("");
 
-  // ★ 帳票出力センター用のステート
+  // ★ 帳票出力用のステート
   const [printDocType, setPrintDocType] = useState("payslip"); // payslip, ledger, withholding
   const [printTargetMonth, setPrintTargetMonth] = useState("01");
 
@@ -4870,12 +4870,13 @@ const App = () => {
 
         <nav className={`${isSidebarCollapsed ? "p-2" : "p-4"} space-y-2 border-b border-slate-800`}>
           {[
+            // 業務導線順: 入力 → 一覧 → 帳票出力 → 集計 → マスタ
             { tab: "ledger",       icon: Layout,   label: "賃金台帳",         activeColor: "bg-emerald-600" },
             { tab: "payrollList",  icon: List,     label: "給与明細一覧表",   activeColor: "bg-indigo-600" },
+            { tab: "printCenter",  icon: Printer,  label: "帳票出力", activeColor: "bg-blue-600" },
+            { tab: "aggregation",  icon: FileText, label: "集計・申告",       activeColor: "bg-rose-600" },
             { tab: "employees",    icon: Users,    label: "社員登録",         activeColor: "bg-teal-600" },
             { tab: "settings",     icon: Settings, label: "会社個別設定",     activeColor: "bg-orange-600" },
-            { tab: "aggregation",  icon: FileText, label: "集計・申告",       activeColor: "bg-rose-600" },
-            { tab: "printCenter",  icon: Printer,  label: "帳票出力センター", activeColor: "bg-blue-600" },
           ].map(({ tab, icon: Icon, label, activeColor }) => (
             <button
               key={tab}
@@ -5229,7 +5230,7 @@ const App = () => {
                       window.print();
                       document.title = originalTitle;
                     }}
-                    title="帳票出力センターの支給控除一覧表（月別・全社員）と同じ形式で印刷します"
+                    title="帳票出力の支給控除一覧表（月別・全社員）と同じ形式で印刷します"
                     aria-label="支給控除一覧表を印刷"
                     className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
                   >
@@ -5238,13 +5239,13 @@ const App = () => {
                 </>
               )}
             </div>
-                        {/* ▼ 支給控除一覧表（月別・全社員）ビューのテーブル：帳票出力センターの「支給控除一覧表」と同一用途 ▼ */}           {" "}
+                        {/* ▼ 支給控除一覧表（月別・全社員）ビューのテーブル：帳票出力の「支給控除一覧表」と同一用途 ▼ */}           {" "}
             {ledgerViewMode === "monthly" && (
               <>
               <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold rounded-lg px-3 py-2 mb-3">
                 月ごとの全社員の支給額・控除額・差引支給額を一覧で確認・入力できます。
               </div>
-              {/* ▼ 印刷用の print-only print-area: 帳票出力センターと同じ renderMonthlySummary を描画 ▼ */}
+              {/* ▼ 印刷用の print-only print-area: 帳票出力と同じ renderMonthlySummary を描画 ▼ */}
               {/* Tailwind の hidden は display:none で、@media print の visibility 制御では復元されないため
                   専用の .print-only-block クラスで !important display:block を強制する。 */}
               <div className="print-only-block print-area">
@@ -10942,7 +10943,7 @@ const App = () => {
         );
       })()}
 
-       {/* --- 帳票出力センター 独立画面 --- */}
+       {/* --- 帳票出力 独立画面 --- */}
         {activeTab === "printCenter" && (
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto flex gap-6">
             
@@ -10951,7 +10952,7 @@ const App = () => {
               <div>
                 <h2 className="text-lg font-black text-slate-800 flex items-center gap-2 border-b border-slate-200 pb-3">
                   <Printer className="text-blue-600" size={20} />
-                  帳票出力センター
+                  帳票出力
                 </h2>
               </div>
 

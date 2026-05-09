@@ -10815,42 +10815,63 @@ const App = () => {
 
               {/* 3. アクションエリア */}
               <div className="mt-auto border-t border-slate-200 pt-5 space-y-3 no-print">
-                <button
-                  onClick={() => {
-                    let fileName = "";
-                    
-                    if (printDocType === "monthlySummary") {
-                      const monthStr = printTargetMonth === "bonus" ? "賞与1" : printTargetMonth === "bonus2" ? "賞与2" : `${parseInt(printTargetMonth, 10)}月分`;
-                      fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
-                    } else {
-                      if (!selectedEmployeeId) return alert("社員を選択してください。");
-                      const emp = employees[selectedEmployeeId];
-                      if (!emp) return;
-                      const empName = emp.master?.name || "未設定";
-                      
-                      if (printDocType === "payslip") {
-                        const monthStr = printTargetMonth === "bonus" ? "賞与1" : printTargetMonth === "bonus2" ? "賞与2" : `${parseInt(printTargetMonth, 10)}月分給与明細`;
-                        fileName = `${selectedYear}_${monthStr}_${empName}`;
-                      } else if (printDocType === "ledger") {
-                        fileName = `${selectedYear}_賃金台帳_${empName}`;
-                      }
-                    }
-                    
-                    if (fileName) {
-                      const originalTitle = document.title;
-                      document.title = fileName;
-                      window.print();
-                      document.title = originalTitle;
-                    } else {
-                      alert("現在この帳票のPDF出力には対応していません。");
-                    }
-                  }}
-                  className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-2"
-                >
-                  <Download size={18} />
-                  <span>PDFで保存 / 印刷する</span>
-                </button>
-                
+                {(() => {
+                  const _needsEmployee = printDocType === "payslip" || printDocType === "ledger";
+                  const _isDisabled = _needsEmployee && !selectedEmployeeId;
+                  return (
+                    <>
+                      <button
+                        onClick={() => {
+                          // 給与明細／賃金台帳は既存の良い印刷モーダルに委譲することで DOM/CSS/page-break を完全一致させる。
+                          // 月別支給控除一覧表は既存モーダルが無いため、従来どおり印刷センター自身の print-area を印刷する。
+                          if (printDocType === "payslip") {
+                            if (!selectedEmployeeId) return;
+                            setSelectedListMonth(printTargetMonth);
+                            setSlipEmployeeId(selectedEmployeeId);
+                            return;
+                          }
+                          if (printDocType === "ledger") {
+                            if (!selectedEmployeeId) return;
+                            setIsLedgerPrintOpen(true);
+                            return;
+                          }
+                          if (printDocType === "monthlySummary") {
+                            const monthStr = printTargetMonth === "bonus" ? "賞与1" : printTargetMonth === "bonus2" ? "賞与2" : `${parseInt(printTargetMonth, 10)}月分`;
+                            const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
+                            const originalTitle = document.title;
+                            document.title = fileName;
+                            window.print();
+                            document.title = originalTitle;
+                            return;
+                          }
+                          alert("現在この帳票のPDF出力には対応していません。");
+                        }}
+                        disabled={_isDisabled}
+                        title={_isDisabled ? "先に社員を選択してください" : undefined}
+                        className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:bg-slate-300 text-white font-black py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-2"
+                      >
+                        {printDocType === "payslip" || printDocType === "ledger" ? (
+                          <Printer size={18} />
+                        ) : (
+                          <Download size={18} />
+                        )}
+                        <span>
+                          {printDocType === "payslip"
+                            ? "明細印刷プレビューを開く"
+                            : printDocType === "ledger"
+                            ? "台帳印刷プレビューを開く"
+                            : "PDFで保存 / 印刷する"}
+                        </span>
+                      </button>
+                      {_isDisabled && (
+                        <p className="text-[11px] text-slate-500 font-bold text-center -mt-1">
+                          ※ 先に社員を選択してください
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
+
                 {printDocType === "payslip" && (
                   <button
                     onClick={() => {
@@ -10867,7 +10888,10 @@ const App = () => {
             </div>
 
             {/* 右側：プレビューパネル */}
-            <div className="flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative print-area">
+            {/* 印刷センター固有(支給控除一覧表)を印刷する時のみ自身を print-area として扱う。
+                給与明細・賃金台帳は既存印刷モーダルへ委譲するため、その間は print-area を外して
+                印刷時の二重表示・レイアウト衝突を防ぐ。 */}
+            <div className={`flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative ${(slipEmployeeId || isBulkPrintOpen || isLedgerPrintOpen) ? "" : "print-area print:rounded-none print:shadow-none print:border-0 print:p-0 print:m-0 print:overflow-visible print:block"}`}>
               <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-300 no-print">
                 <h3 className="text-lg font-black text-slate-700 flex items-center gap-2">
                   <Printer size={20} className="text-slate-500" />
@@ -10877,12 +10901,12 @@ const App = () => {
                   {printDocType === "payslip" ? "A4縦" : "A4横"}
                 </div>
               </div>
-              
-              <div className="flex-1 flex justify-center items-start">
+
+              <div className="flex-1 flex justify-center items-start print:block">
                 {/* 実際の帳票の表示 */}
                 {printDocType === "payslip" ? (
                   selectedEmployeeId && employees[selectedEmployeeId] ? (
-                    <div className="w-full max-w-[850px] bg-white shadow-xl mx-auto print:shadow-none print:w-full print:max-w-none">
+                    <div className="w-full max-w-[850px] bg-white shadow-xl mx-auto print:shadow-none print:w-full print:max-w-none print:bg-transparent">
                       {renderPayslip(
                         selectedEmployeeId,
                         employees[selectedEmployeeId],

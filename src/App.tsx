@@ -10900,7 +10900,7 @@ const App = () => {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* カード1：月次チェック（既存 handleMonthlyCheck を呼ぶ） */}
+              {/* カード1：月次チェック（既存 handleMonthlyCheck を呼ぶ） + チェック結果サマリー */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
                 <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
                   <ShieldCheck size={18} className="text-amber-500" /> 月次チェック
@@ -10915,6 +10915,86 @@ const App = () => {
                 >
                   <ShieldCheck size={16} /> 月次チェックを実行
                 </button>
+
+                {/* ▼ チェック結果サマリー: handleMonthlyCheck が更新する checkModalData を参照（既存 state を流用、新ロジックなし） ▼ */}
+                {(() => {
+                  // checkModalData.month が現在の対象月と一致しない場合は「未実行」扱い（年度・月変更時に古い結果を出さない）
+                  const isStale = !checkModalData || checkModalData.month !== monthlyCloseMonth;
+                  const _isBonusList = monthlyCloseMonth === "bonus" || monthlyCloseMonth === "bonus2";
+                  // 対象社員数・計算済み人数・手入力修正件数（既存データから安全に集計）
+                  const activeEmps = Object.entries(employees).filter(([, emp]) => {
+                    if (emp.master?.status !== "retired") return true;
+                    // 退職者でも対象月に支給データがあれば対象にカウント（handleMonthlyCheck と同じ思想）
+                    const _yd = emp.data?.years?.[selectedYear];
+                    if (!_yd) return false;
+                    const _row = _isBonusList ? (_yd[monthlyCloseMonth] || {}) : (_yd.monthly?.[monthlyCloseMonth] || {});
+                    return Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0;
+                  });
+                  let calcedCount = 0;
+                  let manualOverrideCount = 0;
+                  activeEmps.forEach(([, emp]) => {
+                    const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+                    const _row = _isBonusList ? (_yd[monthlyCloseMonth] || {}) : (_yd.monthly?.[monthlyCloseMonth] || {});
+                    const _calc = _isBonusList
+                      ? calculateBonusResult({
+                          master: emp.master, bonusRow: _row, bonusKey: monthlyCloseMonth,
+                          settings: effectiveSettings, yearData: _yd,
+                          allowanceDefs: settings?.allowanceDefinitions || emp.master?.allowanceDefinitions || [],
+                          deductionDefs: settings?.deductionDefinitions || emp.master?.deductionDefinitions || [],
+                          monthKeyForRates: getBonusRateMonth(_row), yearStr: selectedYear, taxTables, monthlyLocks,
+                        })
+                      : calculateMonthlyResult(emp.master, _row, effectiveSettings, monthlyCloseMonth, selectedYear, taxTables, monthlyLocks);
+                    if (_calc?.calcSuccess === true) calcedCount += 1;
+                    // 手入力修正件数: 対象月の manualOverrides に enabled な項目があれば 1 人とカウント（賞与は対象外）
+                    if (!_isBonusList) {
+                      const _ovs = _yd.manualOverrides?.[monthlyCloseMonth] || {};
+                      if (Object.values(_ovs).some((o) => o?.enabled)) manualOverrideCount += 1;
+                    }
+                  });
+                  const isLocked = isMonthGloballyLocked(selectedYear, monthlyCloseMonth);
+                  const errCount = isStale ? 0 : checkModalData.errors.length;
+                  const warnCount = isStale ? 0 : checkModalData.warnings.length;
+                  const infoCount = isStale ? 0 : checkModalData.infos.length;
+                  const monthLabel = monthlyCloseMonth === "bonus" ? "賞与1" : monthlyCloseMonth === "bonus2" ? "賞与2" : `${parseInt(monthlyCloseMonth, 10)}月支給分`;
+                  // ステータス判定
+                  let statusLabel = "未実行";
+                  let statusClass = "bg-slate-100 text-slate-600 border-slate-300";
+                  if (!isStale) {
+                    if (errCount > 0) { statusLabel = "重大エラーあり"; statusClass = "bg-red-50 text-red-700 border-red-300"; }
+                    else if (warnCount > 0) { statusLabel = "警告あり"; statusClass = "bg-amber-50 text-amber-700 border-amber-300"; }
+                    else { statusLabel = "問題なし"; statusClass = "bg-emerald-50 text-emerald-700 border-emerald-300"; }
+                  }
+                  return (
+                    <div className="mt-4 pt-4 border-t border-slate-100">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-black text-slate-700">チェック結果サマリー</h4>
+                        <span className={`text-[10px] font-black px-2 py-0.5 rounded border ${statusClass}`}>{statusLabel}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 mb-2">対象：{selectedYear} / {monthLabel}</div>
+                      {isStale ? (
+                        <p className="text-xs text-slate-400 italic">まだ月次チェックは実行されていません。</p>
+                      ) : (
+                        <ul className="text-[11px] text-slate-700 space-y-1">
+                          <li className="flex justify-between"><span>対象社員：</span><span className="font-mono font-bold">{activeEmps.length} 人</span></li>
+                          <li className="flex justify-between"><span>計算済み：</span><span className="font-mono font-bold">{calcedCount} 人</span></li>
+                          <li className="flex justify-between"><span className={errCount > 0 ? "text-red-600 font-bold" : ""}>重大エラー：</span><span className={`font-mono font-bold ${errCount > 0 ? "text-red-600" : ""}`}>{errCount} 件</span></li>
+                          <li className="flex justify-between"><span className={warnCount > 0 ? "text-amber-700 font-bold" : ""}>警告：</span><span className={`font-mono font-bold ${warnCount > 0 ? "text-amber-700" : ""}`}>{warnCount} 件</span></li>
+                          <li className="flex justify-between"><span>案内（年齢到達等）：</span><span className="font-mono font-bold">{infoCount} 件</span></li>
+                          <li className="flex justify-between"><span>手入力修正：</span><span className="font-mono font-bold">{manualOverrideCount} 人</span></li>
+                          <li className="flex justify-between"><span>月次ロック：</span><span className={`font-mono font-bold ${isLocked ? "text-purple-700" : "text-slate-500"}`}>{isLocked ? "🔒 ロック中" : "未ロック"}</span></li>
+                        </ul>
+                      )}
+                      {!isStale && (errCount > 0 || warnCount > 0) && (
+                        <button
+                          onClick={() => { /* 既存モーダル経由で詳細を再表示 */ setCheckModalData({ ...checkModalData }); }}
+                          className="mt-3 text-[10px] font-bold text-indigo-600 hover:text-indigo-500 underline"
+                        >
+                          詳細を確認する
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* カード2：帳票確認（既存 renderMonthlySummary / 既存 isBulkPrintOpen を呼ぶ） */}

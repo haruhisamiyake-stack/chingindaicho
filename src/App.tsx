@@ -1957,6 +1957,9 @@ const App = () => {
 
   const [logModalData, setLogModalData] = useState(null); // ★追加: 計算ログモーダル用の状態
   const [checkModalData, setCheckModalData] = useState(null); // ★追加: 月次チェックモーダル用の状態
+  const [overrideModal, setOverrideModal] = useState(null); // { month, fieldKey, fieldLabel, calcValue }
+  const [overrideInputValue, setOverrideInputValue] = useState("");
+  const [overrideInputMemo, setOverrideInputMemo] = useState("");
 
   // ★ 帳票出力センター用のステート
   const [printDocType, setPrintDocType] = useState("payslip"); // payslip, ledger, withholding
@@ -3072,6 +3075,27 @@ const App = () => {
     updateDataObj(year, newData);
   };
 
+  const updateManualOverride = (year, month, fieldKey, overrideObj) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId || !data) return;
+    const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
+    const newOverrides = {
+      ...(currentYearDataObj.manualOverrides || {}),
+      [month]: {
+        ...(currentYearDataObj.manualOverrides?.[month] || {}),
+        [fieldKey]: overrideObj,
+      },
+    };
+    const newData = {
+      ...data,
+      years: {
+        ...data.years,
+        [year]: { ...currentYearDataObj, manualOverrides: newOverrides },
+      },
+    };
+    updateDataObj(year, newData);
+  };
+
   const updateBonus = (year, bonusKey, field, id, val) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId || !data) return;
@@ -3573,6 +3597,12 @@ const App = () => {
     });
   };
 
+  const getDisplayValue = (month, fieldKey, calcValue) => {
+    const ov = currentYearData.manualOverrides?.[month]?.[fieldKey];
+    if (ov?.enabled) return Number(ov.value) || 0;
+    return typeof calcValue === "number" ? calcValue : (calcValue || 0);
+  };
+
   const results = useMemo(() => {
     const defaultSums = {
       basePay: 0,
@@ -3624,7 +3654,34 @@ const App = () => {
         monthlyLocks
       );
 
-      monthlyResults[m] = monthlyResult;
+      const ovs = currentYearData.manualOverrides?.[m] || {};
+
+      // 表示用個別控除値（手動上書きを反映）
+      const dispHealth = ovs.health?.enabled ? (Number(ovs.health.value) || 0) : (monthlyResult.health || 0);
+      const dispPension = ovs.pension?.enabled ? (Number(ovs.pension.value) || 0) : (monthlyResult.pension || 0);
+      const dispNursing = ovs.nursing?.enabled ? (Number(ovs.nursing.value) || 0) : (monthlyResult.nursing || 0);
+      const dispChildCare = ovs.childCare?.enabled ? (Number(ovs.childCare.value) || 0) : (monthlyResult.childCare || 0);
+      const dispEmployment = ovs.employment?.enabled ? (Number(ovs.employment.value) || 0) : (monthlyResult.employment || 0);
+      const dispIncomeTax = ovs.incomeTax?.enabled ? (Number(ovs.incomeTax.value) || 0) : (monthlyResult.incomeTax || 0);
+      const dispResidentTax = ovs.residentTax?.enabled ? (Number(ovs.residentTax.value) || 0) : (Number(row.residentTax) || 0);
+
+      let dispCustomDeds = 0;
+      deductionDefs.forEach((def) => {
+        const ovKey = `deduction_${def.id}`;
+        const dov = ovs[ovKey];
+        const amt = dov?.enabled ? (Number(dov.value) || 0) : (Number(row.deductionAmounts?.[def.id]) || 0);
+        sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
+        dispCustomDeds += amt;
+      });
+
+      // 表示用控除合計
+      const dispTotalDeductions = dispHealth + dispPension + dispNursing + dispChildCare + dispEmployment + dispIncomeTax + dispResidentTax + dispCustomDeds;
+      // 表示用差引支給額: netPay override があれば手動値、なければ 総支給額 − 表示用控除合計
+      const dispNetPay = ovs.netPay?.enabled
+        ? (Number(ovs.netPay.value) || 0)
+        : ((monthlyResult.grossPay || 0) - dispTotalDeductions);
+
+      monthlyResults[m] = { ...monthlyResult, dispTotalDeductions, dispNetPay };
 
       sums.basePay += Number(row.basePay) || 0;
       sums.grossPay += monthlyResult.grossPay || 0;
@@ -3633,19 +3690,15 @@ const App = () => {
         const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
         sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
       });
-      deductionDefs.forEach((def) => {
-        const amt = Number(row.deductionAmounts?.[def.id]) || 0;
-        sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
-      });
 
-      sums.health += monthlyResult.health || 0;
-      sums.pension += monthlyResult.pension || 0;
-      sums.nursing += monthlyResult.nursing || 0;
-      sums.childCare += monthlyResult.childCare || 0;
-      sums.employment += monthlyResult.employment || 0;
-      sums.incomeTax += monthlyResult.incomeTax || 0;
-      sums.residentTax += Number(row.residentTax) || 0;
-      sums.netPay += monthlyResult.netPay || 0;
+      sums.health += dispHealth;
+      sums.pension += dispPension;
+      sums.nursing += dispNursing;
+      sums.childCare += dispChildCare;
+      sums.employment += dispEmployment;
+      sums.incomeTax += dispIncomeTax;
+      sums.residentTax += dispResidentTax;
+      sums.netPay += dispNetPay;
     });
 
     // ★追加: 月額変更（随時改定）のアラート判定ロジック
@@ -3848,15 +3901,44 @@ const App = () => {
     ...allowanceDefs.map(def => ({ label: def.name, value: formatCurrency(rowData.allowanceAmounts?.[def.id]) }))
   ];
 
+  // 月次給与のみ手動上書きを反映（賞与は対象外）
+  const slipMonthOvs = !isBonus ? (slipYearData.manualOverrides?.[monthKey] || {}) : {};
+  const slipOvOr = (key, fallback) => slipMonthOvs[key]?.enabled ? (Number(slipMonthOvs[key].value) || 0) : (Number(fallback) || 0);
+  const dispHealth = isBonus ? (calcResult.health || 0) : slipOvOr("health", calcResult.health);
+  const dispPension = isBonus ? (calcResult.pension || 0) : slipOvOr("pension", calcResult.pension);
+  const dispNursing = isBonus ? (calcResult.nursing || 0) : slipOvOr("nursing", calcResult.nursing);
+  const dispEmployment = isBonus ? (calcResult.employment || 0) : slipOvOr("employment", calcResult.employment);
+  const dispChildCare = isBonus ? (calcResult.childCare || 0) : slipOvOr("childCare", calcResult.childCare);
+  const dispIncomeTax = isBonus ? (calcResult.incomeTax || 0) : slipOvOr("incomeTax", calcResult.incomeTax);
+  const dispResidentTax = isBonus ? (Number(rowData.residentTax) || 0) : slipOvOr("residentTax", Number(rowData.residentTax) || 0);
+  const dispCustomDeductions = deductionDefs.map(def => ({
+    id: def.id,
+    name: def.name,
+    value: isBonus
+      ? (Number(rowData.deductionAmounts?.[def.id]) || 0)
+      : slipOvOr(`deduction_${def.id}`, Number(rowData.deductionAmounts?.[def.id]) || 0),
+  }));
+  const dispCustomDedTotal = dispCustomDeductions.reduce((s, d) => s + (Number(d.value) || 0), 0);
+  // 表示用控除合計: 個別の表示値の合算
+  const dispTotalDeductions = isBonus
+    ? (Number(calcResult.totalDeductions) || 0)
+    : (dispHealth + dispPension + dispNursing + dispChildCare + dispEmployment + dispIncomeTax + dispResidentTax + dispCustomDedTotal);
+  // 表示用差引支給額: netPay override があれば手動値、なければ 総支給額 − 表示用控除合計
+  const dispNetPay = isBonus
+    ? (calcResult.netPay || 0)
+    : (slipMonthOvs.netPay?.enabled
+        ? (Number(slipMonthOvs.netPay.value) || 0)
+        : ((Number(calcResult.grossPay) || 0) - dispTotalDeductions));
+
   const deductionItems = [
-    { label: "健康保険料", value: formatCurrency(calcResult.health) },
-    { label: "厚生年金保険料", value: formatCurrency(calcResult.pension) },
-    ...(calcResult.nursing > 0 ? [{ label: "介護保険料", value: formatCurrency(calcResult.nursing) }] : []),
-    { label: "雇用保険料", value: formatCurrency(calcResult.employment) },
-    ...(calcResult.childCare > 0 ? [{ label: "子ども・子育て", value: formatCurrency(calcResult.childCare) }] : []),
-    { label: "所得税", value: formatCurrency(calcResult.incomeTax) },
-    { label: "住民税", value: formatCurrency(rowData.residentTax) },
-    ...deductionDefs.map(def => ({ label: def.name, value: formatCurrency(rowData.deductionAmounts?.[def.id]) }))
+    { label: "健康保険料", value: formatCurrency(dispHealth) },
+    { label: "厚生年金保険料", value: formatCurrency(dispPension) },
+    ...(dispNursing > 0 ? [{ label: "介護保険料", value: formatCurrency(dispNursing) }] : []),
+    { label: "雇用保険料", value: formatCurrency(dispEmployment) },
+    ...(dispChildCare > 0 ? [{ label: "子ども・子育て", value: formatCurrency(dispChildCare) }] : []),
+    { label: "所得税", value: formatCurrency(dispIncomeTax) },
+    { label: "住民税", value: formatCurrency(dispResidentTax) },
+    ...dispCustomDeductions.map(d => ({ label: d.name, value: formatCurrency(d.value) })),
   ];
 
   // 最低8行は確保し、明細書の高さを一定に保つ
@@ -3939,7 +4021,7 @@ const App = () => {
               </td>
               <td className="px-2 py-2">控除合計</td>
               <td className="px-2 py-2 text-right font-mono text-base">
-                {formatCurrency(calcResult.totalDeductions)}
+                {formatCurrency(dispTotalDeductions)}
               </td>
             </tr>
           </tbody>
@@ -3959,7 +4041,7 @@ const App = () => {
             差引支給額
           </div>
           <div className="w-3/5 text-right p-3 text-3xl font-black font-mono tracking-tighter">
-            <span className="text-xl mr-1 font-sans font-bold">¥</span>{formatCurrency(calcResult.netPay)}
+            <span className="text-xl mr-1 font-sans font-bold">¥</span>{formatCurrency(dispNetPay)}
           </div>
         </div>
       </div>
@@ -3970,6 +4052,14 @@ const App = () => {
             <Info size={14} className="text-indigo-500" />{" "}
             計算の裏側を見る（監査用ログ）
           </summary>
+          {Object.values(slipMonthOvs || {}).some((o) => o?.enabled) && (
+            <div className="px-4 pt-3">
+              <div className="bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold rounded-lg px-3 py-2">
+                ⚠ このログは手動上書き前の自動計算値です。<br />
+                画面表示・帳票上の控除合計・差引支給額は手動上書きを反映しています。
+              </div>
+            </div>
+          )}
           <div className="p-4 border-t border-slate-200 text-[11px] font-mono text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed">
             {calcResult.calcLog.map((line, i) => (
               <div key={i}>{line}</div>
@@ -6088,16 +6178,33 @@ const App = () => {
                                     連動
                                   </span>
                                 </td>
-                                {MONTHS.map((m) => (
-                                  <td
-                                    key={m}
-                                    className="border border-gray-300 p-1 text-right text-gray-500 font-mono text-[11px]"
-                                  >
-                                    {formatCurrency(
-                                      results.monthlyResults[m]?.[key]
-                                    )}
-                                  </td>
-                                ))}
+                                {MONTHS.map((m) => {
+                                  const calcVal = results.monthlyResults[m]?.[key] || 0;
+                                  const isOv = currentYearData.manualOverrides?.[m]?.[key]?.enabled;
+                                  const dispVal = isOv ? Number(currentYearData.manualOverrides[m][key].value) || 0 : calcVal;
+                                  return (
+                                    <td
+                                      key={m}
+                                      className={`border border-gray-300 p-0.5 text-right text-[11px] ${isOv ? "bg-amber-50" : ""}`}
+                                    >
+                                      <div className="flex items-center justify-end gap-0.5">
+                                        <span className={`font-mono ${isOv ? "text-amber-700 font-black" : "text-gray-500"}`}>
+                                          {formatCurrency(dispVal)}
+                                        </span>
+                                        <button
+                                          onClick={() => {
+                                            setOverrideModal({ month: m, fieldKey: key, fieldLabel: labels[key], calcValue: calcVal });
+                                            const ov = currentYearData.manualOverrides?.[m]?.[key];
+                                            setOverrideInputValue(ov?.enabled ? String(ov.value) : "");
+                                            setOverrideInputMemo(ov?.memo || "");
+                                          }}
+                                          className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                          title="手動上書き"
+                                        >手</button>
+                                      </div>
+                                    </td>
+                                  );
+                                })}
                                 <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                                   {formatCurrency(results.sums[key])}
                                 </td>
@@ -6126,14 +6233,32 @@ const App = () => {
                                 連動
                               </span>
                             </td>
-                            {MONTHS.map((m) => (
-                              <td
-                                key={m}
-                                className={`border border-gray-300 p-1 text-right font-bold text-[11px] ${results.monthlyResults[m]?.incomeTax === null ? "bg-red-50 text-red-600" : "text-orange-600"}`}
-                              >
-                                {results.monthlyResults[m]?.incomeTax === null ? "計算不可" : formatCurrency(results.monthlyResults[m]?.incomeTax)}
-                              </td>
-                            ))}
+                            {MONTHS.map((m) => {
+                              const calcVal = results.monthlyResults[m]?.incomeTax;
+                              const isOv = currentYearData.manualOverrides?.[m]?.incomeTax?.enabled;
+                              const ovData = currentYearData.manualOverrides?.[m]?.incomeTax;
+                              return (
+                                <td
+                                  key={m}
+                                  className={`border border-gray-300 p-0.5 text-right font-bold text-[11px] ${isOv ? "bg-amber-50" : calcVal === null ? "bg-red-50" : ""}`}
+                                >
+                                  <div className="flex items-center justify-end gap-0.5">
+                                    <span className={isOv ? "text-amber-700 font-black" : calcVal === null ? "text-red-600" : "text-orange-600"}>
+                                      {isOv ? formatCurrency(Number(ovData.value) || 0) : calcVal === null ? "計算不可" : formatCurrency(calcVal)}
+                                    </span>
+                                    <button
+                                      onClick={() => {
+                                        setOverrideModal({ month: m, fieldKey: "incomeTax", fieldLabel: "所得税", calcValue: calcVal || 0 });
+                                        setOverrideInputValue(isOv ? String(ovData.value) : "");
+                                        setOverrideInputMemo(ovData?.memo || "");
+                                      }}
+                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                      title="手動上書き"
+                                    >手</button>
+                                  </div>
+                                </td>
+                              );
+                            })}
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.incomeTax)}
                             </td>
@@ -6201,38 +6326,42 @@ const App = () => {
                                 手動
                               </span>
                             </td>
-                            {MONTHS.map((m) => (
-                              <td
-                                key={m}
-                                className="border border-gray-300 p-0.5 text-right"
-                              >
-                                <input
-                                  type="number"
-                                  disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.residentTax ||
-                                    ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "residentTax",
-                                      Number(e.target.value)
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
-                              </td>
-                            ))}
+                            {MONTHS.map((m) => {
+                              const baseVal = currentYearData.monthly[m]?.residentTax;
+                              const isOvRT = currentYearData.manualOverrides?.[m]?.residentTax?.enabled;
+                              const ovRT = currentYearData.manualOverrides?.[m]?.residentTax;
+                              return (
+                                <td
+                                  key={m}
+                                  className={`border border-gray-300 p-0.5 text-right ${isOvRT ? "bg-amber-50" : ""}`}
+                                >
+                                  <div className="flex items-center justify-end gap-0.5">
+                                    {isOvRT ? (
+                                      <span className="font-mono text-amber-700 font-black text-[11px] px-0.5">
+                                        {formatCurrency(Number(ovRT.value) || 0)}
+                                      </span>
+                                    ) : (
+                                      <input
+                                        type="number"
+                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked}
+                                        value={baseVal || ""}
+                                        onChange={(e) => updateMonthly(selectedYear, m, "residentTax", Number(e.target.value))}
+                                        className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isYearLocked || currentYearData.monthly[m]?.isLocked ? "cursor-not-allowed text-slate-400" : ""}`}
+                                      />
+                                    )}
+                                    <button
+                                      onClick={() => {
+                                        setOverrideModal({ month: m, fieldKey: "residentTax", fieldLabel: "住民税", calcValue: Number(baseVal) || 0 });
+                                        setOverrideInputValue(isOvRT ? String(ovRT.value) : "");
+                                        setOverrideInputMemo(ovRT?.memo || "");
+                                      }}
+                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                      title="手動上書き"
+                                    >手</button>
+                                  </div>
+                                </td>
+                              );
+                            })}
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.residentTax)}
                             </td>
@@ -6299,43 +6428,49 @@ const App = () => {
                                   手動
                                 </span>
                               </td>
-                              {MONTHS.map((m) => (
-                                <td
-                                  key={m}
-                                  className="border border-gray-300 p-0.5 text-right"
-                                >
-                                  <input
-                                    type="number"
-                                    disabled={
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
-                                    }
-                                    value={
-                                      currentYearData.monthly[m]
-                                        ?.deductionAmounts?.[def.id] || ""
-                                    }
-                                    onChange={(e) => {
-                                      const newMD = {
-                                        ...(currentYearData.monthly[m]
-                                          ?.deductionAmounts || {}),
-                                        [def.id]: Number(e.target.value),
-                                      };
-                                      updateMonthly(
-                                        selectedYear,
-                                        m,
-                                        "deductionAmounts",
-                                        newMD
-                                      );
-                                    }}
-                                    className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
-                                        ? "cursor-not-allowed text-slate-400"
-                                        : ""
-                                    }`}
-                                  />
-                                </td>
-                              ))}
+                              {MONTHS.map((m) => {
+                                const ovKeyD = `deduction_${def.id}`;
+                                const baseValD = currentYearData.monthly[m]?.deductionAmounts?.[def.id];
+                                const isOvD = currentYearData.manualOverrides?.[m]?.[ovKeyD]?.enabled;
+                                const ovD = currentYearData.manualOverrides?.[m]?.[ovKeyD];
+                                return (
+                                  <td
+                                    key={m}
+                                    className={`border border-gray-300 p-0.5 text-right ${isOvD ? "bg-amber-50" : ""}`}
+                                  >
+                                    <div className="flex items-center justify-end gap-0.5">
+                                      {isOvD ? (
+                                        <span className="font-mono text-amber-700 font-black text-[11px] px-0.5">
+                                          {formatCurrency(Number(ovD.value) || 0)}
+                                        </span>
+                                      ) : (
+                                        <input
+                                          type="number"
+                                          disabled={isYearLocked || currentYearData.monthly[m]?.isLocked}
+                                          value={baseValD || ""}
+                                          onChange={(e) => {
+                                            const newMD = {
+                                              ...(currentYearData.monthly[m]?.deductionAmounts || {}),
+                                              [def.id]: Number(e.target.value),
+                                            };
+                                            updateMonthly(selectedYear, m, "deductionAmounts", newMD);
+                                          }}
+                                          className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isYearLocked || currentYearData.monthly[m]?.isLocked ? "cursor-not-allowed text-slate-400" : ""}`}
+                                        />
+                                      )}
+                                      <button
+                                        onClick={() => {
+                                          setOverrideModal({ month: m, fieldKey: ovKeyD, fieldLabel: def.name, calcValue: Number(baseValD) || 0 });
+                                          setOverrideInputValue(isOvD ? String(ovD.value) : "");
+                                          setOverrideInputMemo(ovD?.memo || "");
+                                        }}
+                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                        title="手動上書き"
+                                      >手</button>
+                                    </div>
+                                  </td>
+                                );
+                              })}
                               <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                                 {formatCurrency(
                                   results.sums.deductions[def.id]
@@ -6412,16 +6547,34 @@ const App = () => {
                                 連動
                               </span>
                             </td>
-                            {MONTHS.map((m) => (
-                              <td
-                                key={m}
-                                className="border border-white/10 p-1 text-right text-[11px]"
-                              >
-                                {formatCurrency(
-                                  results.monthlyResults[m]?.netPay
-                                )}
-                              </td>
-                            ))}
+                            {MONTHS.map((m) => {
+                              const calcValNP = results.monthlyResults[m]?.netPay || 0;
+                              const isOvNP = currentYearData.manualOverrides?.[m]?.netPay?.enabled;
+                              const ovNP = currentYearData.manualOverrides?.[m]?.netPay;
+                              const dispNP = results.monthlyResults[m]?.dispNetPay ?? calcValNP;
+                              const diffNP = dispNP - calcValNP;
+                              return (
+                                <td key={m} className={`border border-white/10 p-0.5 text-right text-[11px] ${isOvNP ? "bg-amber-200/20" : ""}`}>
+                                  <div className="flex flex-col items-end">
+                                    <div className="flex items-center gap-0.5">
+                                      <span className={isOvNP ? "text-amber-200 font-black" : ""}>{formatCurrency(dispNP)}</span>
+                                      <button
+                                        onClick={() => {
+                                          setOverrideModal({ month: m, fieldKey: "netPay", fieldLabel: "差引支給額", calcValue: calcValNP });
+                                          setOverrideInputValue(isOvNP ? String(ovNP.value) : "");
+                                          setOverrideInputMemo(ovNP?.memo || "");
+                                        }}
+                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-white/20 hover:bg-amber-300/40 text-white/60 hover:text-amber-200 border border-transparent hover:border-amber-300"
+                                        title="手動上書き"
+                                      >手</button>
+                                    </div>
+                                    {diffNP !== 0 && (
+                                      <span className="text-[7px] text-amber-300">⚠ 差額{formatCurrency(Math.abs(diffNP))}</span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
                             <td className="border border-emerald-800 p-1.5 text-right bg-emerald-100/80 text-emerald-900 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.netPay)}
                             </td>
@@ -6455,15 +6608,15 @@ const App = () => {
                               >
                                 {results.monthlyResults[m]?.calcLog && (
                                   <button
-                                    onClick={() =>
+                                    onClick={() => {
+                                      const monthOvs = currentYearData.manualOverrides?.[m];
+                                      const hasOverride = !!monthOvs && Object.values(monthOvs).some((o) => o?.enabled);
                                       setLogModalData({
-                                        title: `${parseInt(
-                                          m,
-                                          10
-                                        )}月支給分 計算ログ`,
+                                        title: `${parseInt(m, 10)}月支給分 計算ログ`,
                                         log: results.monthlyResults[m].calcLog,
-                                      })
-                                    }
+                                        hasOverride,
+                                      });
+                                    }}
                                     className="text-[9px] bg-white border border-indigo-200 text-indigo-600 px-2 py-0.5 rounded hover:bg-indigo-50 shadow-sm transition-colors"
                                   >
                                     🔍確認
@@ -10608,7 +10761,7 @@ const App = () => {
                       
                       const yearData = emp.data?.years?.[selectedYear];
                       if (!yearData) return null;
-                      
+
                       let calc = {};
                       let row = {};
                       if (isBonus) {
@@ -10619,30 +10772,71 @@ const App = () => {
                         row = yearData.monthly?.[printTargetMonth] || {};
                         calc = calculateMonthlyResult(m, row, effectiveSettings, printTargetMonth, selectedYear, taxTables, monthlyLocks);
                       }
-                      
+
+                      // 月次給与のみ手動上書きを反映（賞与は対象外）
+                      const empOvs = !isBonus ? (yearData.manualOverrides?.[printTargetMonth] || {}) : {};
+                      const ovOr = (key, fallback) => empOvs[key]?.enabled ? (Number(empOvs[key].value) || 0) : (fallback || 0);
+                      const dispRow = isBonus ? row : {
+                        ...row,
+                        residentTax: ovOr("residentTax", Number(row.residentTax) || 0),
+                        deductionAmounts: (() => {
+                          const out = { ...(row.deductionAmounts || {}) };
+                          deductionDefs.forEach(def => {
+                            out[def.id] = ovOr(`deduction_${def.id}`, Number(row.deductionAmounts?.[def.id]) || 0);
+                          });
+                          return out;
+                        })(),
+                      };
+                      // 表示用個別控除値
+                      const _dHealth = isBonus ? (calc.health || 0) : ovOr("health", calc.health);
+                      const _dPension = isBonus ? (calc.pension || 0) : ovOr("pension", calc.pension);
+                      const _dNursing = isBonus ? (calc.nursing || 0) : ovOr("nursing", calc.nursing);
+                      const _dChildCare = isBonus ? (calc.childCare || 0) : ovOr("childCare", calc.childCare);
+                      const _dEmployment = isBonus ? (calc.employment || 0) : ovOr("employment", calc.employment);
+                      const _dIncomeTax = isBonus ? (calc.incomeTax || 0) : ovOr("incomeTax", calc.incomeTax);
+                      const _dResidentTax = Number(dispRow.residentTax) || 0;
+                      const _dCustomDedTotal = deductionDefs.reduce((s, def) => s + (Number(dispRow.deductionAmounts?.[def.id]) || 0), 0);
+                      const _dTotalDeductions = _dHealth + _dPension + _dNursing + _dChildCare + _dEmployment + _dIncomeTax + _dResidentTax + _dCustomDedTotal;
+                      const _dNetPay = isBonus
+                        ? (calc.netPay || 0)
+                        : (empOvs.netPay?.enabled
+                            ? (Number(empOvs.netPay.value) || 0)
+                            : ((Number(calc.grossPay) || 0) - _dTotalDeductions));
+                      const dispCalc = isBonus ? calc : {
+                        ...calc,
+                        health: _dHealth,
+                        pension: _dPension,
+                        nursing: _dNursing,
+                        childCare: _dChildCare,
+                        employment: _dEmployment,
+                        incomeTax: _dIncomeTax,
+                        netPay: _dNetPay,
+                        totalDeductions: _dTotalDeductions,
+                      };
+
                       if (calc.grossPay > 0 || Number(row.basePay) > 0) {
                         totalHeadcount++;
                         sums.basePay += Number(row.basePay) || 0;
                         sums.grossPay += calc.grossPay || 0;
-                        sums.health += calc.health || 0;
-                        sums.pension += calc.pension || 0;
-                        sums.nursing += calc.nursing || 0;
-                        sums.childCare += calc.childCare || 0;
-                        sums.employment += calc.employment || 0;
-                        sums.incomeTax += calc.incomeTax || 0;
-                        sums.residentTax += Number(row.residentTax) || 0;
-                        sums.netPay += calc.netPay || 0;
-                        
+                        sums.health += dispCalc.health || 0;
+                        sums.pension += dispCalc.pension || 0;
+                        sums.nursing += dispCalc.nursing || 0;
+                        sums.childCare += dispCalc.childCare || 0;
+                        sums.employment += dispCalc.employment || 0;
+                        sums.incomeTax += dispCalc.incomeTax || 0;
+                        sums.residentTax += Number(dispRow.residentTax) || 0;
+                        sums.netPay += dispCalc.netPay || 0;
+
                         allowanceDefs.forEach(def => {
                           const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
                           sums.allowances[def.id] = (sums.allowances[def.id] || 0) + amt;
                         });
                         deductionDefs.forEach(def => {
-                          const amt = Number(row.deductionAmounts?.[def.id]) || 0;
+                          const amt = Number(dispRow.deductionAmounts?.[def.id]) || 0;
                           sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
                         });
-                        
-                        return { empCode: m.employeeCode || "-", name: m.name || "未設定", row, calc };
+
+                        return { empCode: m.employeeCode || "-", name: m.name || "未設定", row: dispRow, calc: dispCalc };
                       }
                       return null;
                     }).filter(Boolean);
@@ -10975,7 +11169,7 @@ const App = () => {
                                 <tr key={key}>
                                   <td className="border border-black p-1 font-bold">{labels[key]}</td>
                                   {MONTHS.map((m) => (
-                                    <td key={m} className="border border-black p-1 text-right font-mono">{formatCurrency(results.monthlyResults[m]?.[key])}</td>
+                                    <td key={m} className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.[key]?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(getDisplayValue(m, key, results.monthlyResults[m]?.[key]))}</td>
                                   ))}
                                   <td className="border border-black p-1 text-right font-bold bg-gray-100">{formatCurrency(results.sums[key])}</td>
                                   <td className="border border-black p-1 text-right">{formatCurrency(results.bonus1[key])}</td>
@@ -10989,7 +11183,7 @@ const App = () => {
                             <tr>
                               <td className="border border-black p-1 font-bold">所得税</td>
                               {MONTHS.map((m) => (
-                                <td key={m} className="border border-black p-1 text-right font-bold">{formatCurrency(results.monthlyResults[m]?.incomeTax)}</td>
+                                <td key={m} className={`border border-black p-1 text-right font-bold ${currentYearData.manualOverrides?.[m]?.incomeTax?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(getDisplayValue(m, "incomeTax", results.monthlyResults[m]?.incomeTax))}</td>
                               ))}
                               <td className="border border-black p-1 text-right font-black bg-gray-100">{formatCurrency(results.sums.incomeTax)}</td>
                               <td className="border border-black p-1 text-right font-bold">{formatCurrency(currentYearData.bonus?.incomeTax)}</td>
@@ -11000,7 +11194,7 @@ const App = () => {
                             <tr>
                               <td className="border border-black p-1 font-bold">住民税</td>
                               {MONTHS.map((m) => (
-                                <td key={m} className="border border-black p-1 text-right font-mono">{formatCurrency(currentYearData.monthly[m]?.residentTax)}</td>
+                                <td key={m} className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.residentTax?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(getDisplayValue(m, "residentTax", currentYearData.monthly[m]?.residentTax || 0))}</td>
                               ))}
                               <td className="border border-black p-1 text-right font-bold bg-gray-100">{formatCurrency(results.sums.residentTax)}</td>
                               <td className="border border-black p-1 text-right">{formatCurrency(currentYearData.bonus?.residentTax)}</td>
@@ -11013,7 +11207,7 @@ const App = () => {
                               <tr key={def.id}>
                                 <td className="border border-black p-1 font-bold">{def.name}</td>
                                 {MONTHS.map((m) => (
-                                  <td key={m} className="border border-black p-1 text-right font-mono">{formatCurrency(currentYearData.monthly[m]?.deductionAmounts?.[def.id])}</td>
+                                  <td key={m} className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.[`deduction_${def.id}`]?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(getDisplayValue(m, `deduction_${def.id}`, currentYearData.monthly[m]?.deductionAmounts?.[def.id] || 0))}</td>
                                 ))}
                                 <td className="border border-black p-1 text-right font-bold bg-gray-100">{formatCurrency(results.sums.deductions[def.id])}</td>
                                 <td className="border border-black p-1 text-right">{formatCurrency(currentYearData.bonus?.deductionAmounts?.[def.id])}</td>
@@ -11026,7 +11220,7 @@ const App = () => {
                             <tr className="bg-gray-200 border-y-2 border-black">
                               <td className="border border-black p-1 font-black">差引支給額</td>
                               {MONTHS.map((m) => (
-                                <td key={m} className="border border-black p-1 text-right font-black">{formatCurrency(results.monthlyResults[m]?.netPay)}</td>
+                                <td key={m} className={`border border-black p-1 text-right font-black ${currentYearData.manualOverrides?.[m]?.netPay?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(results.monthlyResults[m]?.dispNetPay ?? results.monthlyResults[m]?.netPay)}</td>
                               ))}
                               <td className="border border-black p-1 text-right font-black bg-gray-300">{formatCurrency(results.sums.netPay)}</td>
                               <td className="border border-black p-1 text-right font-black bg-white">{formatCurrency(results.bonus1.netPay)}</td>
@@ -11063,6 +11257,80 @@ const App = () => {
 
         </main>
       </div>
+  {/* ＝＝＝ 手動上書きモーダル ＝＝＝ */}
+  {overrideModal && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50">
+      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm mx-4">
+        <h3 className="text-base font-black text-slate-800 mb-1">{overrideModal.fieldLabel}</h3>
+        <p className="text-xs text-slate-500 mb-4">{parseInt(overrideModal.month, 10)}月支給分</p>
+        <div className="bg-slate-50 rounded-lg px-3 py-2 mb-4">
+          <span className="text-slate-500 text-xs">自動計算値：</span>
+          <span className="font-black text-slate-700 ml-1 text-sm">{formatCurrency(overrideModal.calcValue)}</span>
+        </div>
+        <div className="flex flex-col gap-3 mb-5">
+          <div>
+            <label className="text-xs font-bold text-slate-600 mb-1 block">手入力値</label>
+            <input
+              type="number"
+              value={overrideInputValue}
+              onChange={(e) => setOverrideInputValue(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+              placeholder="0"
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-600 mb-1 block">理由メモ</label>
+            <textarea
+              value={overrideInputMemo}
+              onChange={(e) => setOverrideInputMemo(e.target.value)}
+              rows={2}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-amber-500 resize-none"
+              placeholder="前システム引継ぎ など"
+            />
+          </div>
+        </div>
+        <div className="flex justify-between gap-3">
+          <button
+            onClick={() => {
+              updateManualOverride(selectedYear, overrideModal.month, overrideModal.fieldKey, { enabled: false });
+              setOverrideModal(null);
+            }}
+            className="px-4 py-2 text-sm font-bold text-rose-600 border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors"
+          >
+            解除
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setOverrideModal(null)}
+              className="px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+            >
+              キャンセル
+            </button>
+            <button
+              onClick={() => {
+                const val = Number(overrideInputValue);
+                if (overrideInputValue === "" || isNaN(val)) {
+                  alert("数値を入力してください");
+                  return;
+                }
+                updateManualOverride(selectedYear, overrideModal.month, overrideModal.fieldKey, {
+                  enabled: true,
+                  value: val,
+                  memo: overrideInputMemo,
+                });
+                setOverrideModal(null);
+              }}
+              className="px-4 py-2 text-sm font-bold bg-amber-500 text-white rounded-lg hover:bg-amber-400 transition-colors"
+            >
+              保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )}
+
   {/* ＝＝＝ 社員マスター編集 モーダル ＝＝＝ */}
       {editingEmployeeId && editingMaster && (
         <div
@@ -11853,9 +12121,9 @@ const App = () => {
                           {MONTHS.map((m) => (
                             <td
                               key={m}
-                              className="border border-black p-1 text-right font-mono"
+                              className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.[key]?.enabled ? "bg-amber-50" : ""}`}
                             >
-                              {formatCurrency(results.monthlyResults[m]?.[key])}
+                              {formatCurrency(getDisplayValue(m, key, results.monthlyResults[m]?.[key]))}
                             </td>
                           ))}
                           <td className="border border-black p-1 text-right font-bold bg-gray-100">
@@ -11886,9 +12154,9 @@ const App = () => {
                       {MONTHS.map((m) => (
                         <td
                           key={m}
-                          className="border border-black p-1 text-right font-bold"
+                          className={`border border-black p-1 text-right font-bold ${currentYearData.manualOverrides?.[m]?.incomeTax?.enabled ? "bg-amber-50" : ""}`}
                         >
-                          {formatCurrency(results.monthlyResults[m]?.incomeTax)}
+                          {formatCurrency(getDisplayValue(m, "incomeTax", results.monthlyResults[m]?.incomeTax))}
                         </td>
                       ))}
                       <td className="border border-black p-1 text-right font-black bg-gray-100">
@@ -11916,11 +12184,9 @@ const App = () => {
                       {MONTHS.map((m) => (
                         <td
                           key={m}
-                          className="border border-black p-1 text-right font-mono"
+                          className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.residentTax?.enabled ? "bg-amber-50" : ""}`}
                         >
-                          {formatCurrency(
-                            currentYearData.monthly[m]?.residentTax
-                          )}
+                          {formatCurrency(getDisplayValue(m, "residentTax", currentYearData.monthly[m]?.residentTax || 0))}
                         </td>
                       ))}
                       <td className="border border-black p-1 text-right font-bold bg-gray-100">
@@ -11951,13 +12217,9 @@ const App = () => {
                         {MONTHS.map((m) => (
                           <td
                             key={m}
-                            className="border border-black p-1 text-right font-mono"
+                            className={`border border-black p-1 text-right font-mono ${currentYearData.manualOverrides?.[m]?.[`deduction_${def.id}`]?.enabled ? "bg-amber-50" : ""}`}
                           >
-                            {formatCurrency(
-                              currentYearData.monthly[m]?.deductionAmounts?.[
-                                def.id
-                              ]
-                            )}
+                            {formatCurrency(getDisplayValue(m, `deduction_${def.id}`, currentYearData.monthly[m]?.deductionAmounts?.[def.id] || 0))}
                           </td>
                         ))}
                         <td className="border border-black p-1 text-right font-bold bg-gray-100">
@@ -11994,9 +12256,9 @@ const App = () => {
                       {MONTHS.map((m) => (
                         <td
                           key={m}
-                          className="border border-black p-1 text-right font-black"
+                          className={`border border-black p-1 text-right font-black ${currentYearData.manualOverrides?.[m]?.netPay?.enabled ? "bg-amber-50" : ""}`}
                         >
-                          {formatCurrency(results.monthlyResults[m]?.netPay)}
+                          {formatCurrency(results.monthlyResults[m]?.dispNetPay ?? results.monthlyResults[m]?.netPay)}
                         </td>
                       ))}
                       <td className="border border-black p-1 text-right font-black bg-gray-300">
@@ -12229,6 +12491,14 @@ const App = () => {
                 <X size={18} />
               </button>
             </div>
+            {logModalData.hasOverride && (
+              <div className="px-6 pt-4 pb-1 bg-slate-50">
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold rounded-lg px-3 py-2">
+                  ⚠ このログは手動上書き前の自動計算値です。<br />
+                  画面表示・帳票上の控除合計・差引支給額は手動上書きを反映しています。
+                </div>
+              </div>
+            )}
             <div className="p-6 overflow-y-auto font-mono text-xs text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed bg-slate-50">
               {logModalData.log.map((line, i) => (
                 <div key={i}>{line}</div>

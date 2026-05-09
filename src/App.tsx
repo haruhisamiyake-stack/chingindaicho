@@ -4259,6 +4259,7 @@ const App = () => {
                         onChange={(e) => setNewTenantClosingDay(e.target.value)}
                         className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                       >
+                        {/* 締め日の選択肢は会社設定画面（~7644行）と同一。変更時は両方修正すること */}
                         {["末", "5", "10", "15", "20", "25"].map((d) => (
                           <option key={d} value={d}>{d}日締め</option>
                         ))}
@@ -4271,6 +4272,7 @@ const App = () => {
                         onChange={(e) => setNewTenantPaymentDay(e.target.value)}
                         className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                       >
+                        {/* 支払日の選択肢は会社設定画面（~7662行）と同一。変更時は両方修正すること */}
                         {["当月10","当月15","当月20","当月25","当月末","翌月5","翌月10","翌月15","翌月20","翌月25","翌月末"].map((d) => (
                           <option key={d} value={d}>{d}払い</option>
                         ))}
@@ -4279,7 +4281,7 @@ const App = () => {
                   </div>
                   {(() => {
                     const previewSettings = { closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay };
-                    const ex = calculateInitialDates(settings?.editableYear || "R08", "04", previewSettings);
+                    const ex = calculateInitialDates(DEFAULT_SETTINGS.editableYear, "04", previewSettings);
                     return (
                       <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5 text-xs text-blue-800 font-bold">
                         <span className="text-blue-500 font-black">計算期間プレビュー（4月支給の例）</span><br />
@@ -4313,8 +4315,10 @@ const App = () => {
                         return;
                       }
                       const newId = `tenant_${Date.now()}`;
-                      saveDoc(PATHS.tenant(newId), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString(), prefectureType: newTenantPrefectureType, businessType: newTenantBusinessType })
-                        .then(() => saveDoc(PATHS.settings(newId), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim(), closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay }))
+                      const batch = createBatch();
+                      batch.set(getDocRef(...PATHS.tenant(newId)), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString(), prefectureType: newTenantPrefectureType, businessType: newTenantBusinessType });
+                      batch.set(getDocRef(...PATHS.settings(newId)), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim(), closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay });
+                      batch.commit()
                         .then(() => {
                           setNewTenantModalOpen(false);
                           setNewTenantName("");

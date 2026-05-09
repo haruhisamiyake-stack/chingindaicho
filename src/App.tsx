@@ -4052,14 +4052,55 @@ const App = () => {
             <Info size={14} className="text-indigo-500" />{" "}
             計算の裏側を見る（監査用ログ）
           </summary>
-          {Object.values(slipMonthOvs || {}).some((o) => o?.enabled) && (
-            <div className="px-4 pt-3">
-              <div className="bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold rounded-lg px-3 py-2">
-                ⚠ このログは手動上書き前の自動計算値です。<br />
-                画面表示・帳票上の控除合計・差引支給額は手動上書きを反映しています。
+          {Object.values(slipMonthOvs || {}).some((o) => o?.enabled) && (() => {
+            const labelMap = { health: "健康保険", pension: "厚生年金", nursing: "介護保険", childCare: "子ども・子育て支援金", employment: "雇用保険", incomeTax: "所得税", residentTax: "住民税", netPay: "差引支給額" };
+            const overrideDetails = [];
+            Object.entries(slipMonthOvs).forEach(([key, ov]) => {
+              if (!ov?.enabled) return;
+              let label, autoVal, dispAuto;
+              if (key === "residentTax") { label = "住民税"; autoVal = Number(rowData.residentTax) || 0; }
+              else if (labelMap[key]) {
+                label = labelMap[key];
+                autoVal = Number(calcResult[key]) || 0;
+                // netPay のみ「他控除反映後・netPay override 自身は反映しない」想定額を算出
+                if (key === "netPay") {
+                  dispAuto = (Number(calcResult.grossPay) || 0) - dispTotalDeductions;
+                }
+              }
+              else if (key.startsWith("deduction_")) {
+                const defId = key.slice("deduction_".length);
+                const def = deductionDefs.find((d) => d.id === defId);
+                label = def?.name || defId;
+                autoVal = Number(rowData.deductionAmounts?.[defId]) || 0;
+              } else return;
+              const manualVal = Number(ov.value) || 0;
+              overrideDetails.push({ label, auto: autoVal, manual: manualVal, diff: manualVal - autoVal, dispAuto, memo: ov.memo || "" });
+            });
+            return (
+              <div className="px-4 pt-3 space-y-2">
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold rounded-lg px-3 py-2">
+                  ⚠ このログは手動上書き前の自動計算値です。<br />
+                  画面表示・帳票上の控除合計・差引支給額は手動上書きを反映しています。
+                </div>
+                {overrideDetails.length > 0 && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-700 font-bold rounded-lg px-3 py-2 text-[11px] space-y-1">
+                    <div className="text-[12px]">【手動上書き】</div>
+                    {overrideDetails.map((d, i) => (
+                      <div key={i}>
+                        <div>⚠ {d.label}：{d.label === "差引支給額" ? "純自動" : "自動"} {formatCurrency(d.auto)}円 → 手動 {formatCurrency(d.manual)}円（差額 {d.diff >= 0 ? "+" : ""}{formatCurrency(d.diff)}円）</div>
+                        {d.dispAuto !== undefined && d.dispAuto !== d.auto && (
+                          <div className="ml-4 text-rose-600 font-normal">
+                            　※他控除反映後の想定額 {formatCurrency(d.dispAuto)}円 との差額：{(d.manual - d.dispAuto) >= 0 ? "+" : ""}{formatCurrency(d.manual - d.dispAuto)}円
+                          </div>
+                        )}
+                        {d.memo && <div className="ml-4 text-rose-600 font-normal">理由：{d.memo}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
           <div className="p-4 border-t border-slate-200 text-[11px] font-mono text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed">
             {calcResult.calcLog.map((line, i) => (
               <div key={i}>{line}</div>
@@ -6609,12 +6650,38 @@ const App = () => {
                                 {results.monthlyResults[m]?.calcLog && (
                                   <button
                                     onClick={() => {
-                                      const monthOvs = currentYearData.manualOverrides?.[m];
-                                      const hasOverride = !!monthOvs && Object.values(monthOvs).some((o) => o?.enabled);
+                                      const monthOvs = currentYearData.manualOverrides?.[m] || {};
+                                      const monthRow = currentYearData.monthly[m] || {};
+                                      const monthCalc = results.monthlyResults[m] || {};
+                                      const labelMap = { health: "健康保険", pension: "厚生年金", nursing: "介護保険", childCare: "子ども・子育て支援金", employment: "雇用保険", incomeTax: "所得税", residentTax: "住民税", netPay: "差引支給額" };
+                                      const dDefs = settings?.deductionDefinitions || [];
+                                      const overrideDetails = [];
+                                      Object.entries(monthOvs).forEach(([key, ov]) => {
+                                        if (!ov?.enabled) return;
+                                        let label, autoVal, dispAuto;
+                                        if (key === "residentTax") { label = "住民税"; autoVal = Number(monthRow.residentTax) || 0; }
+                                        else if (labelMap[key]) {
+                                          label = labelMap[key];
+                                          autoVal = Number(monthCalc[key]) || 0;
+                                          // netPay のみ「他控除反映後・netPay override 自身は反映しない」想定額を算出
+                                          if (key === "netPay") {
+                                            dispAuto = (Number(monthCalc.grossPay) || 0) - (Number(monthCalc.dispTotalDeductions) || 0);
+                                          }
+                                        }
+                                        else if (key.startsWith("deduction_")) {
+                                          const defId = key.slice("deduction_".length);
+                                          const def = dDefs.find((d) => d.id === defId);
+                                          label = def?.name || defId;
+                                          autoVal = Number(monthRow.deductionAmounts?.[defId]) || 0;
+                                        } else return;
+                                        const manualVal = Number(ov.value) || 0;
+                                        overrideDetails.push({ label, auto: autoVal, manual: manualVal, diff: manualVal - autoVal, dispAuto, memo: ov.memo || "" });
+                                      });
                                       setLogModalData({
                                         title: `${parseInt(m, 10)}月支給分 計算ログ`,
                                         log: results.monthlyResults[m].calcLog,
-                                        hasOverride,
+                                        hasOverride: overrideDetails.length > 0,
+                                        overrideDetails,
                                       });
                                     }}
                                     className="text-[9px] bg-white border border-indigo-200 text-indigo-600 px-2 py-0.5 rounded hover:bg-indigo-50 shadow-sm transition-colors"
@@ -12492,11 +12559,27 @@ const App = () => {
               </button>
             </div>
             {logModalData.hasOverride && (
-              <div className="px-6 pt-4 pb-1 bg-slate-50">
+              <div className="px-6 pt-4 pb-1 bg-slate-50 space-y-2">
                 <div className="bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold rounded-lg px-3 py-2">
                   ⚠ このログは手動上書き前の自動計算値です。<br />
                   画面表示・帳票上の控除合計・差引支給額は手動上書きを反映しています。
                 </div>
+                {logModalData.overrideDetails && logModalData.overrideDetails.length > 0 && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-700 font-bold rounded-lg px-3 py-2 text-[11px] space-y-1">
+                    <div className="text-[12px]">【手動上書き】</div>
+                    {logModalData.overrideDetails.map((d, i) => (
+                      <div key={i}>
+                        <div>⚠ {d.label}：{d.label === "差引支給額" ? "純自動" : "自動"} {formatCurrency(d.auto)}円 → 手動 {formatCurrency(d.manual)}円（差額 {d.diff >= 0 ? "+" : ""}{formatCurrency(d.diff)}円）</div>
+                        {d.dispAuto !== undefined && d.dispAuto !== d.auto && (
+                          <div className="ml-4 text-rose-600 font-normal">
+                            　※他控除反映後の想定額 {formatCurrency(d.dispAuto)}円 との差額：{(d.manual - d.dispAuto) >= 0 ? "+" : ""}{formatCurrency(d.manual - d.dispAuto)}円
+                          </div>
+                        )}
+                        {d.memo && <div className="ml-4 text-rose-600 font-normal">理由：{d.memo}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             <div className="p-6 overflow-y-auto font-mono text-xs text-slate-700 space-y-1.5 whitespace-pre-wrap leading-relaxed bg-slate-50">

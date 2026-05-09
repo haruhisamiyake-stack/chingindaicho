@@ -33,6 +33,8 @@ import {
   Percent,
   Save,
   AlertTriangle,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 
 
@@ -1942,6 +1944,21 @@ const App = () => {
   };
   const [tenantSearchQuery, setTenantSearchQuery] = useState("");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  // ▼ 左サイドメニュー折り畳み state（localStorage に保存してリロード後も維持）
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("payrollSidebarCollapsed") === "true";
+    } catch (e) {
+      return false;
+    }
+  });
+  const toggleSidebarCollapsed = () => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("payrollSidebarCollapsed", String(next)); } catch (e) {}
+      return next;
+    });
+  };
   const [newTenantModalOpen, setNewTenantModalOpen] = useState(false);
   const [newTenantName, setNewTenantName] = useState("");
   const [newTenantClientCode, setNewTenantClientCode] = useState("");
@@ -4828,88 +4845,70 @@ const App = () => {
 
   return (
     <div className="flex h-screen bg-[#F0F2F5] font-sans text-sm overflow-hidden">
-      {/* --- 左サイドバー --- */}
-      <aside className={`w-72 bg-slate-900 text-white flex flex-col flex-shrink-0 shadow-xl z-50 ${isMasterMode ? "hidden" : ""}`}>
-        <div className="p-6 border-b border-slate-800">
-          <h1 className="font-black text-xl tracking-widest uppercase flex items-center gap-2 text-white">
-            <Calculator className="text-emerald-400" size={24} /> PAYROLL
-          </h1>
-          <p className="text-[10px] text-slate-400 mt-1 ml-8">
-            クラウド賃金台帳システム2
-          </p>
+      {/* --- 左サイドバー（折り畳み対応） --- */}
+      <aside className={`${isSidebarCollapsed ? "w-16" : "w-72"} transition-all duration-200 bg-slate-900 text-white flex flex-col flex-shrink-0 shadow-xl z-50 ${isMasterMode ? "hidden" : ""}`}>
+        <div className={`${isSidebarCollapsed ? "p-3" : "p-6"} border-b border-slate-800 flex items-center ${isSidebarCollapsed ? "justify-center" : "justify-between"} gap-2`}>
+          {!isSidebarCollapsed && (
+            <div className="min-w-0">
+              <h1 className="font-black text-xl tracking-widest uppercase flex items-center gap-2 text-white">
+                <Calculator className="text-emerald-400" size={24} /> PAYROLL
+              </h1>
+              <p className="text-[10px] text-slate-400 mt-1 ml-8">
+                クラウド賃金台帳システム2
+              </p>
+            </div>
+          )}
+          <button
+            onClick={toggleSidebarCollapsed}
+            title={isSidebarCollapsed ? "サイドメニューを展開" : "サイドメニューを折り畳む"}
+            aria-label={isSidebarCollapsed ? "サイドメニューを展開" : "サイドメニューを折り畳む"}
+            className="text-slate-400 hover:text-white hover:bg-slate-800 p-2 rounded-lg transition-colors"
+          >
+            {isSidebarCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
         </div>
 
-        <nav className="p-4 space-y-2 border-b border-slate-800">
-          <button
-            onClick={() => setActiveTab("ledger")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "ledger"
-                ? "bg-emerald-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Layout size={18} /> 賃金台帳
-          </button>
-          <button
-            onClick={() => setActiveTab("payrollList")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "payrollList"
-                ? "bg-indigo-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <List size={18} /> 給与明細一覧表
-          </button>
-          <button
-            onClick={() => setActiveTab("employees")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "employees"
-                ? "bg-teal-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Users size={18} /> 社員登録
-          </button>
-          {/* ▼ 復活させた【会社個別設定】ボタン ▼ */}
-          <button
-            onClick={() => setActiveTab("settings")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "settings"
-                ? "bg-orange-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Settings size={18} /> 会社個別設定
-          </button>
-          <button
-            onClick={() => setActiveTab("aggregation")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "aggregation"
-                ? "bg-rose-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <FileText size={18} /> 集計・申告
-          </button>
-          <button
-            onClick={() => setActiveTab("printCenter")}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-bold text-sm transition-all ${
-              activeTab === "printCenter"
-                ? "bg-blue-600 text-white shadow-lg"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            <Printer size={18} /> 帳票出力センター
-          </button>
+        <nav className={`${isSidebarCollapsed ? "p-2" : "p-4"} space-y-2 border-b border-slate-800`}>
+          {[
+            { tab: "ledger",       icon: Layout,   label: "賃金台帳",         activeColor: "bg-emerald-600" },
+            { tab: "payrollList",  icon: List,     label: "給与明細一覧表",   activeColor: "bg-indigo-600" },
+            { tab: "employees",    icon: Users,    label: "社員登録",         activeColor: "bg-teal-600" },
+            { tab: "settings",     icon: Settings, label: "会社個別設定",     activeColor: "bg-orange-600" },
+            { tab: "aggregation",  icon: FileText, label: "集計・申告",       activeColor: "bg-rose-600" },
+            { tab: "printCenter",  icon: Printer,  label: "帳票出力センター", activeColor: "bg-blue-600" },
+          ].map(({ tab, icon: Icon, label, activeColor }) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              title={label}
+              aria-label={label}
+              className={`w-full flex items-center ${isSidebarCollapsed ? "justify-center px-0 py-3" : "justify-start gap-3 px-4 py-3"} rounded-lg font-bold text-sm transition-all ${
+                activeTab === tab
+                  ? `${activeColor} text-white shadow-lg`
+                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
+              }`}
+            >
+              <Icon size={18} />
+              {!isSidebarCollapsed && <span>{label}</span>}
+            </button>
+          ))}
         </nav>
 
-        <div className="mt-auto p-4 border-t border-slate-800 bg-slate-950">
+        <div className={`mt-auto ${isSidebarCollapsed ? "p-2" : "p-4"} border-t border-slate-800 bg-slate-950`}>
           <button
             onClick={() => setActiveTab("portal")}
-            className="w-full flex justify-between items-center px-4 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-sm transition-all shadow-md active:scale-95 border border-blue-500"
+            title="顧問先一覧へ戻る"
+            aria-label="顧問先一覧へ戻る"
+            className={`w-full flex items-center ${isSidebarCollapsed ? "justify-center px-0 py-3" : "justify-between px-4 py-3"} bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-sm transition-all shadow-md active:scale-95 border border-blue-500`}
           >
-            <span className="flex items-center gap-2"><Building size={18} /> 顧問先一覧へ戻る</span>
-            <span className="text-[10px] bg-blue-800 px-2 py-0.5 rounded border border-blue-500 shadow-inner">切替</span>
+            {isSidebarCollapsed ? (
+              <Building size={18} />
+            ) : (
+              <>
+                <span className="flex items-center gap-2"><Building size={18} /> 顧問先一覧へ戻る</span>
+                <span className="text-[10px] bg-blue-800 px-2 py-0.5 rounded border border-blue-500 shadow-inner">切替</span>
+              </>
+            )}
           </button>
         </div>
       </aside>
@@ -5157,10 +5156,11 @@ const App = () => {
           <div className="p-6 max-w-[2100px] mx-auto space-y-4 pb-20 min-w-max">
                                     {/* ▼ 表示モード切り替えトグル ▼ */}       
                {" "}
-            <div className="flex items-center justify-between bg-white p-2 rounded-lg shadow-sm border border-gray-200 mb-4 w-fit">
-                           {" "}
+            {/* 操作はタブ／月選択の直後に並べて、対象帳票との関連性を一目で分かるようにする。
+                画面全体の右端に押し出さず、関連グループ内で完結させる（justify-between を使わない）。
+                狭い画面では flex-wrap で自然に折り返し、gap-2 が縦間隔を担保する。 */}
+            <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-lg shadow-sm border border-gray-200 mb-4 w-fit max-w-full">
               <div className="flex bg-slate-100 rounded-md p-1">
-                               {" "}
                 <button
                   onClick={() => setLedgerViewMode("annual")}
                   className={`flex items-center gap-2 px-6 py-2 rounded text-sm font-bold transition-all ${
@@ -5169,10 +5169,8 @@ const App = () => {
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                                    <User size={16} /> 社員別年間台帳          
-                       {" "}
+                  <User size={16} /> 社員別年間台帳
                 </button>
-                               {" "}
                 <button
                   onClick={() => setLedgerViewMode("monthly")}
                   className={`flex items-center gap-2 px-6 py-2 rounded text-sm font-bold transition-all ${
@@ -5181,67 +5179,70 @@ const App = () => {
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                                    <Users size={16} /> 支給控除一覧表（月別・全社員）          
-                       {" "}
+                  <Users size={16} /> 支給控除一覧表（月別・全社員）
                 </button>
-                             {" "}
               </div>
-                           {" "}
-              {ledgerViewMode === "monthly" && (
-                <div className="ml-6 flex items-center gap-2 border-l pl-6 border-slate-200">
-                                   {" "}
-                  <span className="text-xs font-bold text-slate-500">
-                    入力対象月:
-                  </span>
-                                   {" "}
-                  <select
-                    value={ledgerSelectedMonth}
-                    onChange={(e) => setLedgerSelectedMonth(e.target.value)}
-                    className="bg-slate-50 border border-slate-200 text-slate-700 font-bold rounded px-3 py-1.5 outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                                       {" "}
-                    {MONTHS.map((m) => (
-                      <option key={m} value={m}>
-                        {parseInt(m, 10)}月支給分
-                      </option>
-                    ))}
-                                     {" "}
-                  </select>
-                                 {" "}
-                </div>
+              {/* ▼ 社員別年間台帳の操作: 印刷（タブの直後に配置） ▼ */}
+              {ledgerViewMode === "annual" && selectedEmployeeId && master && data && selectedYear && (
+                <button
+                  onClick={() => setIsLedgerPrintOpen(true)}
+                  title="既存の賃金台帳印刷モーダルを開きます"
+                  aria-label="台帳を印刷"
+                  className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
+                >
+                  <Printer size={14} /> 印刷
+                </button>
               )}
-                         {" "}
+              {/* ▼ 支給控除一覧表（月別・全社員）の操作: 入力対象月 / 月次チェック / 印刷（タブの直後に配置） ▼ */}
+              {/* border-l + ml は折り返し時に行頭で孤立するため使わない。視覚分離は親の gap-2 とタブ群の背景で十分。 */}
+              {ledgerViewMode === "monthly" && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-500">
+                      入力対象月:
+                    </span>
+                    <select
+                      value={ledgerSelectedMonth}
+                      onChange={(e) => setLedgerSelectedMonth(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 text-slate-700 font-bold rounded px-3 py-1.5 outline-none focus:border-indigo-500 cursor-pointer"
+                    >
+                      {MONTHS.map((m) => (
+                        <option key={m} value={m}>
+                          {parseInt(m, 10)}月支給分
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    onClick={() => handleMonthlyCheck(ledgerSelectedMonth)}
+                    title="この月の入力内容を月次チェック（社会保険・所得税・差引支給額の整合性検証）にかけます"
+                    className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
+                  >
+                    <ShieldCheck size={14} /> 月次チェック
+                  </button>
+                  <button
+                    onClick={() => {
+                      const monthStr = ledgerSelectedMonth === "bonus" ? "賞与1" : ledgerSelectedMonth === "bonus2" ? "賞与2" : `${parseInt(ledgerSelectedMonth, 10)}月分`;
+                      const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
+                      const originalTitle = document.title;
+                      document.title = fileName;
+                      window.print();
+                      document.title = originalTitle;
+                    }}
+                    title="帳票出力センターの支給控除一覧表（月別・全社員）と同じ形式で印刷します"
+                    aria-label="支給控除一覧表を印刷"
+                    className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
+                  >
+                    <Printer size={14} /> 印刷
+                  </button>
+                </>
+              )}
             </div>
                         {/* ▼ 支給控除一覧表（月別・全社員）ビューのテーブル：帳票出力センターの「支給控除一覧表」と同一用途 ▼ */}           {" "}
             {ledgerViewMode === "monthly" && (
               <>
               <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold rounded-lg px-3 py-2 mb-3">
                 月ごとの全社員の支給額・控除額・差引支給額を一覧で確認・入力できます。
-              </div>
-              {/* ▼ 主操作バー: 月次チェック / 印刷（既存テーブル右端のボタンを上部へ移動） ▼ */}
-              <div className="flex flex-wrap items-center gap-2 mb-3">
-                <button
-                  onClick={() => handleMonthlyCheck(ledgerSelectedMonth)}
-                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                >
-                  <ShieldCheck size={16} /> 月次チェック
-                </button>
-                <button
-                  onClick={() => {
-                    // 帳票出力センターの monthlySummary と同一の renderMonthlySummary をこの画面の hidden print-area が描画しているため、
-                    // window.print() を呼ぶだけで完全に同じ形式・同じDOMで印刷される。
-                    const monthStr = ledgerSelectedMonth === "bonus" ? "賞与1" : ledgerSelectedMonth === "bonus2" ? "賞与2" : `${parseInt(ledgerSelectedMonth, 10)}月分`;
-                    const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
-                    const originalTitle = document.title;
-                    document.title = fileName;
-                    window.print();
-                    document.title = originalTitle;
-                  }}
-                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                >
-                  <Printer size={16} /> 支給控除一覧表を印刷（PDF保存）
-                </button>
-                <span className="text-[10px] text-slate-500 font-bold">※ 帳票出力センターの「支給控除一覧表（月別・全社員）」と同じ形式で印刷されます</span>
               </div>
               {/* ▼ 印刷用の print-only print-area: 帳票出力センターと同じ renderMonthlySummary を描画 ▼ */}
               {/* Tailwind の hidden は display:none で、@media print の visibility 制御では復元されないため
@@ -5537,16 +5538,6 @@ const App = () => {
 
               {selectedEmployeeId && master && data && selectedYear ? (
                 <>
-                  {/* ▼ 主操作バー: 台帳印刷（既存ヘッダ右端のボタンを上部へ移動） ▼ */}
-                  <div className="flex flex-wrap items-center gap-2 mb-3">
-                    <button
-                      onClick={() => setIsLedgerPrintOpen(true)}
-                      className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                    >
-                      <Printer size={16} /> 台帳印刷プレビューを開く
-                    </button>
-                    <span className="text-[10px] text-slate-500 font-bold">※ 既存の賃金台帳印刷モーダルが開きます</span>
-                  </div>
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4 p-4 flex flex-col md:flex-row justify-between items-center gap-4">
                     {/* 左側：氏名を一番左に、大きく強調 */}
                     <div className="flex items-center gap-6">
@@ -7529,64 +7520,41 @@ const App = () => {
 
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
                            {" "}
-              <div className="p-4 bg-slate-800 text-white flex justify-between items-center flex-shrink-0">
-                               {" "}
-                <div className="flex items-center gap-2">
-                                   {" "}
-                  <Users size={18} className="text-indigo-400" />               
-                   {" "}
+              <div className="p-4 bg-slate-800 text-white flex flex-wrap items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-2 mr-2">
+                  <Users size={18} className="text-indigo-400" />
                   <h2 className="font-black text-sm tracking-widest uppercase">
-                                        給与(賞与)明細一覧表                  {" "}
+                    給与(賞与)明細一覧表
                   </h2>
-                                 {" "}
                 </div>
-                               {" "}
-                <div className="flex items-center gap-3">
-                                   {" "}
-                  <button
-                    onClick={() => handleMonthlyCheck(selectedListMonth)}
-                    className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded text-xs font-bold transition-colors mr-2"
-                  >
-                                        <ShieldCheck size={14} /> 月次チェック  
-                                   {" "}
-                  </button>
-                                   {" "}
-                  <button
-                    onClick={() => setIsBulkPrintOpen(true)}
-                    className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded text-xs font-bold transition-colors mr-2"
-                  >
-                                        <Printer size={14} /> 一括印刷          
-                           {" "}
-                  </button>
-                  <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700 mr-2">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase">
-                      年度:
-                    </span>
-                    <select
-                      value={selectedYear || ""}
-                      onChange={(e) => setSelectedYear(e.target.value)}
-                      className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
-                    >
-                      {yearsList.map((y) => {
-                        const hasTable = Object.values(taxTables).some(
-                          (t) => normalizeYear(t.year) === normalizeYear(y)
-                        );
-                        return (
-                          <option key={y} value={y}>
-                            {y} {!hasTable ? " (税額表未登録)" : ""}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </div>
-                  {isYearLocked && (
-                    <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-2 py-1.5 rounded border border-red-500/30 whitespace-nowrap">
-                      ロック中
-                    </span>
-                  )}
-                  <span className="text-xs font-bold text-slate-300 border-l border-slate-600 pl-4 ml-2">
-                    対象:
+                <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded border border-slate-700">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">
+                    年度:
                   </span>
+                  <select
+                    value={selectedYear || ""}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    className="bg-transparent border-none outline-none text-sm font-bold text-white cursor-pointer"
+                  >
+                    {yearsList.map((y) => {
+                      const hasTable = Object.values(taxTables).some(
+                        (t) => normalizeYear(t.year) === normalizeYear(y)
+                      );
+                      return (
+                        <option key={y} value={y}>
+                          {y} {!hasTable ? " (税額表未登録)" : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+                {isYearLocked && (
+                  <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-2 py-1.5 rounded border border-red-500/30 whitespace-nowrap">
+                    ロック中
+                  </span>
+                )}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-300">対象:</span>
                   <select
                     value={selectedListMonth}
                     onChange={(e) => setSelectedListMonth(e.target.value)}
@@ -7601,6 +7569,23 @@ const App = () => {
                     <option value="bonus2">賞与②</option>
                   </select>
                 </div>
+                {/* ▼ 主操作: 月次チェック / 一括印刷（タイトル・年度・対象月の直後に配置） ▼ */}
+                <button
+                  onClick={() => handleMonthlyCheck(selectedListMonth)}
+                  title="この月の入力内容を月次チェック（社会保険・所得税・差引支給額の整合性検証）にかけます"
+                  aria-label="月次チェック"
+                  className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
+                >
+                  <ShieldCheck size={14} /> 月次チェック
+                </button>
+                <button
+                  onClick={() => setIsBulkPrintOpen(true)}
+                  title="この月の全社員分の給与明細をまとめて印刷プレビュー表示します"
+                  aria-label="一括印刷"
+                  className="flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
+                >
+                  <Printer size={14} /> 一括印刷
+                </button>
               </div>
               {!(selectedListMonth === "bonus" || selectedListMonth === "bonus2") && isMonthGloballyLocked(selectedYear, selectedListMonth) && (
                 <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-b border-purple-200 text-purple-700 text-xs font-bold">

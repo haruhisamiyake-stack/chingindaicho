@@ -1301,6 +1301,11 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
 
   const _westernYear = reiwaToWestern(yearStr) || 2026;
   const targetYearMonth = `${_westernYear}-${monthKey}`;
+  // 雇用保険料率は賃金締切期間の末日(periodEnd)が属する年月で判定する。periodEnd 未設定時は支給月にフォールバック。
+  const employmentTargetYearMonth =
+    row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
+      ? row.periodEnd.slice(0, 7)
+      : targetYearMonth;
   const businessType = settings?.businessType || "general";
   const _eSchedKey = businessType === "construction" ? "employmentConstruction" : "employmentGeneral";
   const healthSchedule = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
@@ -1313,7 +1318,7 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   const pRate = resolveRate(null, row.lockedSnapshotRates?.pension, pensionSchedule, targetYearMonth, 9.15);
   const nRate = resolveRate(null, row.lockedSnapshotRates?.nursing, nursingSchedule, targetYearMonth, 0.8);
   const cRate = resolveRate(null, row.lockedSnapshotRates?.childCare, childCareSchedule, targetYearMonth, 0.115);
-  const eRate = resolveRate(null, row.lockedSnapshotRates?.employment, employmentSchedule, targetYearMonth, 6.0);
+  const eRate = resolveRate(null, row.lockedSnapshotRates?.employment, employmentSchedule, employmentTargetYearMonth, 6.0);
 
   const hasHealth =
     master.healthIns !== undefined
@@ -1631,10 +1636,32 @@ const calculateBonusResult = ({
   const bonusTargetYearMonth = bonusRow.payDate
     ? bonusRow.payDate.slice(0, 7)
     : `${_westernYearB}-${monthKeyForRates}`;
+  // 雇用保険料率は賃金締切期間の末日(periodEnd)が属する年月で判定する。月次給与と基準を統一する目的。
+  // 現行データ構造に bonusRow.periodEnd は無いため、存在しない場合は bonusTargetYearMonth(=payDate ベース) にフォールバック。
+  const bonusEmploymentTargetYearMonth =
+    bonusRow.periodEnd && typeof bonusRow.periodEnd === "string" && bonusRow.periodEnd.length >= 7
+      ? bonusRow.periodEnd.slice(0, 7)
+      : bonusTargetYearMonth;
   const bonusMonthKey = bonusRow.payDate
     ? bonusRow.payDate.slice(5, 7)
     : monthKeyForRates;
   const bonusMonthRow = yearData.monthly?.[bonusMonthKey] || {};
+  // 雇用保険のみ、bonusEmploymentTargetYearMonth(=periodEnd 月) と一致する monthly row から snapshot を取得する。
+  // 健保・厚年・介護・子育て支援金は従来どおり bonusMonthRow(=payDate 月) を使用するため変更しない。
+  // 月番号(キー)ではなく row.periodEnd の YYYY-MM 一致で探索することで、20日締め等の締日基準と整合し、
+  // かつ年度跨ぎで別年の同月行を誤参照する事故も同時に防ぐ。一致 row が見つからない場合は
+  // snapshot を null にして employmentSchedule + bonusEmploymentTargetYearMonth で料率判定にフォールバックする。
+  const bonusEmploymentMonthRowEntry = Object.entries(yearData.monthly || {}).find(
+    ([, _r]) =>
+      _r?.periodEnd &&
+      typeof _r.periodEnd === "string" &&
+      _r.periodEnd.length >= 7 &&
+      _r.periodEnd.slice(0, 7) === bonusEmploymentTargetYearMonth
+  );
+  const bonusEmploymentMonthRow = bonusEmploymentMonthRowEntry?.[1] || bonusMonthRow;
+  const bonusEmploymentSnapshotValue = bonusEmploymentMonthRowEntry
+    ? bonusEmploymentMonthRow.lockedSnapshotRates?.employment
+    : null;
   const businessType = settings?.businessType || "general";
   const _eSchedKey = businessType === "construction" ? "employmentConstruction" : "employmentGeneral";
   const healthSchedule = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
@@ -1647,7 +1674,7 @@ const calculateBonusResult = ({
   const pRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.pension, pensionSchedule, bonusTargetYearMonth, 9.15);
   const nRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.nursing, nursingSchedule, bonusTargetYearMonth, 0.8);
   const cRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.childCare, childCareSchedule, bonusTargetYearMonth, 0.115);
-  const eRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.employment, employmentSchedule, bonusTargetYearMonth, 6.0);
+  const eRate = resolveRate(null, bonusEmploymentSnapshotValue, employmentSchedule, bonusEmploymentTargetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -1818,6 +1845,7 @@ const createInitialYearData = (yearStr, settings) => {
       incomeTax: 0,
       residentTax: 0,
       payDate: "",
+      periodEnd: "", // 雇用保険料率判定用（対象期間末日）。空なら payDate ベースにフォールバック。
     },
     bonus2: {
       basePay: 0,
@@ -1826,6 +1854,7 @@ const createInitialYearData = (yearStr, settings) => {
       incomeTax: 0,
       residentTax: 0,
       payDate: "",
+      periodEnd: "", // 雇用保険料率判定用（対象期間末日）。空なら payDate ベースにフォールバック。
     },
   };
 };
@@ -2659,12 +2688,17 @@ const App = () => {
       const _snapChildCareSched = settings?.customRateSchedules?.childCare?.enabled ? settings.customRateSchedules.childCare.schedules : settings?.rateSchedules?.childCare;
       const _snapEGlobalSched = settings?.rateSchedules?.[_snapEKey] || settings?.rateSchedules?.employment;
       const _snapEmploymentSched = settings?.customRateSchedules?.[_snapEKey]?.enabled ? settings.customRateSchedules[_snapEKey].schedules : _snapEGlobalSched;
+      // 雇用保険料率は賃金締切期間の末日(periodEnd)が属する年月で判定する。periodEnd 未設定時は支給月にフォールバック。
+      const employmentTargetYearMonth =
+        row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
+          ? row.periodEnd.slice(0, 7)
+          : targetYearMonth;
       const lockedSnapshotRates = {
         health: resolveRate(null, null, _snapHealthSched, targetYearMonth, 5.0),
         pension: resolveRate(null, null, _snapPensionSched, targetYearMonth, 9.15),
         nursing: resolveRate(null, null, _snapNursingSched, targetYearMonth, 0.8),
         childCare: resolveRate(null, null, _snapChildCareSched, targetYearMonth, 0.115),
-        employment: resolveRate(null, null, _snapEmploymentSched, targetYearMonth, 6.0),
+        employment: resolveRate(null, null, _snapEmploymentSched, employmentTargetYearMonth, 6.0),
       };
       await saveDoc(PATHS.employee(tenantId, empId), {
         data: { years: { [yearStr]: { monthly: { [monthKey]: { lockedSnapshotRates } } } } }
@@ -5548,6 +5582,25 @@ const App = () => {
                                 }
                                 className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
                               />
+                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="雇用保険料率の判定に使用。空欄時は支給日ベース。">
+                                対象期間末日
+                              </div>
+                              <input
+                                type="date"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus?.periodEnd || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus",
+                                    "periodEnd",
+                                    null,
+                                    e.target.value
+                                  )
+                                }
+                                title="雇用保険料率の判定に使用。空欄時は支給日ベース。"
+                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
+                              />
                             </th>
                             <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[190px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
@@ -5569,6 +5622,25 @@ const App = () => {
                                     e.target.value
                                   )
                                 }
+                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
+                              />
+                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="雇用保険料率の判定に使用。空欄時は支給日ベース。">
+                                対象期間末日
+                              </div>
+                              <input
+                                type="date"
+                                disabled={isYearLocked}
+                                value={currentYearData.bonus2?.periodEnd || ""}
+                                onChange={(e) =>
+                                  updateBonus(
+                                    selectedYear,
+                                    "bonus2",
+                                    "periodEnd",
+                                    null,
+                                    e.target.value
+                                  )
+                                }
+                                title="雇用保険料率の判定に使用。空欄時は支給日ベース。"
                                 className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
                               />
                             </th>
@@ -7103,7 +7175,13 @@ const App = () => {
                                         ? (settings?.rateSchedules?.[_eKey] || settings?.rateSchedules?.employment)
                                         : settings?.rateSchedules?.[rateKey]);
                                   const snapshotVal = row.lockedSnapshotRates?.[rateKey];
-                                  const rateVal = resolveRate(null, snapshotVal, _dispSched, targetYearMonth, defaultRates[rateKey]);
+                                  // 雇用保険のみ periodEnd ベースで料率を判定（その他は支給月ベース）
+                                  const employmentTargetYearMonth =
+                                    row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
+                                      ? row.periodEnd.slice(0, 7)
+                                      : targetYearMonth;
+                                  const rateTargetYearMonth = rateKey === "employment" ? employmentTargetYearMonth : targetYearMonth;
+                                  const rateVal = resolveRate(null, snapshotVal, _dispSched, rateTargetYearMonth, defaultRates[rateKey]);
                                   const unit = rateKey === "employment" ? "‰" : "%";
                                   const rateDisplay = Number.isFinite(Number(rateVal)) ? Number(rateVal).toFixed(3) : "-";
                                   const isSnapshotActive = snapshotVal !== undefined && snapshotVal !== null && snapshotVal !== "";
@@ -8279,6 +8357,12 @@ const App = () => {
                                 {MONTHS.map((m) => {
                                   const row = currentYearData.monthly?.[m] || {};
                                   const targetYearMonth = `${reiwaToWestern(selectedYear || settings.editableYear) || 2026}-${m}`;
+                                  // 雇用保険のみ periodEnd ベースで料率を判定（その他は支給月ベース）
+                                  const employmentTargetYearMonth =
+                                    row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
+                                      ? row.periodEnd.slice(0, 7)
+                                      : targetYearMonth;
+                                  const rateTargetYearMonth = rateKey === "employment" ? employmentTargetYearMonth : targetYearMonth;
                                   const manualEnabled = row[rateKey + "RateManualEnabled"] === true;
                                   const _eSched = rateKey === "employment"
                                     ? (settings?.rateSchedules?.[settings?.businessType === "construction" ? "employmentConstruction" : "employmentGeneral"] || settings?.rateSchedules?.employment)
@@ -8287,7 +8371,7 @@ const App = () => {
                                     manualEnabled ? row[rateKey + "Rate"] : null,
                                     null,
                                     _eSched,
-                                    targetYearMonth,
+                                    rateTargetYearMonth,
                                     defaultVal
                                   );
                                   const isMonthLocked = isYearLocked || currentYearData.monthly?.[m]?.isLocked;

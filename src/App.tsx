@@ -2025,6 +2025,11 @@ const App = () => {
   const [monthlyLocks, setMonthlyLocks] = useState({});
   const [lockMgmtYear, setLockMgmtYear] = useState("");
   const [lockMgmtMonth, setLockMgmtMonth] = useState("01");
+  // ★月次締め画面の対象月（給与明細一覧表の selectedListMonth とは独立）
+  const [monthlyCloseMonth, setMonthlyCloseMonth] = useState("01");
+  // ★月次締め画面の印刷モード（"monthlySummary" の時だけ支給控除一覧表 print-area を DOM 出力）
+  // null のままにすることで Ctrl+P での意図しない支給控除一覧表印刷を防ぐ。
+  const [monthlyClosePrintMode, setMonthlyClosePrintMode] = useState(null);
   const [unlockReason, setUnlockReason] = useState("");
   const [showLockHistoryKey, setShowLockHistoryKey] = useState(null);
   const [localRateSchedules, setLocalRateSchedules] = useState(null);
@@ -4870,13 +4875,14 @@ const App = () => {
 
         <nav className={`${isSidebarCollapsed ? "p-2" : "p-4"} space-y-2 border-b border-slate-800`}>
           {[
-            // 業務導線順: 入力 → 一覧 → 帳票出力 → 集計 → マスタ
-            { tab: "ledger",       icon: Layout,   label: "賃金台帳",         activeColor: "bg-emerald-600" },
-            { tab: "payrollList",  icon: List,     label: "給与明細一覧表",   activeColor: "bg-indigo-600" },
-            { tab: "printCenter",  icon: Printer,  label: "帳票出力", activeColor: "bg-blue-600" },
-            { tab: "aggregation",  icon: FileText, label: "集計・申告",       activeColor: "bg-rose-600" },
-            { tab: "employees",    icon: Users,    label: "社員登録",         activeColor: "bg-teal-600" },
-            { tab: "settings",     icon: Settings, label: "会社個別設定",     activeColor: "bg-orange-600" },
+            // 業務導線順: 入力 → 一覧 → 月次締め → 帳票出力 → 集計 → マスタ
+            { tab: "ledger",       icon: Layout,     label: "賃金台帳",         activeColor: "bg-emerald-600" },
+            { tab: "payrollList",  icon: List,       label: "給与明細一覧表",   activeColor: "bg-indigo-600" },
+            { tab: "monthlyClose", icon: Lock,       label: "月次締め",         activeColor: "bg-purple-600" },
+            { tab: "printCenter",  icon: Printer,    label: "帳票出力",         activeColor: "bg-blue-600" },
+            { tab: "aggregation",  icon: FileText,   label: "集計・申告",       activeColor: "bg-rose-600" },
+            { tab: "employees",    icon: Users,      label: "社員登録",         activeColor: "bg-teal-600" },
+            { tab: "settings",     icon: Settings,   label: "会社個別設定",     activeColor: "bg-orange-600" },
           ].map(({ tab, icon: Icon, label, activeColor }) => (
             <button
               key={tab}
@@ -9016,105 +9022,16 @@ const App = () => {
           </div>
         )}
 
-        {/* ─── 月次全体ロック管理 ─── */}
+        {/* ─── 月次全体ロック管理は「月次締め」メニューへ移動済み ─── */}
         {activeTab === "settings" && (
           <div className="p-6 max-w-2xl">
-            <section>
-              <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">月次全体ロック管理</h3>
-              <p className="text-xs text-slate-500 mb-4">年度と月を指定して全従業員の給与データを一括ロックします。ロック中も閲覧・印刷・集計は可能です。</p>
-              <div className="flex flex-wrap gap-3 items-end mb-4">
-                <div>
-                  <label className="text-xs font-bold text-slate-500 block mb-1">年度</label>
-                  <select
-                    value={lockMgmtYear}
-                    onChange={(e) => setLockMgmtYear(e.target.value)}
-                    className="border border-slate-300 rounded px-3 py-1.5 text-sm"
-                  >
-                    <option value="">選択</option>
-                    {Array.from({ length: 10 }, (_, i) => {
-                      const base = settings.editableYear ? Number(settings.editableYear.replace("R","")) : 6;
-                      const n = base - 4 + i;
-                      return <option key={n} value={`R${n}`}>R{n}</option>;
-                    })}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs font-bold text-slate-500 block mb-1">月</label>
-                  <select
-                    value={lockMgmtMonth}
-                    onChange={(e) => setLockMgmtMonth(e.target.value)}
-                    className="border border-slate-300 rounded px-3 py-1.5 text-sm"
-                  >
-                    {MONTHS.map((m) => (
-                      <option key={m} value={m}>{parseInt(m, 10)}月</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex gap-2">
-                  {lockMgmtYear && !isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
-                    <button
-                      onClick={() => handleLockMonth(lockMgmtYear, lockMgmtMonth)}
-                      className="px-4 py-1.5 text-xs font-bold text-white bg-purple-600 hover:bg-purple-500 rounded shadow-sm transition-colors"
-                    >
-                      🔒 ロック
-                    </button>
-                  ) : lockMgmtYear && isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
-                    <div className="flex gap-2 items-center">
-                      <input
-                        type="text"
-                        placeholder="解除理由（必須）"
-                        value={unlockReason}
-                        onChange={(e) => setUnlockReason(e.target.value)}
-                        className="border border-slate-300 rounded px-3 py-1.5 text-xs w-48"
-                      />
-                      <button
-                        onClick={() => handleUnlockMonth(lockMgmtYear, lockMgmtMonth, unlockReason)}
-                        className="px-4 py-1.5 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded shadow-sm transition-colors"
-                      >
-                        🔓 解除
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-              {/* ロック済み月一覧 */}
-              {Object.keys(monthlyLocks).length > 0 && (
-                <div className="mt-4">
-                  <p className="text-xs font-bold text-slate-600 mb-2">ロック履歴</p>
-                  <div className="space-y-1 max-h-64 overflow-y-auto">
-                    {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
-                      Object.entries(months).map(([mk, info]) => (
-                        <div key={`${yr}_${mk}`} className="flex items-center gap-3 text-xs bg-white border border-slate-200 rounded px-3 py-1.5">
-                          <span className={`font-bold ${info.locked ? "text-purple-700" : "text-slate-400"}`}>
-                            {info.locked ? "🔒" : "🔓"} {yr} {parseInt(mk, 10)}月
-                          </span>
-                          {info.locked && <span className="text-slate-500">ロック: {info.lockedAt ? new Date(info.lockedAt).toLocaleString("ja-JP") : "-"}</span>}
-                          {!info.locked && info.unlockedAt && <span className="text-slate-500">解除: {new Date(info.unlockedAt).toLocaleString("ja-JP")} — {info.unlockReason}</span>}
-                          <button
-                            onClick={() => setShowLockHistoryKey(showLockHistoryKey === `${yr}_${mk}` ? null : `${yr}_${mk}`)}
-                            className="ml-auto text-indigo-500 underline"
-                          >
-                            履歴
-                          </button>
-                          {showLockHistoryKey === `${yr}_${mk}` && (
-                            <div className="absolute mt-6 z-50 bg-white border border-slate-300 rounded shadow-lg p-3 text-xs max-w-xs">
-                              {(info.history || []).map((h, hi) => (
-                                <div key={hi} className="mb-1">
-                                  <span className={h.action === "lock" ? "text-purple-600 font-bold" : "text-orange-600 font-bold"}>
-                                    {h.action === "lock" ? "🔒 ロック" : "🔓 解除"}
-                                  </span>
-                                  <span className="text-slate-500 ml-2">{new Date(h.at).toLocaleString("ja-JP")} by {h.by}</span>
-                                  {h.reason && <span className="text-slate-600 ml-2">【{h.reason}】</span>}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
+            <section className="bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 text-sm">
+              <h3 className="text-sm font-bold text-purple-800 mb-1 flex items-center gap-2">
+                <Lock size={16} /> 月次全体ロック管理は「月次締め」メニューへ移動しました
+              </h3>
+              <p className="text-xs text-purple-700">
+                左メニューの「月次締め」から、月次チェック・帳票印刷・全体ロック管理をまとめて行えます。
+              </p>
             </section>
           </div>
         )}
@@ -10942,6 +10859,233 @@ const App = () => {
           </div>
         );
       })()}
+
+       {/* --- 月次締め 画面（既存機能の集約：新しいロジック・新しい印刷HTML・新しいロック構造は作らない） --- */}
+        {activeTab === "monthlyClose" && (
+          <div className="p-6 max-w-[1400px] mx-auto h-full overflow-y-auto pb-20">
+            {/* 上部：年度・対象月選択 */}
+            <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-lg shadow-sm border border-gray-200 mb-4 w-fit max-w-full">
+              <h2 className="font-black text-lg text-slate-800 flex items-center gap-2 mr-2">
+                <Lock size={20} className="text-purple-600" /> 月次締め
+              </h2>
+              <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">年度:</span>
+                <select
+                  value={selectedYear || ""}
+                  onChange={(e) => setSelectedYear(e.target.value)}
+                  className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
+                >
+                  {yearsList.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">対象月:</span>
+                <select
+                  value={monthlyCloseMonth}
+                  onChange={(e) => setMonthlyCloseMonth(e.target.value)}
+                  className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
+                >
+                  {MONTHS.map((m) => (
+                    <option key={m} value={m}>{parseInt(m, 10)}月支給分</option>
+                  ))}
+                </select>
+              </div>
+              {isMonthGloballyLocked(selectedYear, monthlyCloseMonth) && (
+                <span className="bg-purple-100 text-purple-700 text-[11px] font-black px-2 py-1 rounded border border-purple-300">
+                  🔒 この月はロック中
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* カード1：月次チェック（既存 handleMonthlyCheck を呼ぶ） */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
+                <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
+                  <ShieldCheck size={18} className="text-amber-500" /> 月次チェック
+                </h3>
+                <p className="text-xs text-slate-500 mb-4">
+                  対象月の入力内容（社会保険・所得税・差引支給額の整合性）を一括検証します。
+                </p>
+                <button
+                  onClick={() => handleMonthlyCheck(monthlyCloseMonth)}
+                  title="この月の入力内容を月次チェックにかけます"
+                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
+                >
+                  <ShieldCheck size={16} /> 月次チェックを実行
+                </button>
+              </div>
+
+              {/* カード2：帳票確認（既存 renderMonthlySummary / 既存 isBulkPrintOpen を呼ぶ） */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
+                <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
+                  <Printer size={18} className="text-blue-600" /> 帳票確認
+                </h3>
+                <p className="text-xs text-slate-500 mb-4">
+                  既存の印刷形式そのままで、対象月の帳票を印刷・PDF保存できます。
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      const monthStr = `${parseInt(monthlyCloseMonth, 10)}月分`;
+                      const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
+                      const originalTitle = document.title;
+                      // 印刷モードを有効化 → React 再レンダー後に print-area が DOM へ → window.print()
+                      setMonthlyClosePrintMode("monthlySummary");
+                      // afterprint で確実に解除（fallback: setTimeout で onafterprint 未発火環境にも対応）
+                      let cleaned = false;
+                      const cleanup = () => {
+                        if (cleaned) return;
+                        cleaned = true;
+                        setMonthlyClosePrintMode(null);
+                        document.title = originalTitle;
+                        window.removeEventListener("afterprint", cleanup);
+                      };
+                      window.addEventListener("afterprint", cleanup, { once: true });
+                      // setTimeout で再レンダー完了を待ってから window.print() を呼ぶ
+                      setTimeout(() => {
+                        document.title = fileName;
+                        window.print();
+                        // afterprint が発火しない環境向けの fallback 解除
+                        setTimeout(cleanup, 1000);
+                      }, 0);
+                    }}
+                    title="帳票出力の支給控除一覧表（月別・全社員）と同じ形式で印刷します"
+                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
+                  >
+                    <Printer size={16} /> 支給控除一覧表を印刷
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedListMonth(monthlyCloseMonth);
+                      setIsBulkPrintOpen(true);
+                    }}
+                    title="既存の給与明細一括印刷モーダルを開きます"
+                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
+                  >
+                    <Printer size={16} /> 給与明細を一括印刷
+                  </button>
+                </div>
+              </div>
+
+              {/* カード3：月次全体ロック管理（会社個別設定から移設、monthlyLocks の既存構造を流用） */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5 md:col-span-2">
+                <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
+                  <Lock size={18} className="text-purple-600" /> 月次全体ロック管理
+                </h3>
+                <p className="text-xs text-slate-500 mb-4">
+                  年度と月を指定して全従業員の給与データを一括ロックします。ロック中も閲覧・印刷・集計は可能です。
+                </p>
+                <div className="flex flex-wrap gap-3 items-end mb-4">
+                  <div>
+                    <label className="text-xs font-bold text-slate-500 block mb-1">年度</label>
+                    <select
+                      value={lockMgmtYear}
+                      onChange={(e) => setLockMgmtYear(e.target.value)}
+                      className="border border-slate-300 rounded px-3 py-1.5 text-sm"
+                    >
+                      <option value="">選択</option>
+                      {Array.from({ length: 10 }, (_, i) => {
+                        const base = settings.editableYear ? Number(settings.editableYear.replace("R","")) : 6;
+                        const n = base - 4 + i;
+                        return <option key={n} value={`R${n}`}>R{n}</option>;
+                      })}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-slate-500 block mb-1">月</label>
+                    <select
+                      value={lockMgmtMonth}
+                      onChange={(e) => setLockMgmtMonth(e.target.value)}
+                      className="border border-slate-300 rounded px-3 py-1.5 text-sm"
+                    >
+                      {MONTHS.map((m) => (
+                        <option key={m} value={m}>{parseInt(m, 10)}月</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    {lockMgmtYear && !isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
+                      <button
+                        onClick={() => handleLockMonth(lockMgmtYear, lockMgmtMonth)}
+                        className="px-4 py-1.5 text-xs font-bold text-white bg-purple-600 hover:bg-purple-500 rounded shadow-sm transition-colors"
+                      >
+                        🔒 ロック
+                      </button>
+                    ) : lockMgmtYear && isMonthGloballyLocked(lockMgmtYear, lockMgmtMonth) ? (
+                      <div className="flex gap-2 items-center">
+                        <input
+                          type="text"
+                          placeholder="解除理由（必須）"
+                          value={unlockReason}
+                          onChange={(e) => setUnlockReason(e.target.value)}
+                          className="border border-slate-300 rounded px-3 py-1.5 text-xs w-48"
+                        />
+                        <button
+                          onClick={() => handleUnlockMonth(lockMgmtYear, lockMgmtMonth, unlockReason)}
+                          className="px-4 py-1.5 text-xs font-bold text-white bg-orange-600 hover:bg-orange-500 rounded shadow-sm transition-colors"
+                        >
+                          🔓 解除
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                {Object.keys(monthlyLocks).length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-xs font-bold text-slate-600 mb-2">ロック履歴</p>
+                    <div className="space-y-1 max-h-64 overflow-y-auto">
+                      {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
+                        Object.entries(months).map(([mk, info]) => (
+                          <div key={`${yr}_${mk}`} className="flex items-center gap-3 text-xs bg-white border border-slate-200 rounded px-3 py-1.5">
+                            <span className={`font-bold ${info.locked ? "text-purple-700" : "text-slate-400"}`}>
+                              {info.locked ? "🔒" : "🔓"} {yr} {parseInt(mk, 10)}月
+                            </span>
+                            {info.locked && <span className="text-slate-500">ロック: {info.lockedAt ? new Date(info.lockedAt).toLocaleString("ja-JP") : "-"}</span>}
+                            {!info.locked && info.unlockedAt && <span className="text-slate-500">解除: {new Date(info.unlockedAt).toLocaleString("ja-JP")} — {info.unlockReason}</span>}
+                            <button
+                              onClick={() => setShowLockHistoryKey(showLockHistoryKey === `${yr}_${mk}` ? null : `${yr}_${mk}`)}
+                              className="ml-auto text-indigo-500 underline"
+                            >
+                              履歴
+                            </button>
+                            {showLockHistoryKey === `${yr}_${mk}` && (
+                              <div className="absolute mt-6 z-50 bg-white border border-slate-300 rounded shadow-lg p-3 text-xs max-w-xs">
+                                {(info.history || []).map((h, hi) => (
+                                  <div key={hi} className="mb-1">
+                                    <span className={h.action === "lock" ? "text-purple-600 font-bold" : "text-orange-600 font-bold"}>
+                                      {h.action === "lock" ? "🔒 ロック" : "🔓 解除"}
+                                    </span>
+                                    <span className="text-slate-500 ml-2">{new Date(h.at).toLocaleString("ja-JP")} by {h.by}</span>
+                                    {h.reason && <span className="text-slate-600 ml-2">【{h.reason}】</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 印刷用の print-area: 帳票出力・賃金台帳と同じ renderMonthlySummary を描画。
+                「支給控除一覧表を印刷」ボタン押下時にのみ DOM 出力する（Ctrl+P 等の不意の印刷を防ぐ）。
+                さらに既存の印刷モーダル(一括印刷/単票/賃金台帳印刷)が開いている時は、両者の print-area が
+                同時に visible になって帳票が混在するのを防ぐため、ここの print-area は出さない。 */}
+            {monthlyClosePrintMode === "monthlySummary" &&
+              !isBulkPrintOpen &&
+              !slipEmployeeId &&
+              !isLedgerPrintOpen && (
+                <div className="print-only-block print-area">
+                  {renderMonthlySummary(monthlyCloseMonth)}
+                </div>
+              )}
+          </div>
+        )}
 
        {/* --- 帳票出力 独立画面 --- */}
         {activeTab === "printCenter" && (

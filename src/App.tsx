@@ -2514,6 +2514,14 @@ const App = () => {
     return monthlyLocks?.[yearStr]?.[monthKey]?.locked === true;
   };
 
+  // 賃金台帳セルの編集可否を1関数に統一。年度ロック / 個別月ロック / 全体月ロック のいずれかが
+  // true なら編集不可とする。bonus 列は month キーを持たないためこの helper の対象外（bonus 列は
+  // 従来どおり isYearLocked のみで判定する）。
+  const isMonthCellLocked = (m) =>
+    isYearLocked ||
+    currentYearData.monthly[m]?.isLocked ||
+    isMonthGloballyLocked(selectedYear, m);
+
   useEffect(() => {
     if (!selectedEmployeeId || !selectedYear || !data) return;
 
@@ -6126,18 +6134,26 @@ const App = () => {
                                     onClick={() =>
                                       toggleMonthLock(selectedYear, m)
                                     }
+                                    // 月次全体ロック中・年度ロック中はトグル無効。
+                                    // 個別ロック(isLocked===true)のみは disabled しない — そのトグルでこそ解除できる。
+                                    disabled={isYearLocked || isMonthGloballyLocked(selectedYear, m)}
                                     title={
-                                      currentYearData.monthly[m]?.isLocked
+                                      isMonthGloballyLocked(selectedYear, m)
+                                        ? "月次全体ロック中（解除は『月次締め』画面から行ってください）"
+                                        : currentYearData.monthly[m]?.isLocked
                                         ? "この月の編集ロックを解除"
                                         : "この月の編集をロック"
                                     }
                                     className={`p-1 rounded transition-colors ${
-                                      currentYearData.monthly[m]?.isLocked
+                                      // 表示は「実効ロック状態」(個別ロック OR 月次全体ロック OR 年度ロック)に揃える。
+                                      // ユーザーが直接解除できる個別ロックと、解除不可な全体ロックは
+                                      // 上の disabled とツールチップで区別する。
+                                      isMonthCellLocked(m)
                                         ? "text-red-500 bg-red-100 hover:bg-red-200"
                                         : "text-slate-300 hover:text-slate-600 hover:bg-slate-200"
-                                    }`}
+                                    } disabled:opacity-40 disabled:cursor-not-allowed`}
                                   >
-                                    {currentYearData.monthly[m]?.isLocked ? (
+                                    {isMonthCellLocked(m) ? (
                                       <Lock size={12} />
                                     ) : (
                                       <Unlock size={12} />
@@ -6152,13 +6168,11 @@ const App = () => {
                                       )
                                     }
                                     disabled={
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
+                                      isMonthCellLocked(m)
                                     }
                                     title="前月の金額・控除設定をコピー"
                                     className={`p-1 rounded transition-colors ${
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
+                                      isMonthCellLocked(m)
                                         ? "text-slate-200 cursor-not-allowed"
                                         : "text-indigo-400 hover:text-indigo-600 hover:bg-indigo-100"
                                     }`}
@@ -6175,7 +6189,7 @@ const App = () => {
                                       currentYearData.monthly[m]
                                         ?.salaryMonthText || ""
                                     }
-                                    disabled={isYearLocked}
+                                    disabled={isMonthCellLocked(m)}
                                     onChange={(e) =>
                                       updateMonthly(
                                         selectedYear,
@@ -6185,7 +6199,7 @@ const App = () => {
                                       )
                                     }
                                     className={`w-full text-[9px] text-center bg-white border border-slate-200 rounded-[2px] outline-none focus:border-emerald-400 font-bold py-0.5 px-0 placeholder-slate-300 ${
-                                      isYearLocked
+                                      isMonthCellLocked(m)
                                         ? "cursor-not-allowed text-slate-400"
                                         : "text-slate-600"
                                     }`}
@@ -6197,7 +6211,7 @@ const App = () => {
                                     value={
                                       currentYearData.monthly[m]?.payDate || ""
                                     }
-                                    disabled={isYearLocked}
+                                    disabled={isMonthCellLocked(m)}
                                     onChange={(e) =>
                                       updateMonthly(
                                         selectedYear,
@@ -6207,7 +6221,7 @@ const App = () => {
                                       )
                                     }
                                     className={`w-full text-[8px] text-center bg-white border border-slate-200 rounded-[2px] outline-none focus:border-emerald-400 font-mono py-0.5 px-0 tracking-tighter ${
-                                      isYearLocked
+                                      isMonthCellLocked(m)
                                         ? "cursor-not-allowed text-slate-400"
                                         : "text-slate-600"
                                     }`}
@@ -6356,8 +6370,7 @@ const App = () => {
                                 <input
                                   type="date"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.periodStart ||
@@ -6372,8 +6385,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-center outline-none font-mono text-[9px] px-0.5 tracking-tighter ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : "text-slate-600"
                                   }`}
@@ -6401,8 +6413,7 @@ const App = () => {
                                 <input
                                   type="date"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.periodEnd || ""
@@ -6416,8 +6427,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-center outline-none font-mono text-[9px] px-0.5 tracking-tighter ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : "text-slate-600"
                                   }`}
@@ -6447,8 +6457,7 @@ const App = () => {
                                   type="number"
                                   step="0.5"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.workingDays ||
@@ -6463,8 +6472,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6493,8 +6501,7 @@ const App = () => {
                                   type="number"
                                   step="0.1"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.workingHours ||
@@ -6509,8 +6516,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6539,8 +6545,7 @@ const App = () => {
                                   type="number"
                                   step="0.1"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.overtimeHours ||
@@ -6555,8 +6560,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6585,8 +6589,7 @@ const App = () => {
                                   type="number"
                                   step="0.1"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]
@@ -6601,8 +6604,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6631,8 +6633,7 @@ const App = () => {
                                   type="number"
                                   step="0.1"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.holidayHours ||
@@ -6647,8 +6648,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6683,8 +6683,7 @@ const App = () => {
                                 <input
                                   type="number"
                                   disabled={
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                   }
                                   value={
                                     currentYearData.monthly[m]?.basePay || ""
@@ -6698,8 +6697,7 @@ const App = () => {
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isYearLocked ||
-                                    currentYearData.monthly[m]?.isLocked
+                                    isMonthCellLocked(m)
                                       ? "cursor-not-allowed text-slate-400"
                                       : ""
                                   }`}
@@ -6807,8 +6805,7 @@ const App = () => {
                                   <input
                                     type="number"
                                     disabled={
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
+                                      isMonthCellLocked(m)
                                     }
                                     value={
                                       currentYearData.monthly[m]
@@ -6828,8 +6825,7 @@ const App = () => {
                                       );
                                     }}
                                     className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked
+                                      isMonthCellLocked(m)
                                         ? "cursor-not-allowed text-slate-400"
                                         : ""
                                     }`}
@@ -6985,7 +6981,7 @@ const App = () => {
                                           {formatCurrency(dispVal)}
                                         </span>
                                         <button
-                                          disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
+                                          disabled={isMonthCellLocked(m)}
                                           onClick={() => {
                                             setOverrideModal({ month: m, fieldKey: key, fieldLabel: labels[key], calcValue: calcVal });
                                             const ov = currentYearData.manualOverrides?.[m]?.[key];
@@ -7041,7 +7037,7 @@ const App = () => {
                                       {isOv ? formatCurrency(Number(ovData.value) || 0) : calcVal === null ? "計算不可" : formatCurrency(calcVal)}
                                     </span>
                                     <button
-                                      disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
+                                      disabled={isMonthCellLocked(m)}
                                       onClick={() => {
                                         setOverrideModal({ month: m, fieldKey: "incomeTax", fieldLabel: "所得税", calcValue: calcVal || 0 });
                                         setOverrideInputValue(isOv ? String(ovData.value) : "");
@@ -7138,14 +7134,14 @@ const App = () => {
                                     ) : (
                                       <input
                                         type="number"
-                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked}
+                                        disabled={isMonthCellLocked(m)}
                                         value={baseVal || ""}
                                         onChange={(e) => updateMonthly(selectedYear, m, "residentTax", Number(e.target.value))}
-                                        className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isYearLocked || currentYearData.monthly[m]?.isLocked ? "cursor-not-allowed text-slate-400" : ""}`}
+                                        className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
                                       />
                                     )}
                                     <button
-                                      disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
+                                      disabled={isMonthCellLocked(m)}
                                       onClick={() => {
                                         setOverrideModal({ month: m, fieldKey: "residentTax", fieldLabel: "住民税", calcValue: Number(baseVal) || 0 });
                                         setOverrideInputValue(isOvRT ? String(ovRT.value) : "");
@@ -7242,7 +7238,7 @@ const App = () => {
                                       ) : (
                                         <input
                                           type="number"
-                                          disabled={isYearLocked || currentYearData.monthly[m]?.isLocked}
+                                          disabled={isMonthCellLocked(m)}
                                           value={baseValD || ""}
                                           onChange={(e) => {
                                             const newMD = {
@@ -7251,11 +7247,11 @@ const App = () => {
                                             };
                                             updateMonthly(selectedYear, m, "deductionAmounts", newMD);
                                           }}
-                                          className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isYearLocked || currentYearData.monthly[m]?.isLocked ? "cursor-not-allowed text-slate-400" : ""}`}
+                                          className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
                                         />
                                       )}
                                       <button
-                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
+                                        disabled={isMonthCellLocked(m)}
                                         onClick={() => {
                                           setOverrideModal({ month: m, fieldKey: ovKeyD, fieldLabel: def.name, calcValue: Number(baseValD) || 0 });
                                           setOverrideInputValue(isOvD ? String(ovD.value) : "");
@@ -7356,7 +7352,7 @@ const App = () => {
                                     <div className="flex items-center gap-0.5">
                                       <span className={isOvNP ? "text-amber-200 font-black" : ""}>{formatCurrency(dispNP)}</span>
                                       <button
-                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
+                                        disabled={isMonthCellLocked(m)}
                                         onClick={() => {
                                           setOverrideModal({ month: m, fieldKey: "netPay", fieldLabel: "差引支給額", calcValue: calcValNP });
                                           setOverrideInputValue(isOvNP ? String(ovNP.value) : "");
@@ -7585,8 +7581,7 @@ const App = () => {
                                   <input
                                     type="number"
                                     disabled={
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked ||
+                                      isMonthCellLocked(m) ||
                                       !isSocialInsEnrolled
                                     }
                                     value={stdAmount || ""}
@@ -7607,8 +7602,7 @@ const App = () => {
                                         ? "text-amber-700"
                                         : "text-blue-900"
                                     } ${
-                                      isYearLocked ||
-                                      currentYearData.monthly[m]?.isLocked ||
+                                      isMonthCellLocked(m) ||
                                       !isSocialInsEnrolled
                                         ? "cursor-not-allowed text-slate-400"
                                         : ""
@@ -7782,8 +7776,7 @@ const App = () => {
                                     )}
                                     <button
                                       disabled={
-                                        isYearLocked ||
-                                        currentYearData.monthly[m]?.isLocked
+                                        isMonthCellLocked(m)
                                       }
                                       onClick={() =>
                                         toggleNursingIns(selectedYear, m)
@@ -7794,8 +7787,7 @@ const App = () => {
                                           ? "bg-rose-600 text-white shadow-inner"
                                           : "bg-gray-50 text-gray-400"
                                       } ${
-                                        isYearLocked ||
-                                        currentYearData.monthly[m]?.isLocked
+                                        isMonthCellLocked(m)
                                           ? "cursor-not-allowed opacity-50"
                                           : ""
                                       }`}

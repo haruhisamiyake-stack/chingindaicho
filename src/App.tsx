@@ -1406,7 +1406,9 @@ const pushSocialInsLogs = ({
 // 0円表示が「未加入」と「計算不可（標準報酬月額未設定）」のどちらなのか判別できないという誤認
 // リスクを排除するため、各セルでこのヘルパーを使い「対象外/計算不可/実額」を切り分ける。
 const formatSocialInsCell = ({ kind, value, hasHealth, hasPension, hasEmployment, hasNursingIns, stdAmtSet }) => {
-  const exempt = { label: "対象外", className: "text-slate-400 italic font-normal" };
+  // 表示文言は空欄に統一（「対象外」「非加入」と書くと帳票上でノイズになるため）。
+  // 0円徴収は amount() 経由で従来通り "0" と区別表示される。内部判定ロジックは未変更。
+  const exempt = { label: "", className: "text-slate-400 italic font-normal" };
   const uncalc = { label: "計算不可", className: "text-rose-600 font-black" };
   const amount = (v) => ({ label: formatCurrency(v ?? 0), className: "text-gray-500 font-mono" });
   if (kind === "health") {
@@ -1446,26 +1448,11 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   if (!master || !row) return {};
 
   const _lockYear = normalizeYear(yearStr);
-  if (monthlyLocks?.[_lockYear]?.[monthKey]?.locked === true) {
-    return {
-      ...row,
-      isLocked: true,
-      isBlocking: true,
-      lockMessage: "この月は全体ロック済です",
-      grossPay: null,
-      health: null,
-      pension: null,
-      nursing: null,
-      childCare: null,
-      employment: null,
-      socialTotal: null,
-      incomeTax: null,
-      totalDeductions: null,
-      netPay: null,
-      calcSuccess: false,
-      calcLog: ["この月は全体ロック済のため計算をスキップしました"],
-    };
-  }
+  // 月次全体ロック中も「計算不可」扱いにしない。row.lockedSnapshotRates と handleSave
+  // sanitize により入力値・料率は固定されているため、通常計算を流せば確定値と同じ結果に
+  // なる。null返し+isBlockingで「計算不可」表示すると実務上「ロック=確定値を見たい」期待と
+  // 矛盾するため、計算は通し calcLog にだけロック中である旨を残す。
+  const _isGloballyLocked = monthlyLocks?.[_lockYear]?.[monthKey]?.locked === true;
 
   const allowanceDefs =
     settings?.allowanceDefinitions?.length > 0
@@ -1552,6 +1539,9 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   const residentTax = Number(row.residentTax) || 0;
 
   const calcLog = ["【月次給与 計算ログ】"];
+  if (_isGloballyLocked) {
+    calcLog.push("🔒 全体ロック済です。確定時の入力値・固定スナップショット料率で表示しています。");
+  }
   const base = Number(row.basePay) || 0;
   calcLog.push(`- 基本給: ${formatCurrency(base)}円`);
 
@@ -1766,27 +1756,14 @@ const calculateBonusResult = ({
 }) => {
   if (!master || !bonusRow || !yearData) return {};
   const _lockYear = normalizeYear(yearStr);
-  if (monthlyLocks?.[_lockYear]?.[bonusKey]?.locked === true) {
-    return {
-      basePay: Number(bonusRow.basePay) || 0,
-      grossPay: null,
-      isLocked: true,
-      isBlocking: true,
-      lockMessage: "この月は全体ロック済です",
-      health: null,
-      pension: null,
-      nursing: null,
-      childCare: null,
-      employment: null,
-      socialTotal: null,
-      incomeTax: null,
-      totalDeductions: null,
-      netPay: null,
-      calcLog: ["この月は全体ロック済のため計算をスキップしました"],
-    };
-  }
+  // 月次全体ロック中フラグ。早期 return せず通常計算を流し、calcLog にだけ注記する。
+  // 理由は calculateMonthlyResult と同じ（確定値の表示優先）。
+  const _isGloballyLocked = monthlyLocks?.[_lockYear]?.[bonusKey]?.locked === true;
   const b = bonusRow;
   const calcLog = ["【賞与 計算ログ】"];
+  if (_isGloballyLocked) {
+    calcLog.push("🔒 全体ロック済です。確定時の入力値・固定スナップショット料率で表示しています。");
+  }
   const bAllowances = {};
   const bDeductions = {};
 

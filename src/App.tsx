@@ -7060,17 +7060,19 @@ const App = () => {
                             <td className={`border border-gray-300 p-0.5 text-right sticky right-[270px] z-25 ${results.bonus1?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
                               <input
                                 type="number"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus?.incomeTax || ""}
-                                onChange={(e) =>
+                                disabled={isYearLocked || !results.bonus1?.manualRequired}
+                                title={!results.bonus1?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
+                                value={results.bonus1?.incomeTax ?? ""}
+                                onChange={(e) => {
+                                  if (!results.bonus1?.manualRequired) return;
                                   updateBonus(
                                     selectedYear,
                                     "bonus",
                                     "incomeTax",
                                     null,
                                     Number(e.target.value)
-                                  )
-                                }
+                                  );
+                                }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
                                   results.bonus1?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
                                 } ${
@@ -7084,17 +7086,19 @@ const App = () => {
                             <td className={`border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 ${results.bonus2?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
                               <input
                                 type="number"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus2?.incomeTax || ""}
-                                onChange={(e) =>
+                                disabled={isYearLocked || !results.bonus2?.manualRequired}
+                                title={!results.bonus2?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
+                                value={results.bonus2?.incomeTax ?? ""}
+                                onChange={(e) => {
+                                  if (!results.bonus2?.manualRequired) return;
                                   updateBonus(
                                     selectedYear,
                                     "bonus2",
                                     "incomeTax",
                                     null,
                                     Number(e.target.value)
-                                  )
-                                }
+                                  );
+                                }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
                                   results.bonus2?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
                                 } ${
@@ -12220,8 +12224,8 @@ const App = () => {
                                 <td key={m} className={`border border-black p-1 text-right font-bold ${currentYearData.manualOverrides?.[m]?.incomeTax?.enabled ? "bg-amber-50" : ""}`}>{formatCurrency(getDisplayValue(m, "incomeTax", results.monthlyResults[m]?.incomeTax))}</td>
                               ))}
                               <td className="border border-black p-1 text-right font-black bg-gray-100">{formatCurrency(results.sums.incomeTax)}</td>
-                              <td className="border border-black p-1 text-right font-bold">{formatCurrency(currentYearData.bonus?.incomeTax)}</td>
-                              <td className="border border-black p-1 text-right font-bold">{formatCurrency(currentYearData.bonus2?.incomeTax)}</td>
+                              <td className="border border-black p-1 text-right font-bold">{formatCurrency(results.bonus1.incomeTax)}</td>
+                              <td className="border border-black p-1 text-right font-bold">{formatCurrency(results.bonus2.incomeTax)}</td>
                               <td className="border border-black p-1 text-right font-black bg-gray-100">{formatCurrency(results.bonusTotal.incomeTax)}</td>
                               <td className="border border-black p-1 text-right font-black bg-gray-200">{formatCurrency(results.sums.incomeTax + results.bonusTotal.incomeTax)}</td>
                             </tr>
@@ -13197,10 +13201,10 @@ const App = () => {
                         {formatCurrency(results.sums.incomeTax)}
                       </td>
                       <td className="border border-black p-1 text-right font-bold">
-                        {formatCurrency(currentYearData.bonus?.incomeTax)}
+                        {formatCurrency(results.bonus1.incomeTax)}
                       </td>
                       <td className="border border-black p-1 text-right font-bold">
-                        {formatCurrency(currentYearData.bonus2?.incomeTax)}
+                        {formatCurrency(results.bonus2.incomeTax)}
                       </td>
                       <td className="border border-black p-1 text-right font-black bg-gray-100">
                         {formatCurrency(results.bonusTotal.incomeTax)}

@@ -266,6 +266,48 @@ const parseTaxTableCsv = (csvText, importType = "monthly") => {
       }
 
       rows.push({ rate, kouRanges, otsuRange });
+    } else if (importType === "monthly_high") {
+      // 月額表・高額帯用ロジック
+      // CSV列: year, threshold, next, rate, kou_0..kou_7 （計12列）
+      // 国税庁月額表の「740,000円超」帯（基準税額 + 超過分 × 率）を表現する。
+      if (cols.length < 12) {
+        throw new Error(
+          `【行 ${rowNum}】列数が不足しています（12列必要ですが ${cols.length}列です）`
+        );
+      }
+
+      const threshold = Number(cols[1]);
+      if (isNaN(threshold))
+        throw new Error(`【行 ${rowNum}】threshold が数値ではありません`);
+
+      const nextStr = (cols[2] || "").toLowerCase();
+      const next =
+        nextStr === "infinity" || nextStr === "" || nextStr === "以上"
+          ? 999999999
+          : Number(cols[2]);
+      if (isNaN(next))
+        throw new Error(`【行 ${rowNum}】next が数値ではありません`);
+
+      if (threshold >= next)
+        throw new Error(
+          `【行 ${rowNum}】threshold(${threshold}) が next(${next}) 以上になっています`
+        );
+
+      const rate = Number(cols[3]);
+      if (isNaN(rate))
+        throw new Error(`【行 ${rowNum}】rate(超過率) が数値ではありません`);
+
+      const kou = [];
+      for (let j = 0; j <= 7; j++) {
+        const v = Number(cols[4 + j]);
+        if (isNaN(v))
+          throw new Error(
+            `【行 ${rowNum}】甲欄(扶養${j}人)の基準税額 が数値ではありません`
+          );
+        kou.push(v);
+      }
+
+      rows.push({ threshold, next, rate, kou });
     } else {
       // 月額表・日額表用ロジック
       if (cols.length < 14) {
@@ -689,6 +731,53 @@ const calculateIncomeTax = (
     });
     if (densanResult && densanResult.log) log.push(...densanResult.log);
     return { tax: densanResult.tax, warning: densanResult.warning, log };
+  }
+
+  // ▼ 月額表 高額帯（740,000円以上）の甲欄計算
+  // 国税庁月額表の「740,000円超」帯は数式形式（基準税額 + 超過分 × 率）で規定されており、
+  // 通常の monthly CSV（min/max + 固定値）では表現できないため、
+  // 「monthly_high」マスタを参照して計算する。
+  // 未登録／該当行なしの場合は電算機特例にフォールバックし、強い警告を記録する。
+  if (!isOtsu && taxableAfterSocial >= 740000) {
+    const highTable = getEffectiveTaxTable(taxTables, normalizedYearStr, "monthly_high");
+    if (highTable && highTable.rows && highTable.rows.length > 0) {
+      const highRow = highTable.rows.find(
+        (r) => taxableAfterSocial >= r.threshold && taxableAfterSocial < r.next
+      );
+      if (highRow) {
+        const depCount = Math.min(Math.max(0, dependents), 7);
+        const baseTax = Number(highRow.kou?.[depCount]) || 0;
+        const tax = baseTax + Math.floor((taxableAfterSocial - highRow.threshold) * highRow.rate);
+        const nextLabel = highRow.next >= 999999999 ? "∞" : `${formatCurrency(highRow.next)}円`;
+        log.push(
+          `[所得税計算] 甲欄適用(月額表 高額帯): 階層[${formatCurrency(highRow.threshold)}円〜${nextLabel}] 扶養${depCount}人 / 適用税額表: ${highTable.year}年度版`
+        );
+        log.push(
+          `  -> 基準税額 ${formatCurrency(baseTax)}円 + (${formatCurrency(taxableAfterSocial - highRow.threshold)}円 × ${highRow.rate}) = ${formatCurrency(tax)}円`
+        );
+        return { tax, warning: null, log };
+      }
+      log.push(
+        `[所得税計算] ⚠ 月額表高額帯マスタに該当階層がありません（${formatCurrency(taxableAfterSocial)}円）。電算機特例で代替計算しています。`
+      );
+      log.push(`[所得税計算] 国税庁月額表の高額帯計算とは差異が出る可能性があります。`);
+      const densanResult = calculateIncomeTaxByDensanReiwa8({ taxableAfterSocial, master, dependents });
+      if (densanResult && densanResult.log) log.push(...densanResult.log);
+      return {
+        tax: densanResult.tax,
+        warning: "月額表高額帯マスタに該当階層がないため、電算機特例で代替計算しています。国税庁月額表の高額帯計算とは差異が出る可能性があります。",
+        log,
+      };
+    }
+    log.push(`[所得税計算] ⚠ 月額表高額帯マスタ未登録のため、電算機特例で代替計算しています。`);
+    log.push(`[所得税計算] 国税庁月額表の高額帯計算とは差異が出る可能性があります。`);
+    const densanResult = calculateIncomeTaxByDensanReiwa8({ taxableAfterSocial, master, dependents });
+    if (densanResult && densanResult.log) log.push(...densanResult.log);
+    return {
+      tax: densanResult.tax,
+      warning: "月額表高額帯マスタ未登録のため、電算機特例で代替計算しています。国税庁月額表の高額帯計算とは差異が出る可能性があります。",
+      log,
+    };
   }
 
   const currentTable = getEffectiveTaxTable(taxTables, normalizedYearStr, "monthly");
@@ -2121,10 +2210,11 @@ const App = () => {
     const stats = {};
     Object.values(taxTables).forEach((t) => {
       if (!stats[t.year]) {
-        stats[t.year] = { monthly: null, bonus: null, lastUpdated: null };
+        stats[t.year] = { monthly: null, bonus: null, monthlyHigh: null, lastUpdated: null };
       }
       if (t.type === "monthly") stats[t.year].monthly = t.rows.length;
       if (t.type === "bonus_nta") stats[t.year].bonus = t.rows.length;
+      if (t.type === "monthly_high") stats[t.year].monthlyHigh = t.rows.length;
 
       if (t.importedAt) {
         const dt = new Date(t.importedAt);
@@ -2146,7 +2236,7 @@ const App = () => {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        if (taxImportType !== "monthly" && taxImportType !== "bonus_nta") {
+        if (taxImportType !== "monthly" && taxImportType !== "bonus_nta" && taxImportType !== "monthly_high") {
           throw new Error("無効なインポート形式です");
         }
         const rows = parseTaxTableCsv(event.target.result, taxImportType);
@@ -2231,6 +2321,20 @@ const App = () => {
         [taxImportYear, ...row].join(",")
       ).join("\n");
       csvContent = BONUS_NTA_HEADER + "\n" + csvRows;
+    } else if (type === "monthly_high") {
+      // 月額表・高額帯テンプレート（year, threshold, next, rate, kou_0..kou_7）
+      // 国税庁 月額表「740,000円超」の基準税額・超過率の例（参考値）
+      let header = "year,threshold,next,rate,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7\n";
+      let rows = `${taxImportYear},740000,790000,0.2042,71680,65210,58750,52290,45810,39350,32890,26410\n`;
+      rows += `${taxImportYear},790000,960000,0.23483,81890,75420,68960,62500,56020,49560,43100,36620\n`;
+      rows += `${taxImportYear},960000,1710000,0.33693,121820,115340,108880,102420,95940,89480,83020,76540\n`;
+      rows += `${taxImportYear},1710000,2130000,0.4084,374520,368040,361580,355120,348640,342180,335720,329240\n`;
+      rows += `${taxImportYear},2130000,2170000,0.4084,549440,542970,536500,530040,523570,517110,510640,504170\n`;
+      rows += `${taxImportYear},2170000,2210000,0.4084,571220,564750,558280,551820,545350,538880,532420,525950\n`;
+      rows += `${taxImportYear},2210000,2250000,0.4084,593000,586520,580060,573600,567120,560660,554200,547730\n`;
+      rows += `${taxImportYear},2250000,3500000,0.4084,614770,608300,601840,595380,588900,582440,575980,569500\n`;
+      rows += `${taxImportYear},3500000,infinity,0.45945,1125270,1118800,1112340,1105880,1099400,1092940,1086480,1080000\n`;
+      csvContent = header + rows;
     }
 
     const blob = new Blob([bom, csvContent], {
@@ -9390,6 +9494,7 @@ const App = () => {
                     >
                       <option value="monthly">月額表</option>
                       <option value="bonus_nta">賞与算出率表</option>
+                      <option value="monthly_high">月額表・高額帯</option>
                     </select>
                   </div>
                   <div className="flex-1 min-w-[250px]">
@@ -9408,7 +9513,7 @@ const App = () => {
                     onClick={() => handleDownloadTemplate(taxImportType)}
                     className="text-xs font-bold text-blue-600 hover:text-blue-800 underline"
                   >
-                    {taxImportType === "monthly" ? "月額表" : "賞与表"}のCSVテンプレートをダウンロード
+                    {taxImportType === "monthly" ? "月額表" : taxImportType === "bonus_nta" ? "賞与表" : "月額表・高額帯"}のCSVテンプレートをダウンロード
                   </button>
                 </div>
 
@@ -9422,7 +9527,7 @@ const App = () => {
                   <div className="mt-4 bg-white border border-blue-200 rounded p-4">
                     <div className="text-xs font-bold text-slate-700 mb-2">プレビュー確認</div>
                     <div className="text-sm font-black text-blue-700 mb-4">
-                      {taxImportPreview.year}年度 / {taxImportPreview.type === "monthly" ? "月額表" : "賞与表"} ({taxImportPreview.rows.length}行)
+                      {taxImportPreview.year}年度 / {taxImportPreview.type === "monthly" ? "月額表" : taxImportPreview.type === "bonus_nta" ? "賞与表" : "月額表・高額帯"} ({taxImportPreview.rows.length}行)
                     </div>
                     <button
                       onClick={handleExecuteTaxImport}
@@ -9463,6 +9568,8 @@ const App = () => {
                             ? "月額表"
                             : table.type === "bonus"
                             ? "賞与算出率表"
+                            : table.type === "monthly_high"
+                            ? "月額表・高額帯"
                             : table.type}
                         </span>
                         <span className="text-xs text-slate-500 font-bold">
@@ -9508,6 +9615,9 @@ const App = () => {
                         <th className="p-3 border-b border-slate-700 font-bold text-center">
                           賞与表
                         </th>
+                        <th className="p-3 border-b border-slate-700 font-bold text-center">
+                          月額表・高額帯
+                        </th>
                         <th className="p-3 border-b border-slate-700 font-bold text-right">
                           行数 (合算)
                         </th>
@@ -9520,7 +9630,7 @@ const App = () => {
                       {Object.keys(taxYearStats).length === 0 ? (
                         <tr>
                           <td
-                            colSpan={5}
+                            colSpan={6}
                             className="p-6 text-center text-slate-400 font-bold bg-slate-50"
                           >
                             データがありません
@@ -9559,8 +9669,19 @@ const App = () => {
                                   </span>
                                 )}
                               </td>
+                              <td className="p-3 text-center">
+                                {stat.monthlyHigh ? (
+                                  <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded font-bold border border-emerald-200">
+                                    あり
+                                  </span>
+                                ) : (
+                                  <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded font-bold border border-amber-200">
+                                    未登録
+                                  </span>
+                                )}
+                              </td>
                               <td className="p-3 text-right font-mono text-slate-600">
-                                {(stat.monthly || 0) + (stat.bonus || 0)} 行
+                                {(stat.monthly || 0) + (stat.bonus || 0) + (stat.monthlyHigh || 0)} 行
                               </td>
                               <td className="p-3 font-mono text-slate-500 pl-6">
                                 {stat.lastUpdated
@@ -9627,6 +9748,8 @@ const App = () => {
                                                    {" "}
                           {taxTables[viewingTaxTableId].type === "bonus_nta"
                             ? "賞与表(税務署形式)"
+                            : taxTables[viewingTaxTableId].type === "monthly_high"
+                            ? "月額表・高額帯(740,000円超)"
                             : taxTables[viewingTaxTableId].type}
                                                  {" "}
                         </span>
@@ -9673,6 +9796,12 @@ const App = () => {
                             csv += table.rows.map(r =>
                               [r.min, r.max >= 999999999 ? "" : r.max, ...(r.kou || []), r.otsu?.type || "", r.otsu?.value ?? ""].join(",")
                             ).join("\n");
+                          } else if (table.type === "monthly_high") {
+                            // 月額表・高額帯は parseTaxTableCsv("monthly_high") でそのまま再インポートできる形式で出力する。
+                            csv = "year,threshold,next,rate,kou_0,kou_1,kou_2,kou_3,kou_4,kou_5,kou_6,kou_7\n";
+                            csv += table.rows.map(r =>
+                              [table.year, r.threshold, r.next >= 999999999 ? "infinity" : r.next, r.rate, ...(r.kou || [])].join(",")
+                            ).join("\n");
                           } else {
                             csv = "税率,甲0下限,甲0上限,甲1下限,甲1上限,甲2下限,甲2上限,甲3下限,甲3上限,甲4下限,甲4上限,甲5下限,甲5上限,甲6下限,甲6上限,甲7下限,甲7上限,乙下限,乙上限\n";
                             csv += table.rows.map(r =>
@@ -9698,7 +9827,7 @@ const App = () => {
                         <Printer size={12} /> 印刷用表示
                       </button>
                     </div>
-                    <div className="max-h-[600px] overflow-y-auto overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar print:max-h-none print:overflow-visible">
+                    <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm custom-scrollbar print:overflow-visible">
                                            {" "}
                       <table className="w-full text-xs text-right whitespace-nowrap bg-white relative">
                                                {" "}
@@ -9733,6 +9862,42 @@ const App = () => {
                                                            {" "}
                               <th className="p-3 text-center">乙(max)</th>     
                                                    {" "}
+                            </tr>
+                          ) : taxTables[viewingTaxTableId].type === "monthly_high" ? (
+                            <tr>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                threshold (以上)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                next (未満)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                超過率 (rate)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養0人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養1人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養2人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養3人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養4人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養5人
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center text-blue-200">
+                                扶養6人
+                              </th>
+                              <th className="p-3 text-center text-blue-200">
+                                扶養7人
+                              </th>
                             </tr>
                           ) : (
                             <tr>
@@ -9831,6 +9996,26 @@ const App = () => {
                                         : "-"}
                                     </td>
                                                                      {" "}
+                                  </>
+                                ) : taxTables[viewingTaxTableId].type === "monthly_high" ? (
+                                  <>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.threshold}
+                                    </td>
+                                    <td className="p-2 border-r font-mono font-bold text-slate-800">
+                                      {r.next >= 999999999 ? "以上" : r.next}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-amber-700 bg-amber-50/30">
+                                      {(r.rate * 100).toFixed(3)}%
+                                    </td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[0] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[1] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[2] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[3] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[4] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[5] ?? "-"}</td>
+                                    <td className="p-2 border-r font-mono">{r.kou?.[6] ?? "-"}</td>
+                                    <td className="p-2 font-mono">{r.kou?.[7] ?? "-"}</td>
                                   </>
                                 ) : (
                                   <>

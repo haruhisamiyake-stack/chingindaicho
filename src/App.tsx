@@ -4494,11 +4494,6 @@ const App = () => {
 
     return (
       <div className="w-full max-w-[297mm] bg-white shadow-xl mx-auto p-6 text-slate-800 slip-page print:w-full print:max-w-none print:shadow-none print:p-0 print:border-none landscape-print">
-        <style dangerouslySetInnerHTML={{__html: `
-          @media print {
-            @page { size: A4 landscape; margin: 10mm; }
-          }
-        `}} />
         <h1 className="text-xl font-black text-center mb-4 tracking-widest border-b-2 border-black pb-2">
           {selectedYear}年度 {monthStr} 支給控除一覧表
         </h1>
@@ -8455,6 +8450,9 @@ const App = () => {
                         </select>
                       </div>
                     </div>
+                    <p className="text-[11px] text-amber-600">
+                      ※変更後も既存の賃金台帳・月別データは自動変更されません。必要に応じて各月を手動調整してください。
+                    </p>
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-500 uppercase">
                         会社住所
@@ -8512,7 +8510,7 @@ const App = () => {
                           <span className="text-sm font-bold text-slate-700">
                             源泉徴収税額表を使用 (推奨)
                             <span className="text-[10px] text-slate-500 font-normal ml-2">
-                              ※表の上限超過時は自動で電算機計算に切り替わります
+                              ※月額表高額帯（740,000円超）対応。高額帯マスタ未登録時のみ電算機計算へフォールバックします
                             </span>
                           </span>
                         </label>
@@ -11779,12 +11777,6 @@ const App = () => {
                 ) : printDocType === "ledger" ? (
                   selectedEmployeeId && employees[selectedEmployeeId] && currentYearData ? (
                     <div className="w-full max-w-[297mm] bg-white shadow-xl mx-auto p-6 text-slate-800 slip-page print:w-full print:max-w-none print:shadow-none print:p-0 print:border-none landscape-print">
-                      <style dangerouslySetInnerHTML={{__html: `
-                        @media print {
-                          @page { size: A4 landscape; margin: 10mm; }
-                        }
-                      `}} />
-
                       {/* ヘッダー */}
                       <div className="mb-6">
                         <h1 className="text-2xl font-black text-center mb-6 tracking-widest">
@@ -13533,11 +13525,22 @@ const App = () => {
         .print-only-block { display: none; }
 
         @media print {
-          /* A4用紙設定（縦向きの場合は portrait、横向きの場合は landscape にします） */
+          /* A4用紙設定。デフォルトは portrait（給与明細書など）。
+             landscape-print クラスを付けたページだけ named-page で landscape + 狭余白へ切替する。
+             これにより支給控除一覧表・賃金台帳のような横長帳票で印刷領域を最大化し、
+             縦長帳票（給与明細書）の 15mm 余白には影響を与えない。 */
           @page { margin: 15mm; }
+          @page landscape-page { size: A4 landscape; margin: 8mm; }
+          .landscape-print { page: landscape-page; }
           body * { visibility: hidden; }
           .print-area, .print-area * { visibility: visible; }
           .print-area { position: absolute; top: 0; left: 0; width: 100%; margin: 0; padding: 0; box-shadow: none !important; border: none !important; }
+          /* visibility:hidden は不可視化のみでレイアウト空間は占有したまま。
+             その結果、左 aside (w-72=288px) が幅を消費し、右側ラッパー(position:relative)が
+             ページ幅未満になり、印刷時 .print-area の absolute width:100% が連鎖的に縮む。
+             これが「A4横なのに中央に小さく表示」の根本原因。
+             印刷時は aside を完全に display:none にして右ラッパーをページ幅まで伸ばす。 */
+          aside { display: none !important; }
           .no-print, .no-print * { display: none !important; }
           .print-only-block { display: block !important; }
 
@@ -13546,9 +13549,55 @@ const App = () => {
             page-break-after: always;
             break-after: page;
             width: 100% !important;
-            max-width: 100% !important;
+            max-width: none !important;
           }
           .slip-page:last-child { page-break-after: auto; break-after: auto; }
+          /* landscape-print 帳票はページ幅いっぱい使う。Tailwind の p-6 由来の内側余白も
+             印刷時は 0 になるよう既存の print:p-0 と整合し、表が紙端まで届く設計とする。
+             max-width:100% だと親 containing block より大きくなれず、印刷プレビューで親側に
+             flex/auto-margin/min-content 由来の縮みがあった場合に表が縮こまる事象があった
+             ため max-width:none に変更し、direct children(h1/metadata flex/table/footer)
+             すべてにも幅指定を適用して途中ラッパーでの縮小を抑止する。 */
+          /* 横帳票の余白は @page landscape-page { margin: 8mm } のみで管理する。
+             wrapper / table 側に追加マージン(calc width, margin-left/right, auto margin)
+             を入れると二重計算になり、プリンタの描画誤差と相まって左右切れ・左寄り等の
+             事象が頻発するため、ここでは width:100% でフル表示し box-sizing:border-box で
+             padding/border を含めて印刷可能領域 (281mm) 内に収める。 */
+          .landscape-print {
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-sizing: border-box !important;
+          }
+          .landscape-print > * {
+            width: 100% !important;
+            max-width: none !important;
+          }
+          .landscape-print table {
+            width: 100% !important;
+            max-width: 100% !important;
+            /* table-layout:auto だと Chrome 印刷で内容幅ベースに列が縮み、
+               width:100% を指定しても紙端まで届かない事象があった。
+               fixed にすると table 全体幅 100% を確実に消費し、
+               明示幅のない列は残幅を均等分配する。
+               1行目のセル幅(w-12=社員CD, w-24=氏名)は確定し、残列が均等配分される。 */
+            table-layout: fixed !important;
+            box-sizing: border-box !important;
+          }
+          /* セル padding を p-1 (4px) から 1px 2px へ縮小し、列幅余裕を確保。
+             text-[9px] の数字内容は 1mm 未満の padding でも視認性に影響しない。 */
+          .landscape-print th,
+          .landscape-print td {
+            padding: 1px 2px !important;
+            box-sizing: border-box !important;
+          }
+          /* ブラウザデフォルトの body margin (~8px=2mm) が印刷可能幅を縮め
+             表が右端を超過する原因になるため、印刷時は明示的に 0 にする。 */
+          body {
+            margin: 0 !important;
+            padding: 0 !important;
+          }
         }
 
         input[type="number"]::-webkit-outer-spin-button,

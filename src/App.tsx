@@ -2757,8 +2757,19 @@ const App = () => {
     });
 
     // 月次ロックデータの購読
+    // ★ 既存 Firestore データに "R8" などゼロパディング無しキーが混在しても、
+    //   state 側では必ず "R08" 形式に揃える（賃金台帳側 selectedYear と一致させるため）。
     const unsubLocks = subscribe(getTenantDoc("monthlyLocks"), (snap) => {
-      setMonthlyLocks(snap.exists() ? snap.data() : {});
+      const raw = snap.exists() ? snap.data() : {};
+      const normalized = {};
+      Object.entries(raw || {}).forEach(([yr, months]) => {
+        const key = normalizeYear(yr);
+        normalized[key] = {
+          ...(normalized[key] || {}),
+          ...(months || {}),
+        };
+      });
+      setMonthlyLocks(normalized);
     });
 
     return () => {
@@ -2864,6 +2875,9 @@ const App = () => {
 
   const handleLockMonth = async (yearStr, monthKey) => {
     if (!selectedTenantId || !yearStr || !monthKey) return;
+    // ★ 年度キーを正規化（"R8" → "R08"）。賃金台帳側 selectedYear は normalizeYear で常に
+    //    2桁化されており、ここで揃えないと monthlyLocks のキー不一致でロックが反映されない。
+    yearStr = normalizeYear(yearStr);
     if (!window.confirm(
       `${yearStr} ${parseInt(monthKey, 10)}月を全体ロックします。\n\n` +
       `月締めを実行すると、この月で使用中の社会保険料率・雇用保険料率を各社員の月次データへ固定保存します。` +
@@ -2936,6 +2950,8 @@ const App = () => {
   const handleUnlockMonth = async (yearStr, monthKey, reason) => {
     if (!selectedTenantId || !yearStr || !monthKey) return;
     if (!reason || !reason.trim()) { alert("解除理由を入力してください"); return; }
+    // ★ 年度キーを正規化（"R8" → "R08"）。handleLockMonth と同じ理由。
+    yearStr = normalizeYear(yearStr);
     const prev = monthlyLocks?.[yearStr]?.[monthKey] || {};
     const newEntry = {
       ...prev,
@@ -11683,7 +11699,10 @@ const App = () => {
                       {Array.from({ length: 10 }, (_, i) => {
                         const base = settings.editableYear ? Number(settings.editableYear.replace("R","")) : 6;
                         const n = base - 4 + i;
-                        return <option key={n} value={`R${n}`}>R{n}</option>;
+                        // ★ value は "R08" 形式で保存。賃金台帳側の selectedYear と一致させ、
+                        //   monthlyLocks のキー不一致でロックが反映されない問題を防ぐ。
+                        const yr = `R${String(n).padStart(2, "0")}`;
+                        return <option key={n} value={yr}>{yr}</option>;
                       })}
                     </select>
                   </div>

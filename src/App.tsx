@@ -2263,7 +2263,7 @@ const App = () => {
     setTaxImportError("");
     try {
       const docId = `${taxImportPreview.year}_${taxImportPreview.type}`;
-      if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
+      if (!userId) throw new Error("ログインが必要です");
       await saveDoc(PATHS.taxTable(docId), {
         year: taxImportPreview.year,
         type: taxImportPreview.type,
@@ -2290,10 +2290,10 @@ const App = () => {
     )
       return;
     try {
-      if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
+      if (!userId) throw new Error("ログインが必要です");
       await removeDoc(PATHS.taxTable(docId));
     } catch (err) {
-      alert("削除に失敗しました");
+      alert("削除に失敗しました: " + err.message);
     }
   };
 
@@ -2450,7 +2450,7 @@ const App = () => {
 
       if (!window.confirm(`${bonusNtaYear}年度の賞与算出率表として保存します。よろしいですか？`)) return;
 
-      if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
+      if (!userId) throw new Error("ログインが必要です");
       const docId = `${bonusNtaYear}_bonus_nta`;
       await saveDoc(PATHS.taxTable(docId), {
         year: bonusNtaYear,
@@ -9855,6 +9855,42 @@ const App = () => {
                               <th className="p-3 border-r border-slate-700 text-center">
                                 甲1(max)
                               </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲2(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲2(max)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲3(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲3(max)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲4(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲4(max)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲5(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲5(max)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲6(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲6(max)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲7(min)
+                              </th>
+                              <th className="p-3 border-r border-slate-700 text-center">
+                                甲7(max)
+                              </th>
                                                            {" "}
                               <th className="p-3 border-r border-slate-700 text-center">
                                 乙(min)
@@ -9982,6 +10018,54 @@ const App = () => {
                                       {r.kouRanges[1].max >= 999999999
                                         ? "以上"
                                         : r.kouRanges[1].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[2].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[2].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[2].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[3].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[3].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[3].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[4].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[4].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[4].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[5].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[5].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[5].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[6].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[6].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[6].max}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-600">
+                                      {r.kouRanges[7].min}
+                                    </td>
+                                    <td className="p-2 border-r font-mono text-slate-800">
+                                      {r.kouRanges[7].max >= 999999999
+                                        ? "以上"
+                                        : r.kouRanges[7].max}
                                     </td>
                                                                        {" "}
                                     <td className="p-2 border-r font-mono text-slate-600 bg-amber-50/30">

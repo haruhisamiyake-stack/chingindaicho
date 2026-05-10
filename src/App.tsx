@@ -2143,6 +2143,9 @@ const App = () => {
 
   const [editingEmployeeId, setEditingEmployeeId] = useState(null);
   const [editingMaster, setEditingMaster] = useState(null);
+  // ★ 新規社員追加の下書き。employees state には混ぜない（保存前に検索/集計/印刷へ漏らさない）。
+  //   保存ボタン押下時にだけ employees + Firestore へ確定する。
+  const [draftEmployee, setDraftEmployee] = useState(null);
 
   const [selectedListMonth, setSelectedListMonth] = useState("01");
   const [slipEmployeeId, setSlipEmployeeId] = useState(null);
@@ -2782,6 +2785,7 @@ const App = () => {
     setSelectedEmployeeId(null);
     setEditingEmployeeId(null);
     setEditingMaster(null);
+    setDraftEmployee(null);
   }, [selectedTenantId]);
 
   // 【修正⑦】データ移行処理（旧データが存在し、settingsが未設定の場合に自動コピー）
@@ -2994,8 +2998,11 @@ const App = () => {
   //   確認済みフラグ、印刷済みタイムスタンプ、アラート既読フラグ等）、
   //   この sanitize ロジックを必ず whitelist 方式へ切り替えること。
   // ============================================================================
+  // 戻り値: true=Firestore保存成功 / false=スキップ・失敗（precondition NG / hasNullTax / catch）
+  // 既存の fire-and-forget 呼び出し側は戻り値を見ていないため挙動は変わらない。
+  // draft 確定フローだけが await して成功時のみ employees state へコミットする。
   const handleSave = async (empId, m, d) => {
-    if (!selectedTenantId || !empId) return;
+    if (!selectedTenantId || !empId) return false;
 
     // ★ ロック月の sanitize: state 参照共有を避けるため必ず deep clone してから扱う
     const sanitized = d ? JSON.parse(JSON.stringify(d)) : d;
@@ -3108,7 +3115,7 @@ const App = () => {
     if (hasNullTax) {
       setSaveStatus("保存停止中(計算不可)");
       setTimeout(() => setSaveStatus(""), 3000);
-      return;
+      return false;
     }
 
     setSaveStatus("保存中...");
@@ -3125,30 +3132,32 @@ const App = () => {
       );
       setSaveStatus("完了");
       setTimeout(() => setSaveStatus(""), 2000);
+      return true;
     } catch (e) {
       setSaveStatus("エラー");
+      return false;
     }
   };
 
-  const handleAddEmployee = async () => {
+  const handleAddEmployee = () => {
     if (!selectedTenantId) return;
     const newId = `emp_${Date.now()}`;
     const newEmp = createInitialEmployee("新規社員", "", settings);
 
-    setEmployees((prev) => ({ ...prev, [newId]: newEmp }));
-    setSelectedEmployeeId(newId);
-
-    await handleSave(newId, newEmp.master, newEmp.data);
+    // ★ Firestore保存しない / employees state にも混ぜない。
+    //    draftEmployee に保持し、編集モーダルだけ開く。保存ボタンで確定。
+    setDraftEmployee({ id: newId, master: newEmp.master, data: newEmp.data });
+    setEditingEmployeeId(newId);
+    setEditingMaster({ ...newEmp.master });
   };
 
-  const handleAddNewEmployeeFromList = async () => {
+  const handleAddNewEmployeeFromList = () => {
     if (!selectedTenantId) return;
     const newId = `emp_${Date.now()}`;
     const newEmp = createInitialEmployee("新規社員", "", settings);
 
-    setEmployees((prev) => ({ ...prev, [newId]: newEmp }));
-    await handleSave(newId, newEmp.master, newEmp.data);
-
+    // ★ Firestore保存しない / employees state にも混ぜない。draftEmployee に保持。
+    setDraftEmployee({ id: newId, master: newEmp.master, data: newEmp.data });
     setEditingEmployeeId(newId);
     setEditingMaster({ ...newEmp.master });
   };
@@ -3263,8 +3272,36 @@ const App = () => {
     handleSave(selectedEmployeeId, newMaster, data);
   };
 
-  const handleSaveEmployeeMaster = () => {
+  const handleSaveEmployeeMaster = async () => {
     if (!editingEmployeeId || !editingMaster) return;
+
+    // ★ draft（新規社員追加）の確定分岐：Firestore保存が成功した時だけ employees state へコミット。
+    //    失敗時は draft / モーダルを残し、ユーザーが再保存できる状態にする。
+    if (draftEmployee && editingEmployeeId === draftEmployee.id) {
+      const newId = draftEmployee.id;
+      const newData = draftEmployee.data;
+      let ok = false;
+      try {
+        ok = await handleSave(newId, editingMaster, newData);
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) {
+        alert("Firestoreへの保存に失敗しました。通信状況を確認のうえ、もう一度保存ボタンを押してください。");
+        return;
+      }
+      setEmployees((prev) => ({
+        ...prev,
+        [newId]: { master: editingMaster, data: newData },
+      }));
+      setSelectedEmployeeId(newId);
+      setDraftEmployee(null);
+      setEditingEmployeeId(null);
+      setEditingMaster(null);
+      return;
+    }
+
+    // 既存社員の master 更新（従来仕様）
     setEmployees((prev) => ({
       ...prev,
       [editingEmployeeId]: {
@@ -3280,6 +3317,10 @@ const App = () => {
   };
 
   const handleCloseModal = () => {
+    // ★ draft（新規社員追加）のキャンセル：employees にも Firestore にも書かない、draft を破棄するだけ
+    if (draftEmployee && editingEmployeeId === draftEmployee.id) {
+      setDraftEmployee(null);
+    }
     setEditingEmployeeId(null);
     setEditingMaster(null);
   };

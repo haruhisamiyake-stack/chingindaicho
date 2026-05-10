@@ -10349,15 +10349,6 @@ const App = () => {
                     );
                   })}
                 </div>
-
-                <div className="mt-6 flex justify-end">
-                  <button
-                    onClick={handleSaveRates}
-                    className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black text-sm transition-colors shadow"
-                  >
-                    <Save size={16} /> 保存する
-                  </button>
-                </div>
               </div>
             </div>
           );

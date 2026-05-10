@@ -1,4 +1,4 @@
-﻿// @ts-nocheck
+// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, fetchDocs, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
@@ -942,7 +942,8 @@ const calculateBonusIncomeTax = (
   master,
   settings,
   yearStr,
-  taxTables = {}
+  taxTables = {},
+  over6Months = false
 ) => {
   const dependents = master?.dependents || 0;
   const isOtsu = master?.taxType === 1;
@@ -953,8 +954,15 @@ const calculateBonusIncomeTax = (
     return { tax: 0, warning: null, manualRequired: false, log };
   }
 
-  let bonusPeriodMonths = 6;
-  let divisor = bonusPeriodMonths > 6 ? 12 : 6;
+  // 賞与計算期間が6カ月超のとき 12 分割、6カ月以下のときは 6 分割。
+  // 旧実装は bonusPeriodMonths=6 固定のハードコードだったため常に divisor=6 になっていた。
+  // 計算式自体は据え置き、判定条件だけを bonusRow.over6Months ベースに置き換える。
+  const divisor = over6Months ? 12 : 6;
+  log.push(
+    over6Months
+      ? `- 賞与計算期間: 6カ月超（12分割計算）`
+      : `- 賞与計算期間: 6カ月以下（通常計算）`
+  );
 
   log.push(
     `- 前月給与(社保控除後): ${formatCurrency(lastMonthSalaryAfterSocial)}円`
@@ -1680,9 +1688,9 @@ const calculateBonusIns = ({
 
 const calculateBonusTaxCore = ({
   bonusAfterSocial, lastMonthSalaryAfterSocial, manualIncomeTax,
-  master, settings, yearStr, taxTables,
+  master, settings, yearStr, taxTables, over6Months,
 }) => {
-  const taxResult = calculateBonusIncomeTax(bonusAfterSocial, lastMonthSalaryAfterSocial, master, settings, yearStr, taxTables);
+  const taxResult = calculateBonusIncomeTax(bonusAfterSocial, lastMonthSalaryAfterSocial, master, settings, yearStr, taxTables, over6Months === true);
   const manualRequired = taxResult.manualRequired ?? false;
   const incomeTax = taxResult.tax === null ? null : (manualRequired ? manualIncomeTax : taxResult.tax);
   const taxWarning = taxResult.warning ?? null;
@@ -1710,7 +1718,7 @@ const calculateBonusCore = ({
   basePay, allowanceAmounts, deductionAmounts, residentTax,
   rates: { health: hRate, pension: pRate, nursing: nRate, childCare: cRate, employment: eRate },
   flags: { hasHealth, hasPension, hasNursing, hasEmployment },
-  tax: { manualIncomeTax, master, settings, yearStr, taxTables },
+  tax: { manualIncomeTax, master, settings, yearStr, taxTables, over6Months },
   ins: { priorHealthBonusStdTotal, lastMonthSalaryAfterSocial },
 }) => {
   const { grossPay, taxableGross } = calculateGross({ basePay, allowanceAmounts });
@@ -1723,7 +1731,7 @@ const calculateBonusCore = ({
   const bonusAfterSocial = Math.max(0, taxableGross - socialTotal);
   const { incomeTax, taxWarning, isBlocking, manualRequired, incomeTaxResultLog } = calculateBonusTaxCore({
     bonusAfterSocial, lastMonthSalaryAfterSocial, manualIncomeTax,
-    master, settings, yearStr, taxTables,
+    master, settings, yearStr, taxTables, over6Months,
   });
   if (incomeTax === null) {
     return {
@@ -1803,32 +1811,12 @@ const calculateBonusResult = ({
   const bonusTargetYearMonth = bonusRow.payDate
     ? bonusRow.payDate.slice(0, 7)
     : `${_westernYearB}-${monthKeyForRates}`;
-  // 雇用保険料率は賃金締切期間の末日(periodEnd)が属する年月で判定する。月次給与と基準を統一する目的。
-  // 現行データ構造に bonusRow.periodEnd は無いため、存在しない場合は bonusTargetYearMonth(=payDate ベース) にフォールバック。
-  const bonusEmploymentTargetYearMonth =
-    bonusRow.periodEnd && typeof bonusRow.periodEnd === "string" && bonusRow.periodEnd.length >= 7
-      ? bonusRow.periodEnd.slice(0, 7)
-      : bonusTargetYearMonth;
+  // 賞与の雇用保険料率は支給日(payDate)の年月で判定する。
+  // bonusRow.periodEnd は UI 編集不可な hidden フィールドのため賞与計算では参照しない(データ構造は互換のため残置)。
   const bonusMonthKey = bonusRow.payDate
     ? bonusRow.payDate.slice(5, 7)
     : monthKeyForRates;
   const bonusMonthRow = yearData.monthly?.[bonusMonthKey] || {};
-  // 雇用保険のみ、bonusEmploymentTargetYearMonth(=periodEnd 月) と一致する monthly row から snapshot を取得する。
-  // 健保・厚年・介護・子育て支援金は従来どおり bonusMonthRow(=payDate 月) を使用するため変更しない。
-  // 月番号(キー)ではなく row.periodEnd の YYYY-MM 一致で探索することで、20日締め等の締日基準と整合し、
-  // かつ年度跨ぎで別年の同月行を誤参照する事故も同時に防ぐ。一致 row が見つからない場合は
-  // snapshot を null にして employmentSchedule + bonusEmploymentTargetYearMonth で料率判定にフォールバックする。
-  const bonusEmploymentMonthRowEntry = Object.entries(yearData.monthly || {}).find(
-    ([, _r]) =>
-      _r?.periodEnd &&
-      typeof _r.periodEnd === "string" &&
-      _r.periodEnd.length >= 7 &&
-      _r.periodEnd.slice(0, 7) === bonusEmploymentTargetYearMonth
-  );
-  const bonusEmploymentMonthRow = bonusEmploymentMonthRowEntry?.[1] || bonusMonthRow;
-  const bonusEmploymentSnapshotValue = bonusEmploymentMonthRowEntry
-    ? bonusEmploymentMonthRow.lockedSnapshotRates?.employment
-    : null;
   const businessType = settings?.businessType || "general";
   const _eSchedKey = businessType === "construction" ? "employmentConstruction" : "employmentGeneral";
   const healthSchedule = settings?.customRateSchedules?.health?.enabled ? settings.customRateSchedules.health.schedules : settings?.rateSchedules?.health;
@@ -1841,7 +1829,7 @@ const calculateBonusResult = ({
   const pRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.pension, pensionSchedule, bonusTargetYearMonth, 9.15);
   const nRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.nursing, nursingSchedule, bonusTargetYearMonth, 0.8);
   const cRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.childCare, childCareSchedule, bonusTargetYearMonth, 0.115);
-  const eRate = resolveRate(null, bonusEmploymentSnapshotValue, employmentSchedule, bonusEmploymentTargetYearMonth, 6.0);
+  const eRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.employment, employmentSchedule, bonusTargetYearMonth, 6.0);
 
 
   const hasHealth =
@@ -1906,6 +1894,9 @@ const calculateBonusResult = ({
   const lastMonthSalaryAfterSocial = Math.max(0, prevTaxableGross - prevMonthResult.socialTotal);
 
   const bResidentTax = Number(b.residentTax) || 0;
+  // 賞与計算期間が6カ月超かどうか。bonusRow.over6Months===true のときだけ true。
+  // 既存データには未設定のため、未定義時は自動的に false 扱い＝6カ月以下。
+  const over6Months = b?.over6Months === true;
   const core = calculateBonusCore({
     basePay: Number(b.basePay) || 0,
     allowanceAmounts,
@@ -1913,7 +1904,7 @@ const calculateBonusResult = ({
     residentTax: bResidentTax,
     rates: { health: hRate, pension: pRate, nursing: nRate, childCare: cRate, employment: eRate },
     flags: { hasHealth, hasPension, hasNursing, hasEmployment },
-    tax: { manualIncomeTax: Number(b.incomeTax) || 0, master, settings, yearStr, taxTables },
+    tax: { manualIncomeTax: Number(b.incomeTax) || 0, master, settings, yearStr, taxTables, over6Months },
     ins: { priorHealthBonusStdTotal, lastMonthSalaryAfterSocial },
   });
 
@@ -6049,25 +6040,35 @@ const App = () => {
                                 }
                                 className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
                               />
-                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="雇用保険料率の判定に使用。空欄時は支給日ベース。">
-                                対象期間末日
+                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="6カ月超を選ぶと税額計算で 1/12 計算が適用されます">
+                                賞与計算期間
                               </div>
-                              <input
-                                type="date"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus?.periodEnd || ""}
-                                onChange={(e) =>
-                                  updateBonus(
-                                    selectedYear,
-                                    "bonus",
-                                    "periodEnd",
-                                    null,
-                                    e.target.value
-                                  )
-                                }
-                                title="雇用保険料率の判定に使用。空欄時は支給日ベース。"
-                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
-                              />
+                              <label className="flex items-center gap-1 text-[8px] text-slate-700 cursor-pointer leading-tight">
+                                <input
+                                  type="radio"
+                                  name="bonus1Over6"
+                                  disabled={isYearLocked}
+                                  checked={!(currentYearData.bonus?.over6Months === true)}
+                                  onChange={() =>
+                                    updateBonus(selectedYear, "bonus", "over6Months", null, false)
+                                  }
+                                  className="w-2.5 h-2.5 accent-indigo-500"
+                                />
+                                <span>6カ月以下</span>
+                              </label>
+                              <label className="flex items-center gap-1 text-[8px] text-slate-700 cursor-pointer leading-tight">
+                                <input
+                                  type="radio"
+                                  name="bonus1Over6"
+                                  disabled={isYearLocked}
+                                  checked={currentYearData.bonus?.over6Months === true}
+                                  onChange={() =>
+                                    updateBonus(selectedYear, "bonus", "over6Months", null, true)
+                                  }
+                                  className="w-2.5 h-2.5 accent-indigo-500"
+                                />
+                                <span>6カ月超</span>
+                              </label>
                             </th>
                             <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[190px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
@@ -6091,25 +6092,35 @@ const App = () => {
                                 }
                                 className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
                               />
-                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="雇用保険料率の判定に使用。空欄時は支給日ベース。">
-                                対象期間末日
+                              <div className="text-[8px] text-slate-500 text-center font-normal mt-1 mb-0.5" title="6カ月超を選ぶと税額計算で 1/12 計算が適用されます">
+                                賞与計算期間
                               </div>
-                              <input
-                                type="date"
-                                disabled={isYearLocked}
-                                value={currentYearData.bonus2?.periodEnd || ""}
-                                onChange={(e) =>
-                                  updateBonus(
-                                    selectedYear,
-                                    "bonus2",
-                                    "periodEnd",
-                                    null,
-                                    e.target.value
-                                  )
-                                }
-                                title="雇用保険料率の判定に使用。空欄時は支給日ベース。"
-                                className="w-full bg-slate-50 border border-indigo-200 text-center outline-none font-mono text-[8px] py-0.5 tracking-tighter text-indigo-600 rounded-sm"
-                              />
+                              <label className="flex items-center gap-1 text-[8px] text-slate-700 cursor-pointer leading-tight">
+                                <input
+                                  type="radio"
+                                  name="bonus2Over6"
+                                  disabled={isYearLocked}
+                                  checked={!(currentYearData.bonus2?.over6Months === true)}
+                                  onChange={() =>
+                                    updateBonus(selectedYear, "bonus2", "over6Months", null, false)
+                                  }
+                                  className="w-2.5 h-2.5 accent-indigo-500"
+                                />
+                                <span>6カ月以下</span>
+                              </label>
+                              <label className="flex items-center gap-1 text-[8px] text-slate-700 cursor-pointer leading-tight">
+                                <input
+                                  type="radio"
+                                  name="bonus2Over6"
+                                  disabled={isYearLocked}
+                                  checked={currentYearData.bonus2?.over6Months === true}
+                                  onChange={() =>
+                                    updateBonus(selectedYear, "bonus2", "over6Months", null, true)
+                                  }
+                                  className="w-2.5 h-2.5 accent-indigo-500"
+                                />
+                                <span>6カ月超</span>
+                              </label>
                             </th>
                             <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 font-black align-bottom text-[10px]">
                               賞与累計

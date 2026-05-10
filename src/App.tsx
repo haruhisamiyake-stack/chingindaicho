@@ -2957,15 +2957,125 @@ const App = () => {
     }
   };
 
+  // ============================================================================
+  // employees 系 Firestore 書込ポイント一覧（bypass 経路含む）
+  // ============================================================================
+  // 通常編集系（ロックゲート対象）:
+  //   - handleSave (この関数)
+  //
+  // 例外 bypass 系（ロックゲートを通さない、通してはならない）:
+  //   1. _migrateUserDataToTenant      [legacy migration v1: 旧 user スコープ → tenant]
+  //   2. _migrateTenantDataToUserScope [legacy migration v2: tenantOwner → tenants/{tid}]
+  //   3. subscribe 空テナント時 auto-create [新規テナント空コレクション時の社員①生成]
+  //   4. handleLockMonth               [ロック確定時の lockedSnapshotRates 書込]
+  //   5. handleImportBackup            [バックアップ復元 ※ロック月確認モーダル要追加(将来)]
+  //
+  // ★ 新しい saveDoc(PATHS.employee, ...) を増やす場合は必ずこの一覧に追加し、
+  //   handleSave 経由にできないか先に検討すること。
+  //
+  // 将来統合: saveEmployeeData(empId, master, data, { skipLockGate?: boolean })
+  //          に集約し、デフォルトはゲート必須、上記5経路だけが skipLockGate:true
+  // ============================================================================
+  //
+  // ロック月 sanitize の現在の方針：「monthly row / bonus / manualOverrides 全体置換」
+  // ----------------------------------------------------------------------------
+  // 【現在の挙動】
+  //   ロック月（globalLocked または rowLocked）の場合、incoming の monthly[monthKey]
+  //   全体を deep clone した既存値で置き換える（rowLocked 時は isLocked toggle のみ通す）。
+  //
+  // 【選択した理由】
+  //   現在の monthly 構造は全フィールドが「ロック中は変更させたくない対象」であり、
+  //   ロック対象外の UI 補助フィールドが存在しない。失敗時の方向性として、
+  //   whitelist の追加漏れ（=財務改ざんを許す）よりも、全体置換による不要な
+  //   巻き戻し（=UX 劣化のみ）の方が安全。
+  //
+  // 【将来の TODO】
+  //   monthly に「ロック対象外」のフィールドを追加する場合（例：担当者メモ、
+  //   確認済みフラグ、印刷済みタイムスタンプ、アラート既読フラグ等）、
+  //   この sanitize ロジックを必ず whitelist 方式へ切り替えること。
+  // ============================================================================
   const handleSave = async (empId, m, d) => {
     if (!selectedTenantId || !empId) return;
 
+    // ★ ロック月の sanitize: state 参照共有を避けるため必ず deep clone してから扱う
+    const sanitized = d ? JSON.parse(JSON.stringify(d)) : d;
+    const existingData = employees[empId]?.data || {};
+    const cloneRow = (row) => (row === undefined || row === null ? row : JSON.parse(JSON.stringify(row)));
+
+    if (sanitized && sanitized.years) {
+      for (const yearStr of Object.keys(sanitized.years)) {
+        const yearObj = sanitized.years[yearStr];
+        const existingYear = existingData.years?.[yearStr] || {};
+
+        // monthly[01..12] のロック判定
+        if (yearObj.monthly) {
+          for (const monthKey of MONTHS) {
+            if (!yearObj.monthly[monthKey]) continue;
+            // ★ 既存データの実体（undefined の可能性あり）。"|| {}" していないので、
+            //   ロック復元処理は existingMonthlyRow が存在する時のみ実行する。
+            //   新規社員追加直後や年度初期化直後は既存データが無いため、
+            //   incoming（createInitialYearData の初期値）を保持する。
+            const existingMonthlyRow = existingYear.monthly?.[monthKey];
+            const globalLocked = isMonthGloballyLocked(yearStr, monthKey);
+            // ★ row.isLocked は「コミット済み（既存）の状態」で判定する。
+            //   incoming 側で isLocked:false に偽装してきても効かないようにする。
+            //   既存無しの場合は rowLocked は false（保護対象データが存在しないため）。
+            const rowLocked = existingMonthlyRow?.isLocked === true;
+
+            if (globalLocked && existingMonthlyRow) {
+              // 全体ロック中かつ既存値あり：完全に既存値で上書き戻す
+              // （個人 isLocked のトグルすら通さない）。解除は handleUnlockMonth 経由のみ可能。
+              yearObj.monthly[monthKey] = cloneRow(existingMonthlyRow);
+            } else if (rowLocked) {
+              // rowLocked === true は existingMonthlyRow が存在する前提で成立する。
+              // 個人ロック中は isLocked のトグルだけ incoming を通す。
+              // これにより toggleMonthLock 経由のロック解除は通り、金額編集は通らない。
+              yearObj.monthly[monthKey] = {
+                ...cloneRow(existingMonthlyRow),
+                isLocked: yearObj.monthly[monthKey]?.isLocked,
+              };
+            }
+            // else (globalLocked かつ existingMonthlyRow が undefined):
+            //   既存に保護対象が存在しないため incoming のまま保持。
+            //   新規社員追加 / 年度初期化など、createInitialYearData が用意した
+            //   salaryMonthText / payDate / periodStart / periodEnd 等の初期値を消さない。
+          }
+        }
+
+        // manualOverrides[monthKey] のロック判定（ロック月分は既存値で戻す）
+        if (yearObj.manualOverrides) {
+          for (const monthKey of Object.keys(yearObj.manualOverrides)) {
+            const existingMonthlyRow = existingYear.monthly?.[monthKey];
+            if (
+              isMonthGloballyLocked(yearStr, monthKey) ||
+              existingMonthlyRow?.isLocked === true
+            ) {
+              // ロック月の manualOverrides は既存値で復元。
+              // 既存 override が無ければ incoming を保持（新規社員＋ロック月など、
+              // 戻す対象が存在しないケースでは初回入力を消さない）。
+              const existingOverride = existingYear.manualOverrides?.[monthKey];
+              if (existingOverride !== undefined) {
+                yearObj.manualOverrides[monthKey] = cloneRow(existingOverride);
+              }
+            }
+          }
+        }
+
+        // bonus / bonus2 のロック判定（monthlyLocks の bonus キーは現状未使用だが構造的対称性のため）
+        ["bonus", "bonus2"].forEach((bk) => {
+          if (yearObj[bk] && monthlyLocks?.[yearStr]?.[bk]?.locked === true) {
+            yearObj[bk] = cloneRow(existingYear[bk]) ?? yearObj[bk];
+          }
+        });
+      }
+    }
+
     let hasNullTax = false;
-    if (d && d.years) {
+    if (sanitized && sanitized.years) {
       const allowanceDefs = settings?.allowanceDefinitions || m.allowanceDefinitions || [];
       const deductionDefs = settings?.deductionDefinitions || m.deductionDefinitions || [];
-      for (const yearStr of Object.keys(d.years)) {
-        const yearData = d.years[yearStr];
+      for (const yearStr of Object.keys(sanitized.years)) {
+        const yearData = sanitized.years[yearStr];
         for (const monthKey of MONTHS) {
           const row = yearData.monthly[monthKey];
           if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
@@ -3008,7 +3118,7 @@ const App = () => {
         PATHS.employee(tenantId, empId),
         {
           master: m,
-          data: d,
+          data: sanitized,
           updatedAt: new Date().toISOString(),
         },
         { merge: true }
@@ -3309,6 +3419,16 @@ const App = () => {
   const updateManualOverride = (year, month, fieldKey, overrideObj) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId || !data) return;
+    // ★ ロック月（全体ロック / 個別ロック）では手動上書きを保存させない。
+    //   handleSave の最終ガードでも除外されるが、UI 体感の即応性のため上流でも止める。
+    if (isMonthGloballyLocked(year, month)) {
+      alert("この月は全体ロック済のため修正できません");
+      return;
+    }
+    if (data.years?.[year]?.monthly?.[month]?.isLocked === true) {
+      alert("この月はロック済のため修正できません");
+      return;
+    }
     const currentYearDataObj = data.years?.[year] || createInitialYearData(year, settings);
     const newOverrides = {
       ...(currentYearDataObj.manualOverrides || {}),
@@ -3549,6 +3669,29 @@ const App = () => {
     const emp = employees[empId];
     if (!emp) return;
 
+    // ★ ロック月チェック：6月〜翌5月の対象期間にロック月が1つでも含まれていれば
+    //   一括更新を中断する。住民税は12ヶ月通しで揃える前提のため、部分適用は不可。
+    const _bulkNextYearNum = getYearNumber(startYear) + 1;
+    const _bulkNextYear = `R${String(_bulkNextYearNum).padStart(2, "0")}`;
+    const _bulkTargetMonths = [
+      ...["06", "07", "08", "09", "10", "11", "12"].map((m) => ({ y: startYear, m })),
+      ...["01", "02", "03", "04", "05"].map((m) => ({ y: _bulkNextYear, m })),
+    ];
+    const _bulkLockedMonths = _bulkTargetMonths.filter(
+      ({ y, m }) =>
+        isMonthGloballyLocked(y, m) ||
+        emp.data?.years?.[y]?.monthly?.[m]?.isLocked === true
+    );
+    if (_bulkLockedMonths.length > 0) {
+      const _list = _bulkLockedMonths
+        .map(({ y, m }) => `${y} ${parseInt(m, 10)}月`)
+        .join(", ");
+      alert(
+        `下記の月がロック済のため、住民税の一括更新を実行できません：\n${_list}\n\n先にロック解除してから再実行してください。`
+      );
+      return;
+    }
+
     let updatedData = { ...emp.data };
     if (!updatedData.years) updatedData.years = {};
 
@@ -3631,6 +3774,24 @@ const App = () => {
 
     if (totalRem === 0) {
       alert("合算できる未徴収の住民税がありません。");
+      return;
+    }
+
+    // ★ ロック月チェック：合算対象期間（当月〜翌5月）または合算先（当月）にロック月が
+    //   1つでも含まれていれば中断する。退職時処理は複数月を一斉に書き換えるため、
+    //   部分適用は不可。
+    const _sumLockedMonths = taxCycleMonths.filter(
+      ({ y, m }) =>
+        isMonthGloballyLocked(y, m) ||
+        emp.data?.years?.[y]?.monthly?.[m]?.isLocked === true
+    );
+    if (_sumLockedMonths.length > 0) {
+      const _list = _sumLockedMonths
+        .map(({ y, m }) => `${y} ${parseInt(m, 10)}月`)
+        .join(", ");
+      alert(
+        `下記の月がロック済のため、住民税の一括合算を実行できません：\n${_list}\n\n先にロック解除してから再実行してください。`
+      );
       return;
     }
 
@@ -6783,13 +6944,14 @@ const App = () => {
                                           {formatCurrency(dispVal)}
                                         </span>
                                         <button
+                                          disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
                                           onClick={() => {
                                             setOverrideModal({ month: m, fieldKey: key, fieldLabel: labels[key], calcValue: calcVal });
                                             const ov = currentYearData.manualOverrides?.[m]?.[key];
                                             setOverrideInputValue(ov?.enabled ? String(ov.value) : "");
                                             setOverrideInputMemo(ov?.memo || "");
                                           }}
-                                          className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                          className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
                                           title="手動上書き"
                                         >手</button>
                                       </div>
@@ -6838,12 +7000,13 @@ const App = () => {
                                       {isOv ? formatCurrency(Number(ovData.value) || 0) : calcVal === null ? "計算不可" : formatCurrency(calcVal)}
                                     </span>
                                     <button
+                                      disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
                                       onClick={() => {
                                         setOverrideModal({ month: m, fieldKey: "incomeTax", fieldLabel: "所得税", calcValue: calcVal || 0 });
                                         setOverrideInputValue(isOv ? String(ovData.value) : "");
                                         setOverrideInputMemo(ovData?.memo || "");
                                       }}
-                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
                                       title="手動上書き"
                                     >手</button>
                                   </div>
@@ -6941,12 +7104,13 @@ const App = () => {
                                       />
                                     )}
                                     <button
+                                      disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
                                       onClick={() => {
                                         setOverrideModal({ month: m, fieldKey: "residentTax", fieldLabel: "住民税", calcValue: Number(baseVal) || 0 });
                                         setOverrideInputValue(isOvRT ? String(ovRT.value) : "");
                                         setOverrideInputMemo(ovRT?.memo || "");
                                       }}
-                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
                                       title="手動上書き"
                                     >手</button>
                                   </div>
@@ -7050,12 +7214,13 @@ const App = () => {
                                         />
                                       )}
                                       <button
+                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
                                         onClick={() => {
                                           setOverrideModal({ month: m, fieldKey: ovKeyD, fieldLabel: def.name, calcValue: Number(baseValD) || 0 });
                                           setOverrideInputValue(isOvD ? String(ovD.value) : "");
                                           setOverrideInputMemo(ovD?.memo || "");
                                         }}
-                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300"
+                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
                                         title="手動上書き"
                                       >手</button>
                                     </div>
@@ -7150,12 +7315,13 @@ const App = () => {
                                     <div className="flex items-center gap-0.5">
                                       <span className={isOvNP ? "text-amber-200 font-black" : ""}>{formatCurrency(dispNP)}</span>
                                       <button
+                                        disabled={isYearLocked || currentYearData.monthly[m]?.isLocked || isMonthGloballyLocked(selectedYear, m)}
                                         onClick={() => {
                                           setOverrideModal({ month: m, fieldKey: "netPay", fieldLabel: "差引支給額", calcValue: calcValNP });
                                           setOverrideInputValue(isOvNP ? String(ovNP.value) : "");
                                           setOverrideInputMemo(ovNP?.memo || "");
                                         }}
-                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-white/20 hover:bg-amber-300/40 text-white/60 hover:text-amber-200 border border-transparent hover:border-amber-300"
+                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-white/20 hover:bg-amber-300/40 text-white/60 hover:text-amber-200 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/20 disabled:hover:text-white/60"
                                         title="手動上書き"
                                       >手</button>
                                     </div>

@@ -3302,7 +3302,21 @@ const App = () => {
       return;
     }
 
-    // 既存社員の master 更新（従来仕様）
+    // 既存社員の master 更新
+    // ★ draft 分岐と同じく Firestore 保存成功後に state を確定する。失敗時はモーダルを
+    //    開いたまま editingMaster を保持し、ユーザーが再保存できる状態にする。
+    const empData = employees[editingEmployeeId]?.data;
+    if (!empData) return;
+    let ok = false;
+    try {
+      ok = await handleSave(editingEmployeeId, editingMaster, empData);
+    } catch (e) {
+      ok = false;
+    }
+    if (!ok) {
+      alert("Firestoreへの保存に失敗しました。通信状況を確認のうえ、もう一度保存ボタンを押してください。");
+      return;
+    }
     setEmployees((prev) => ({
       ...prev,
       [editingEmployeeId]: {
@@ -3310,9 +3324,6 @@ const App = () => {
         master: editingMaster,
       },
     }));
-    const empData = employees[editingEmployeeId]?.data;
-    if (!empData) return;
-    handleSave(editingEmployeeId, editingMaster, empData);
     setEditingEmployeeId(null);
     setEditingMaster(null);
   };

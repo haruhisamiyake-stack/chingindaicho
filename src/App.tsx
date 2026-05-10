@@ -1305,6 +1305,46 @@ const pushSocialInsLogs = ({
   }
 };
 
+// 一覧UI（賃金台帳・給与明細一覧表・支給控除一覧表）の社会保険料セル表示用ヘルパー。
+// 0円表示が「未加入」と「計算不可（標準報酬月額未設定）」のどちらなのか判別できないという誤認
+// リスクを排除するため、各セルでこのヘルパーを使い「対象外/計算不可/実額」を切り分ける。
+const formatSocialInsCell = ({ kind, value, hasHealth, hasPension, hasEmployment, hasNursingIns, stdAmtSet }) => {
+  const exempt = { label: "対象外", className: "text-slate-400 italic font-normal" };
+  const uncalc = { label: "計算不可", className: "text-rose-600 font-black" };
+  const amount = (v) => ({ label: formatCurrency(v ?? 0), className: "text-gray-500 font-mono" });
+  if (kind === "health") {
+    if (!hasHealth) return exempt;
+    if (!stdAmtSet) return uncalc;
+    return amount(value);
+  }
+  if (kind === "pension") {
+    if (!hasPension) return exempt;
+    if (!stdAmtSet) return uncalc;
+    return amount(value);
+  }
+  if (kind === "nursing") {
+    if (!hasHealth || !hasNursingIns) return exempt;
+    if (!stdAmtSet) return uncalc;
+    return amount(value);
+  }
+  if (kind === "childCare") {
+    if (!hasPension) return exempt;
+    if (!stdAmtSet) return uncalc;
+    return amount(value);
+  }
+  if (kind === "employment") {
+    if (!hasEmployment) return exempt;
+    return amount(value);
+  }
+  return amount(value);
+};
+
+// formatSocialInsCell の戻り値をそのまま <span> として描画する小さな JSX ヘルパー。
+const SocialInsCell = (props) => {
+  const c = formatSocialInsCell(props);
+  return <span className={c.className}>{c.label}</span>;
+};
+
 const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTables = {}, monthlyLocks = {}) => {
   if (!master || !row) return {};
 
@@ -4034,11 +4074,31 @@ const App = () => {
         ? (Number(slipMonthOvs.netPay.value) || 0)
         : ((Number(calcResult.grossPay) || 0) - dispTotalDeductions));
 
+  // 給与明細書は本人交付物であると同時に、会社・社労士・税理士の確認資料にもなる。
+  // 「未加入で0円」と「設定漏れで計算不可」を区別できないと誤認リスクがあるため、
+  // 一覧UIと同じ formatSocialInsCell / SocialInsCell に判定を委譲する。
+  // 賞与は標準報酬月額に依存しないため stdAmtSet=true とし、実額表示に倒す。
+  const _slipHasHealth = emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1;
+  const _slipHasPension = emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1;
+  const _slipHasEmployment = emp.master.employmentIns === 1;
+  const _slipHasNursingIns = !isBonus && rowData.hasNursingIns === 1;
+  const _slipStdAmtSet = isBonus || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+  const _slipInsFlags = {
+    hasHealth: _slipHasHealth,
+    hasPension: _slipHasPension,
+    hasEmployment: _slipHasEmployment,
+    hasNursingIns: _slipHasNursingIns,
+    stdAmtSet: _slipStdAmtSet,
+  };
+  // 標準報酬月額未設定で健保／厚年が「計算不可」になるケース。banner で帳票冒頭に明示する。
+  const _slipStdMissingWarning = !isBonus && !_slipStdAmtSet && (_slipHasHealth || _slipHasPension);
+
   const deductionItems = [
-    { label: "健康保険料", value: formatCurrency(dispHealth) },
-    { label: "厚生年金保険料", value: formatCurrency(dispPension) },
-    ...(dispNursing > 0 ? [{ label: "介護保険料", value: formatCurrency(dispNursing) }] : []),
-    { label: "雇用保険料", value: formatCurrency(dispEmployment) },
+    { label: "健康保険料", value: <SocialInsCell kind="health" value={dispHealth} {..._slipInsFlags} /> },
+    { label: "厚生年金保険料", value: <SocialInsCell kind="pension" value={dispPension} {..._slipInsFlags} /> },
+    // 健保加入かつ介護対象なら、std未設定でも「計算不可」を見せたいので _slipHasNursingIns ベースで表示判定する。
+    ...(_slipHasNursingIns ? [{ label: "介護保険料", value: <SocialInsCell kind="nursing" value={dispNursing} {..._slipInsFlags} /> }] : []),
+    { label: "雇用保険料", value: <SocialInsCell kind="employment" value={dispEmployment} {..._slipInsFlags} /> },
     ...(dispChildCare > 0 ? [{ label: "子ども・子育て", value: formatCurrency(dispChildCare) }] : []),
     { label: "所得税", value: formatCurrency(dispIncomeTax) },
     { label: "住民税", value: formatCurrency(dispResidentTax) },
@@ -4081,6 +4141,12 @@ const App = () => {
       {calcResult.taxWarning && (
         <div className="text-xs text-red-700 font-bold border-2 border-red-500 p-2 mb-4">
           ⚠ {calcResult.taxWarning}
+        </div>
+      )}
+      {/* 標準報酬月額未設定の警告 — 健保／厚年に「計算不可」が出る場面で帳票冒頭にも明示する */}
+      {_slipStdMissingWarning && (
+        <div className="text-xs text-rose-700 font-bold border-2 border-rose-500 p-2 mb-4">
+          ⚠ 標準報酬月額が未設定のため、健康保険料・厚生年金料は「計算不可」です。給与計算前に標準報酬月額の設定をご確認ください。
         </div>
       )}
 
@@ -4308,7 +4374,14 @@ const App = () => {
           sums.deductions[def.id] = (sums.deductions[def.id] || 0) + amt;
         });
 
-        return { empCode: m.employeeCode || "-", name: m.name || "未設定", row: dispRow, calc: dispCalc };
+        const _hasHealth = m.healthIns !== undefined ? m.healthIns === 1 : m.socialIns === 1;
+        const _hasPension = m.pensionIns !== undefined ? m.pensionIns === 1 : m.socialIns === 1;
+        const _hasEmployment = m.employmentIns === 1;
+        const _hasNursingIns = !isBonus && row.hasNursingIns === 1;
+        // 賞与は標準報酬月額に依存しないため stdAmtSet=true 扱いで実額表示にする。
+        const _stdAmtSet = isBonus || (row.stdAmount != null && row.stdAmount !== "" && Number(row.stdAmount) > 0);
+        const _insFlags = { hasHealth: _hasHealth, hasPension: _hasPension, hasEmployment: _hasEmployment, hasNursingIns: _hasNursingIns, stdAmtSet: _stdAmtSet };
+        return { empCode: m.employeeCode || "-", name: m.name || "未設定", row: dispRow, calc: dispCalc, flags: _insFlags };
       }
       return null;
     }).filter(Boolean);
@@ -4373,10 +4446,10 @@ const App = () => {
                 ))}
                 <td className="border-r border-black p-1 text-right font-bold text-blue-700 bg-blue-50/50">{formatCurrency(d.calc.grossPay)}</td>
                 
-                <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.calc.health)}</td>
-                <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.calc.pension)}</td>
-                <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.calc.nursing)}</td>
-                <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.calc.employment)}</td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="health" value={d.calc.health} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="pension" value={d.calc.pension} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="nursing" value={d.calc.nursing} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="employment" value={d.calc.employment} {...d.flags} /></td>
                 <td className="border-r border-gray-400 p-1 text-right font-bold text-orange-700">{formatCurrency(d.calc.incomeTax)}</td>
                 <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.row.residentTax)}</td>
                 {deductionDefs.map(def => (
@@ -5416,6 +5489,15 @@ const App = () => {
                           const isMonthLocked = rowData?.isLocked === true;
                           const isDisabled = isYearLocked || isMonthLocked || isMonthGloballyLocked(selectedYear, ledgerSelectedMonth);
 
+                          // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。
+                          const _insFlags = {
+                            hasHealth: emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1,
+                            hasPension: emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1,
+                            hasEmployment: emp.master.employmentIns === 1,
+                            hasNursingIns: rowData.hasNursingIns === 1,
+                            stdAmtSet: rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0,
+                          };
+
                           return (
                             <tr
                               key={empId}
@@ -5492,16 +5574,16 @@ const App = () => {
                                 {formatCurrency(calcResult.grossPay)}
                               </td>
                                                          {" "}
-                              <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                                {formatCurrency(calcResult.health)}
+                              <td className="border border-slate-200 p-2 text-right bg-white">
+                                <SocialInsCell kind="health" value={calcResult.health} {..._insFlags} />
                               </td>
                                                          {" "}
-                              <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                                {formatCurrency(calcResult.pension)}
+                              <td className="border border-slate-200 p-2 text-right bg-white">
+                                <SocialInsCell kind="pension" value={calcResult.pension} {..._insFlags} />
                               </td>
                                                          {" "}
-                              <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                                {formatCurrency(calcResult.employment)}
+                              <td className="border border-slate-200 p-2 text-right bg-white">
+                                <SocialInsCell kind="employment" value={calcResult.employment} {..._insFlags} />
                               </td>
                                                          {" "}
                               <td className="border border-slate-200 p-2 text-right bg-orange-50/30 text-orange-600 font-bold">
@@ -7782,6 +7864,14 @@ const App = () => {
                         isMonthLocked = rowData?.isLocked === true;
                       }
                       const isDisabled = isYearLocked || isMonthLocked || (!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth));
+                      // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。賞与時は stdAmtSet=true で実額表示に倒す。
+                      const _insFlags = {
+                        hasHealth: emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1,
+                        hasPension: emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1,
+                        hasEmployment: emp.master.employmentIns === 1,
+                        hasNursingIns: !isBonusList && rowData.hasNursingIns === 1,
+                        stdAmtSet: isBonusList || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0),
+                      };
 
                       return (
                         <tr
@@ -8006,20 +8096,20 @@ const App = () => {
                             {formatCurrency(calcResult.grossPay)}
                           </td>
 
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                            {formatCurrency(calcResult.health)}
+                          <td className="border border-slate-200 p-2 text-right bg-white">
+                            <SocialInsCell kind="health" value={calcResult.health} {..._insFlags} />
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                            {formatCurrency(calcResult.pension)}
+                          <td className="border border-slate-200 p-2 text-right bg-white">
+                            <SocialInsCell kind="pension" value={calcResult.pension} {..._insFlags} />
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                            {formatCurrency(calcResult.nursing)}
+                          <td className="border border-slate-200 p-2 text-right bg-white">
+                            <SocialInsCell kind="nursing" value={calcResult.nursing} {..._insFlags} />
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                            {formatCurrency(calcResult.childCare)}
+                          <td className="border border-slate-200 p-2 text-right bg-white">
+                            <SocialInsCell kind="childCare" value={calcResult.childCare} {..._insFlags} />
                           </td>
-                          <td className="border border-slate-200 p-2 text-right bg-white text-gray-500 font-mono">
-                            {formatCurrency(calcResult.employment)}
+                          <td className="border border-slate-200 p-2 text-right bg-white">
+                            <SocialInsCell kind="employment" value={calcResult.employment} {..._insFlags} />
                           </td>
                           <td className={`border border-slate-200 p-2 text-right ${calcResult.incomeTax === null ? "bg-red-50 text-red-600 font-black" : "bg-white text-orange-600 font-bold"}`}>
                             <div>{calcResult.incomeTax === null ? "計算不可" : formatCurrency(calcResult.incomeTax)}</div>

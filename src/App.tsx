@@ -2215,6 +2215,11 @@ const App = () => {
   const [selectedListMonth, setSelectedListMonth] = useState("01");
   const [slipEmployeeId, setSlipEmployeeId] = useState(null);
   const [isBulkPrintOpen, setIsBulkPrintOpen] = useState(false); // ▼ 追加: 賃金台帳の表示モードと対象月 ▼
+  // 一括印刷キュー方式: 単票印刷モーダルを使い、社員を順番に切り替える。
+  // bulkPrintQueue が非 null の間、単票モーダルに進捗UI(N/M人目)と「次の社員へ」「完了」ボタンが出る。
+  // 自動連続印刷(afterprint 経由の自動進行)は行わず、ユーザーが1人ずつ手動で印刷→次へを進める方式。
+  const [bulkPrintQueue, setBulkPrintQueue] = useState(null);
+  const [bulkPrintIndex, setBulkPrintIndex] = useState(0);
 
   const [ledgerViewMode, setLedgerViewMode] = useState("annual");
   const [ledgerSelectedMonth, setLedgerSelectedMonth] = useState("01");
@@ -3978,6 +3983,18 @@ const App = () => {
       [empId]: { ...prev[empId], data: updatedData },
     }));
     handleSave(empId, emp.master, updatedData);
+  };
+
+  // 一括印刷キューを開始: 在籍社員IDを並べて先頭社員を単票モーダルへ表示。
+  // 自動連続印刷は行わない(ユーザーが手動で「印刷する」→「次の社員へ」を押す)。
+  const startBulkPrint = () => {
+    const queue = Object.entries(employees)
+      .filter(([, emp]) => emp.master?.status !== "retired")
+      .map(([id]) => id);
+    if (queue.length === 0) return;
+    setBulkPrintQueue(queue);
+    setBulkPrintIndex(0);
+    setSlipEmployeeId(queue[0]);
   };
 
   const handleMonthlyCheck = (monthKey) => {
@@ -8201,8 +8218,8 @@ const App = () => {
                   <ShieldCheck size={14} /> 月次チェック
                 </button>
                 <button
-                  onClick={() => setIsBulkPrintOpen(true)}
-                  title="この月の全社員分の給与明細をまとめて印刷プレビュー表示します"
+                  onClick={startBulkPrint}
+                  title="この月の全社員分の給与明細を1人ずつ順番に印刷します"
                   aria-label="一括印刷"
                   className="flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
                 >
@@ -11855,9 +11872,9 @@ const App = () => {
                   <button
                     onClick={() => {
                       setSelectedListMonth(monthlyCloseMonth);
-                      setIsBulkPrintOpen(true);
+                      startBulkPrint();
                     }}
-                    title="既存の給与明細一括印刷モーダルを開きます"
+                    title="この月の全社員分の給与明細を1人ずつ順番に印刷します"
                     className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
                   >
                     <Printer size={16} /> 給与明細を一括印刷
@@ -12145,7 +12162,7 @@ const App = () => {
                   <button
                     onClick={() => {
                       setSelectedListMonth(printTargetMonth);
-                      setIsBulkPrintOpen(true);
+                      startBulkPrint();
                     }}
                     className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-2.5 rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 text-xs"
                   >
@@ -12174,7 +12191,14 @@ const App = () => {
               <div className="flex-1 flex justify-center items-start print:block">
                 {/* 実際の帳票の表示 */}
                 {printDocType === "payslip" ? (
-                  selectedEmployeeId && employees[selectedEmployeeId] ? (
+                  // ★ 単票印刷モーダル(slipEmployeeId truthy)が開いている間は、ここの背景プレビュー用 renderPayslip を DOM から消す。
+                  //   visibility:hidden ではレイアウト空間が残って、給与明細一覧表からの印刷経路との
+                  //   背景 DOM 量・レイアウト残存量に差が出て、印刷結果に微妙な差が出る要因になるため、
+                  //   モーダル表示中は完全に null を返してDOMから除外する。
+                  //   モーダルを閉じれば(slipEmployeeId=null)、通常プレビューが復帰する。
+                  slipEmployeeId ? (
+                    null
+                  ) : selectedEmployeeId && employees[selectedEmployeeId] ? (
                     <div className="w-full max-w-[850px] bg-white shadow-xl mx-auto print:shadow-none print:w-full print:max-w-none print:bg-transparent">
                       {renderPayslip(
                         selectedEmployeeId,
@@ -12862,6 +12886,14 @@ const App = () => {
           <div className="print-area w-[850px] relative print:w-full">
             <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
               <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
+                {/* ▼ 一括印刷キュー進行中だけ表示する進捗バナー ▼ */}
+                {bulkPrintQueue && (
+                  <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1.5 rounded text-xs font-bold">
+                    <span>一括印刷： {bulkPrintIndex + 1} / {bulkPrintQueue.length} 人目</span>
+                    <span className="text-amber-400">|</span>
+                    <span className="text-amber-900">{_emp.master?.name || "未設定"}</span>
+                  </div>
+                )}
                 {_isBlocking && (
                   <span className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 rounded px-2 py-1">計算不可：印刷できません</span>
                 )}
@@ -12872,11 +12904,41 @@ const App = () => {
                 >
                   <Printer size={16} /> 印刷する
                 </button>
+                {/* ▼ 一括印刷キュー中だけ表示する「次の社員へ」/「完了」ボタン ▼ */}
+                {bulkPrintQueue && bulkPrintIndex < bulkPrintQueue.length - 1 && (
+                  <button
+                    onClick={() => {
+                      const next = bulkPrintIndex + 1;
+                      setBulkPrintIndex(next);
+                      setSlipEmployeeId(bulkPrintQueue[next]);
+                    }}
+                    className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors"
+                  >
+                    次の社員へ →
+                  </button>
+                )}
+                {bulkPrintQueue && bulkPrintIndex === bulkPrintQueue.length - 1 && (
+                  <button
+                    onClick={() => {
+                      setBulkPrintQueue(null);
+                      setBulkPrintIndex(0);
+                      setSlipEmployeeId(null);
+                    }}
+                    className="flex items-center gap-1 bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors"
+                  >
+                    完了
+                  </button>
+                )}
                 <button
-                  onClick={() => setSlipEmployeeId(null)}
+                  onClick={() => {
+                    setSlipEmployeeId(null);
+                    // 一括印刷キュー中のキャンセル： queue/index もクリアして通常モードへ戻す
+                    setBulkPrintQueue(null);
+                    setBulkPrintIndex(0);
+                  }}
                   className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
                 >
-                  <X size={16} /> 閉じる
+                  <X size={16} /> {bulkPrintQueue ? "キャンセル" : "閉じる"}
                 </button>
               </div>
             </div>
@@ -12889,69 +12951,11 @@ const App = () => {
         </div>
         );
       })()}
-      {/* ＝＝＝ 給与明細プレビュー モーダル (一括印刷) ＝＝＝ */}
-      {isBulkPrintOpen &&
-        (() => {
-          const activeEmployees = Object.entries(employees).filter(
-            ([id, emp]) => emp.master?.status !== "retired"
-          );
-          const _isBonusMonth = selectedListMonth === "bonus" || selectedListMonth === "bonus2";
-          const hasBlockingEmployee = !_isBonusMonth && activeEmployees.some(([id, emp]) => {
-            const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
-            const _rd = _yd.monthly?.[selectedListMonth] || {};
-            return calculateMonthlyResult(emp.master, _rd, effectiveSettings, selectedListMonth, selectedYear, taxTables, monthlyLocks).isBlocking || false;
-          });
-          return (
-            <div
-              id="modal-backdrop-bulk"
-              className="fixed inset-0 bg-slate-900/60 z-[100] flex justify-center items-start overflow-y-auto py-10 backdrop-blur-sm transition-opacity"
-            >
-              <div className="print-area w-[850px] relative print:w-full">
-                <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
-                  <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
-                    <div className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                      <span className="text-indigo-600">一括印刷</span>
-                      <span className="text-slate-500 text-xs">
-                        ({selectedYear}年度 {parseInt(selectedListMonth, 10)}
-                        月支給分)
-                      </span>
-                      <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs">
-                        対象 {activeEmployees.length}名
-                      </span>
-                    </div>
-                    {hasBlockingEmployee && (
-                      <span className="text-red-600 text-xs font-bold bg-red-50 border border-red-200 rounded px-2 py-1">計算不可の明細があります</span>
-                    )}
-                    <button
-                      onClick={() => window.print()}
-                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      disabled={activeEmployees.length === 0 || hasBlockingEmployee}
-                    >
-                      <Printer size={16} /> 印刷する
-                    </button>
-                    <button
-                      onClick={() => setIsBulkPrintOpen(false)}
-                      className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
-                    >
-                      <X size={16} /> 閉じる
-                    </button>
-                  </div>
-                </div>
-                <div className="space-y-8 print:space-y-0">
-                  {activeEmployees.length > 0 ? (
-                    activeEmployees.map(([id, emp]) =>
-                      renderPayslip(id, emp, selectedListMonth)
-                    )
-                  ) : (
-                    <div className="bg-white p-10 text-center text-slate-500 rounded-lg shadow no-print font-bold">
-                      印刷対象の従業員がいません。
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+      {/* ＝＝＝ 給与明細一括印刷モーダルは削除済み(キュー方式へ移行) ＝＝＝
+           一括印刷は単票モーダルを使い、bulkPrintQueue / bulkPrintIndex で社員を切り替える方式に変更。
+           CSS Paged Media 仕様の position:fixed/absolute 配下での page-break 無効化問題を根本回避するため、
+           複数 .slip-page を同一 print-area に並べる旧方式は廃止した。
+           既存 isBulkPrintOpen state は他の参照箇所([!isBulkPrintOpen] 等)との互換のため宣言だけ残置。 */}
       {/* ＝＝＝ 賃金台帳 印刷プレビュー モーダル ＝＝＝ */}
       {isLedgerPrintOpen &&
         selectedEmployeeId &&

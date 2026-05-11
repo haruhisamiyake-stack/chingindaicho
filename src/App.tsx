@@ -2671,24 +2671,14 @@ const App = () => {
     if (!isAuthReady || !userId || !tenantId) return;
 
     // 従業員データの購読
-    let hasLoadedEmpsOnce = false;
+    // 社員0人(snap.empty)は正の状態。シード生成しない。
     const unsubEmps = subscribe(getTenantCol("employees"), (snap) => {
       if (snap.empty) {
-        if (!hasLoadedEmpsOnce) {
-          const newId = `emp_${Date.now()}`;
-          const newEmp = createInitialEmployee("社員①", "001", settings);
-          saveDoc(PATHS.employee(tenantId, newId), {
-            ...newEmp,
-            updatedAt: new Date().toISOString(),
-          }).catch(console.error);
-        } else {
-          setEmployees({});
-          setSelectedEmployeeId(null);
-          setLoading(false);
-        }
+        setEmployees({});
+        setSelectedEmployeeId(null);
+        setLoading(false);
         return;
       }
-      hasLoadedEmpsOnce = true;
 
       const emps = {};
       snap.forEach((doc) => {
@@ -2971,15 +2961,14 @@ const App = () => {
   // 例外 bypass 系（ロックゲートを通さない、通してはならない）:
   //   1. _migrateUserDataToTenant      [legacy migration v1: 旧 user スコープ → tenant]
   //   2. _migrateTenantDataToUserScope [legacy migration v2: tenantOwner → tenants/{tid}]
-  //   3. subscribe 空テナント時 auto-create [新規テナント空コレクション時の社員①生成]
-  //   4. handleLockMonth               [ロック確定時の lockedSnapshotRates 書込]
-  //   5. handleImportBackup            [バックアップ復元 ※ロック月確認モーダル要追加(将来)]
+  //   3. handleLockMonth               [ロック確定時の lockedSnapshotRates 書込]
+  //   4. handleImportBackup            [バックアップ復元 ※ロック月確認モーダル要追加(将来)]
   //
   // ★ 新しい saveDoc(PATHS.employee, ...) を増やす場合は必ずこの一覧に追加し、
   //   handleSave 経由にできないか先に検討すること。
   //
   // 将来統合: saveEmployeeData(empId, master, data, { skipLockGate?: boolean })
-  //          に集約し、デフォルトはゲート必須、上記5経路だけが skipLockGate:true
+  //          に集約し、デフォルトはゲート必須、上記4経路だけが skipLockGate:true
   // ============================================================================
   //
   // ロック月 sanitize の現在の方針：「monthly row / bonus / manualOverrides 全体置換」

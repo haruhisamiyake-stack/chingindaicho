@@ -4113,16 +4113,21 @@ const App = () => {
       allowances: {},
       deductions: {},
     };
-    if (!master || !data || !selectedYear)
+    if (!master || !data || !selectedYear) {
+      // ★ 5 フィールドで同じ defaultSums を共有すると、将来的に results.sums.allowances[id]
+      //   などへ書き込みが入った時に全フィールド/defaultSums まで一括破壊される。empty() で
+      //   毎回 fresh object + 新規 allowances/deductions を返し、共有参照を完全に断つ。
+      const empty = () => ({ ...defaultSums, allowances: {}, deductions: {} });
       return {
         monthlyResults: {},
-        sums: defaultSums,
-        bonus1: defaultSums,
-        bonus2: defaultSums,
-        bonusTotal: defaultSums,
-        bonusResults: defaultSums,
+        sums: empty(),
+        bonus1: empty(),
+        bonus2: empty(),
+        bonusTotal: empty(),
+        bonusResults: empty(),
         getsuhenAlerts: {},
       };
+    }
 
     const allowanceDefs =
       settings?.allowanceDefinitions?.length > 0
@@ -4134,7 +4139,10 @@ const App = () => {
         : master?.deductionDefinitions || [];
 
     const monthlyResults = {};
-    const sums = { ...defaultSums };
+    // ★ defaultSums の allowances/deductions は空オブジェクト参照を持つため、浅いスプレッドだと
+    //   sums と後段の bonusTotal で同じオブジェクトを共有してしまい、bonusTotal 集計が
+    //   sums.allowances[id] / sums.deductions[id] を上書き破壊する。必ず新規空オブジェクトを置く。
+    const sums = { ...defaultSums, allowances: {}, deductions: {} };
 
     MONTHS.forEach((m) => {
       const row = currentYearData.monthly[m] || {}; // 【修正】関数側で未入力判定を組み込んだため、そのまま結果を受け取るだけでOK
@@ -4269,7 +4277,9 @@ const App = () => {
     }
 
     const calcBonus = (b, key) => {
-      if (!b) return { ...defaultSums };
+      // ★ defaultSums の allowances/deductions は空オブジェクト参照を持つため、浅いスプレッドだけだと
+      //   bonus1/bonus2 と defaultSums が allowances/deductions を共有してしまう。fresh の空オブジェクトで上書きして共有参照を断つ。
+      if (!b) return { ...defaultSums, allowances: {}, deductions: {} };
       return calculateBonusResult({
         master,
         bonusRow: b,
@@ -4288,7 +4298,10 @@ const App = () => {
     const bonus1 = calcBonus(currentYearData.bonus, "bonus");
     const bonus2 = calcBonus(currentYearData.bonus2, "bonus2");
 
-    const bonusTotal = { ...defaultSums };
+    // ★ sums と同じく、bonusTotal 側も allowances/deductions を新規空オブジェクトで初期化する。
+    //   ここで { ...defaultSums } のみだと sums.allowances/deductions と同一参照を引き継ぎ、
+    //   後続の代入が月次累計を上書き破壊するため。
+    const bonusTotal = { ...defaultSums, allowances: {}, deductions: {} };
     Object.keys(bonusTotal).forEach((key) => {
       if (key === "allowances" || key === "deductions") {
         [...(allowanceDefs || []), ...(deductionDefs || [])].forEach((def) => {

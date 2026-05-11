@@ -8566,7 +8566,16 @@ const App = () => {
                             );
                           })}
 
-                          <td className="border border-slate-200 p-2 text-right bg-blue-50/50 font-black text-blue-700 border-l-2">
+                          <td className="border border-slate-200 p-2 text-right bg-blue-50/50 font-black text-blue-700 border-l-2 relative">
+                            {/* ▼ この社員・この月(selectedListMonth)の calcLog を既存監査モーダルで表示。総支給額の右上に置き、支給→控除→差引の全体を確認する起点とする。 ▼ */}
+                            <button
+                              onClick={() => openAuditLogForEmp(empId, selectedListMonth)}
+                              title="この社員・この月の計算ログを表示"
+                              aria-label="計算ログを表示"
+                              className="absolute top-0.5 right-0.5 text-[10px] leading-none px-1 py-0.5 rounded bg-white/70 hover:bg-blue-100 text-slate-400 hover:text-blue-700 border border-transparent hover:border-blue-300 transition-colors"
+                            >
+                              🔍
+                            </button>
                             {formatCurrency(calcResult.grossPay)}
                           </td>
 

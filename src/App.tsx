@@ -453,6 +453,40 @@ const getRateForMonthStrict = (schedule = [], targetYearMonth) => {
   return currentRate;
 };
 
+// 料率判定に使う「対象年月(YYYY-MM)」を決定する。
+// 月次給与・賞与・月次ロックsnapshot で個別に計算していたロジックを1箇所へ集約する。
+//
+// 【判定基準の方針(意図的な設計)】
+//   - 月次給与の健保/厚年/介護/子ども子育て支援金 = 「対象月分基準」
+//       呼び出し側で payDate は意図的に渡さず、helper 内で yearStr+monthKey にフォールバックする。
+//       社会保険料は「○月分」単位で課されるため、支給日ではなく被保険者期間の月で判定するのが実務慣行。
+//       例: 翌月支給の会社で「3月分給与」を 4月に払う場合も、3月の料率を適用する。
+//   - 月次給与の雇用保険 = 「periodEnd 基準」(本 helper の対象外)
+//       賃金算定期間ベースで率を判定するため、別変数 employmentTargetYearMonth で periodEnd の年月を採用。
+//   - 賞与 = 「支給日基準」
+//       呼び出し側で bonusRow.payDate を渡す。賞与は単発支給のため「いつ払ったか」で料率を一意決定する。
+//   - 月次ロックsnapshot = 「対象月分基準」(月次給与と同じ)
+//       payDate は渡さず yearStr+monthKey で判定。後日 unlock しても料率が凍結保持されるため、
+//       月次給与計算の判定基準と完全に揃える必要がある。
+//
+// 現在は mode="payDate" 固定:
+//   - payDate(YYYY-MM-DD) が渡され文字列として有効な場合 → payDate.slice(0, 7)
+//   - そうでなければ `${reiwaToWestern(yearStr)}-${monthKey}` にフォールバック
+// 将来、会社設定で「支給日基準で統一」「対象月分基準で統一」などを切り替える場合は
+// mode 引数を分岐させるだけで済む構造としている。
+// childCare の getRateForMonthStrict などの個別の料率判定ロジックは本 helper の対象外(料率判定値自体は不変)。
+const getRateTargetYearMonth = ({ payDate, yearStr, monthKey, mode = "payDate" }) => {
+  if (
+    mode === "payDate" &&
+    payDate &&
+    typeof payDate === "string" &&
+    payDate.length >= 7
+  ) {
+    return payDate.slice(0, 7);
+  }
+  return `${reiwaToWestern(yearStr) || 2026}-${monthKey}`;
+};
+
 // 優先順位: 締め時スナップショット > 会社個別/全体の料率スケジュール > デフォルト値
 // ※ individualValue は現在、通常の社会保険料率計算では原則 null を渡す設計
 const resolveRate = (individualValue, snapshotValue, schedule, targetYearMonth, defaultValue) => {
@@ -1491,8 +1525,12 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     amount: Number(row.deductionAmounts?.[def.id]) || 0,
   }));
 
-  const _westernYear = reiwaToWestern(yearStr) || 2026;
-  const targetYearMonth = `${_westernYear}-${monthKey}`;
+  // 料率判定年月は helper に集約。月次給与の健保/厚年/介護/子ども子育て支援金は
+  // 「対象月分基準」= yearStr+monthKey ベース(payDate は意図的に渡さない)。
+  // 社会保険料は「○月分」単位で課されるため、翌月支給の会社でも「○月分給与」の料率は
+  // 対象月で判定するのが実務慣行。雇用保険率だけは下の employmentTargetYearMonth
+  // (periodEnd ベース) で別判定するため、本変数は社保系の判定だけに使用する。
+  const targetYearMonth = getRateTargetYearMonth({ yearStr, monthKey });
   // 雇用保険料率は賃金締切期間の末日(periodEnd)が属する年月で判定する。periodEnd 未設定時は支給月にフォールバック。
   const employmentTargetYearMonth =
     row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
@@ -1811,10 +1849,14 @@ const calculateBonusResult = ({
   });
 
   const lastMonthRow = yearData.monthly[monthKeyForRates] || {};
-  const _westernYearB = reiwaToWestern(yearStr) || 2026;
-  const bonusTargetYearMonth = bonusRow.payDate
-    ? bonusRow.payDate.slice(0, 7)
-    : `${_westernYearB}-${monthKeyForRates}`;
+  // 料率判定年月は helper に集約。賞与は「支給日基準」= bonusRow.payDate(YYYY-MM)で判定する。
+  // 賞与は単発支給のため「いつ払ったか」で料率を一意決定する仕様(月次給与の「対象月分基準」とは異なる)。
+  // bonusRow.payDate が未入力のときのみ yearStr+monthKeyForRates にフォールバック。
+  const bonusTargetYearMonth = getRateTargetYearMonth({
+    payDate: bonusRow.payDate,
+    yearStr,
+    monthKey: monthKeyForRates,
+  });
   // 賞与の雇用保険料率は支給日(payDate)の年月で判定する。
   // bonusRow.periodEnd は UI 編集不可な hidden フィールドのため賞与計算では参照しない(データ構造は互換のため残置)。
   const bonusMonthKey = bonusRow.payDate
@@ -2899,8 +2941,10 @@ const App = () => {
     };
     if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
 
-    // 料率スナップショット：対象月の実使用料率を各社員データへ固定保存
-    const targetYearMonth = `${reiwaToWestern(yearStr) || 2026}-${monthKey}`;
+    // 料率スナップショット:対象月の実使用料率を各社員データへ固定保存。
+    // 判定基準は月次給与と同じ「対象月分基準」= yearStr+monthKey ベース(payDate は意図的に渡さない)。
+    // 後日 unlock しても料率を凍結保持するため、月次給与計算の判定基準と完全に揃える必要がある。
+    const targetYearMonth = getRateTargetYearMonth({ yearStr, monthKey });
     const snapshotPromises = Object.entries(employees || {}).map(async ([empId, emp]) => {
       const row = emp.data?.years?.[yearStr]?.monthly?.[monthKey];
       if (!row) return;
@@ -10579,6 +10623,34 @@ const App = () => {
                   <p>・各料率タイプに「適用開始年月」を複数登録できます。指定年月以降はその料率が適用されます（年度をまたぐ変更に対応）。</p>
                   <p>・ロック済みの月は過去データを保護します。料率変更は未ロック月にのみ影響します。</p>
                   <p>・「雇用保険料率」は <strong>‰（千分率）</strong> で入力してください（例：6.0‰ = 0.6%）。その他は <strong>%（百分率）</strong> です。</p>
+                </div>
+
+                {/* ▼ 表示専用: 料率適用基準(現在の仕様)。設定変更機能ではなく、現行ロジックを可視化するだけ。 */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-6 text-xs text-slate-700 space-y-2">
+                  <div className="font-black text-slate-800 text-sm flex items-center gap-2">
+                    <Info size={14} className="text-indigo-500" /> 料率適用基準(現在の仕様)
+                  </div>
+                  <div className="space-y-1.5 pl-1">
+                    <div className="flex flex-wrap items-start gap-x-2 gap-y-0.5">
+                      <span className="font-black text-indigo-600">月次給与 / 健康保険・厚生年金・介護保険・子ども子育て支援金:</span>
+                      <span>対象月分基準</span>
+                    </div>
+                    <div className="flex flex-wrap items-start gap-x-2 gap-y-0.5">
+                      <span className="font-black text-indigo-600">月次給与 / 雇用保険:</span>
+                      <span>計算期間終了日基準</span>
+                    </div>
+                    <div className="flex flex-wrap items-start gap-x-2 gap-y-0.5">
+                      <span className="font-black text-indigo-600">賞与の社会保険・雇用保険:</span>
+                      <span>支給日基準</span>
+                    </div>
+                    <div className="flex flex-wrap items-start gap-x-2 gap-y-0.5">
+                      <span className="font-black text-indigo-600">月次ロック時:</span>
+                      <span>月次給与と同じ基準で料率を固定</span>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-slate-500 pt-2 border-t border-slate-200">
+                    ※ 現在、この基準は変更できません(表示のみ)。
+                  </p>
                 </div>
 
                 {rateTableErrors.length > 0 && (

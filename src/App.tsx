@@ -6213,11 +6213,15 @@ const App = () => {
                   </div>
 
                   <div className="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden">
-                    <div className="overflow-x-auto relative">
+                    {/* ★ 縦横両方向の sticky を効かせるため、内側ラッパーを overflow-auto + max-h で
+                         独立スクロール容器にする。これで thead の sticky top-0 と th の sticky left/right が
+                         同一スクロール文脈に揃い、下スクロール時もヘッダー行が固定表示される。
+                         印刷は .print-area の別 DOM(LedgerPrintModal)経由のためこのラッパーには影響しない。 */}
+                    <div className="overflow-auto relative max-h-[calc(100vh-240px)] print:max-h-none print:overflow-visible">
                       <table className="w-full border-collapse">
-                        <thead>
+                        <thead className="sticky top-0 z-40 shadow-sm">
                           <tr className="bg-gray-100 text-gray-500 text-[10px] font-black uppercase tracking-tighter">
-                            <th className="border border-gray-300 p-2 sticky left-0 z-30 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
+                            <th className="border border-gray-300 p-2 sticky left-0 z-50 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
                               <div className="text-left font-black text-gray-500 text-[11px]">
                                 項目 / 支給月
                               </div>
@@ -6439,7 +6443,7 @@ const App = () => {
                             <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 font-black align-bottom text-[10px]">
                               賞与累計
                             </th>
-                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-200 text-slate-800 sticky right-0 z-30 font-black align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-200 text-slate-800 sticky right-0 z-50 font-black align-bottom text-[10px]">
                               総合計
                             </th>
                           </tr>
@@ -7086,7 +7090,7 @@ const App = () => {
                                             setOverrideInputValue(ov?.enabled ? String(ov.value) : "");
                                             setOverrideInputMemo(ov?.memo || "");
                                           }}
-                                          className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
+                                          className={`flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded border ${isOv ? "bg-red-100 hover:bg-red-200 text-red-700 hover:text-red-800 border-red-300 hover:border-red-400 disabled:hover:bg-red-100 disabled:hover:text-red-700" : "bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border-transparent hover:border-amber-300 disabled:hover:bg-slate-100 disabled:hover:text-slate-400"} disabled:opacity-40 disabled:cursor-not-allowed`}
                                           title="手動上書き"
                                         >手</button>
                                       </div>
@@ -7141,7 +7145,7 @@ const App = () => {
                                         setOverrideInputValue(isOv ? String(ovData.value) : "");
                                         setOverrideInputMemo(ovData?.memo || "");
                                       }}
-                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
+                                      className={`flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded border ${isOv ? "bg-red-100 hover:bg-red-200 text-red-700 hover:text-red-800 border-red-300 hover:border-red-400 disabled:hover:bg-red-100 disabled:hover:text-red-700" : "bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border-transparent hover:border-amber-300 disabled:hover:bg-slate-100 disabled:hover:text-slate-400"} disabled:opacity-40 disabled:cursor-not-allowed`}
                                       title="手動上書き"
                                     >手</button>
                                   </div>
@@ -7249,7 +7253,7 @@ const App = () => {
                                         setOverrideInputValue(isOvRT ? String(ovRT.value) : "");
                                         setOverrideInputMemo(ovRT?.memo || "");
                                       }}
-                                      className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
+                                      className={`flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded border ${isOvRT ? "bg-red-100 hover:bg-red-200 text-red-700 hover:text-red-800 border-red-300 hover:border-red-400 disabled:hover:bg-red-100 disabled:hover:text-red-700" : "bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border-transparent hover:border-amber-300 disabled:hover:bg-slate-100 disabled:hover:text-slate-400"} disabled:opacity-40 disabled:cursor-not-allowed`}
                                       title="手動上書き"
                                     >手</button>
                                   </div>
@@ -7359,7 +7363,7 @@ const App = () => {
                                           setOverrideInputValue(isOvD ? String(ovD.value) : "");
                                           setOverrideInputMemo(ovD?.memo || "");
                                         }}
-                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-100 disabled:hover:text-slate-400"
+                                        className={`flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded border ${isOvD ? "bg-red-100 hover:bg-red-200 text-red-700 hover:text-red-800 border-red-300 hover:border-red-400 disabled:hover:bg-red-100 disabled:hover:text-red-700" : "bg-slate-100 hover:bg-amber-100 text-slate-400 hover:text-amber-600 border-transparent hover:border-amber-300 disabled:hover:bg-slate-100 disabled:hover:text-slate-400"} disabled:opacity-40 disabled:cursor-not-allowed`}
                                         title="手動上書き"
                                       >手</button>
                                     </div>
@@ -7460,7 +7464,7 @@ const App = () => {
                                           setOverrideInputValue(isOvNP ? String(ovNP.value) : "");
                                           setOverrideInputMemo(ovNP?.memo || "");
                                         }}
-                                        className="flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded bg-white/20 hover:bg-amber-300/40 text-white/60 hover:text-amber-200 border border-transparent hover:border-amber-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/20 disabled:hover:text-white/60"
+                                        className={`flex-shrink-0 text-[8px] leading-none px-0.5 py-0.5 rounded border ${isOvNP ? "bg-red-200 hover:bg-red-300 text-red-800 hover:text-red-900 border-red-400 hover:border-red-500 disabled:hover:bg-red-200 disabled:hover:text-red-800" : "bg-white/20 hover:bg-amber-300/40 text-white/60 hover:text-amber-200 border-transparent hover:border-amber-300 disabled:hover:bg-white/20 disabled:hover:text-white/60"} disabled:opacity-40 disabled:cursor-not-allowed`}
                                         title="手動上書き"
                                       >手</button>
                                     </div>

@@ -3944,20 +3944,14 @@ const App = () => {
       if (!isBonusList) {
         // 1. 標準報酬月額未入力
         if ((hasHealth || hasPension) && stdAmount === 0) {
-          errors.push(
-            `⚠ ${name}：標準報酬月額が未入力です。社会保険料が0円になります。`
-          );
+          errors.push({ msg: `⚠ ${name}：標準報酬月額が未入力です。社会保険料が0円になります。`, empId });
         } else {
           // 2. 社保加入なのに社保控除0円
           if (hasHealth && calcResult.health === 0) {
-            errors.push(
-              `⚠ ${name}：健康保険に加入していますが、保険料が0円です。`
-            );
+            errors.push({ msg: `⚠ ${name}：健康保険に加入していますが、保険料が0円です。`, empId });
           }
           if (hasPension && calcResult.pension === 0) {
-            errors.push(
-              `⚠ ${name}：厚生年金に加入していますが、保険料が0円です。`
-            );
+            errors.push({ msg: `⚠ ${name}：厚生年金に加入していますが、保険料が0円です。`, empId });
           }
         }
       } // 3. 年齢到達アラート
@@ -3966,29 +3960,19 @@ const App = () => {
         const alerts = getAgeAlerts(m.dob, selectedYear, monthKey);
         alerts.forEach((a) => {
           if (a.type === "nursing40")
-            infos.push(
-              `✓ ${name}：40歳到達。介護保険料の徴収開始を確認してください。`
-            );
+            infos.push({ msg: `✓ ${name}：40歳到達。介護保険料の徴収開始を確認してください。`, empId });
           if (a.type === "nursing65")
-            infos.push(
-              `✓ ${name}：65歳到達。介護保険料の給与控除終了を確認してください。`
-            );
+            infos.push({ msg: `✓ ${name}：65歳到達。介護保険料の給与控除終了を確認してください。`, empId });
           if (a.type === "pension70")
-            infos.push(
-              `✓ ${name}：70歳到達。厚生年金保険の資格喪失を確認してください。`
-            );
+            infos.push({ msg: `✓ ${name}：70歳到達。厚生年金保険の資格喪失を確認してください。`, empId });
           if (a.type === "health75")
-            infos.push(
-              `✓ ${name}：75歳到達。健康保険資格喪失を確認してください。`
-            );
+            infos.push({ msg: `✓ ${name}：75歳到達。健康保険資格喪失を確認してください。`, empId });
         });
       } // 4. 住民税0円確認
 
       const resTax = Number(rowData.residentTax) || 0;
       if (resTax === 0 && !isBonusList) {
-        warnings.push(
-          `△ ${name}：住民税が0円です。特別徴収対象外でなければ確認してください。`
-        );
+        warnings.push({ msg: `△ ${name}：住民税が0円です。特別徴収対象外でなければ確認してください。`, empId });
       } // 5. 退職者チェック
       if (m.retireDate && !isBonusList) {
         const rDate = new Date(m.retireDate);
@@ -4012,25 +3996,17 @@ const App = () => {
             checkYM === nextYM ||
             calcResult.grossPay > 0
           ) {
-            infos.push(
-              `✓ ${name}：退職関連の確認月です(${m.retireDate}退職)。社保2ヶ月分控除・住民税一括徴収を確認してください。`
-            );
+            infos.push({ msg: `✓ ${name}：退職関連の確認月です(${m.retireDate}退職)。社保2ヶ月分控除・住民税一括徴収を確認してください。`, empId });
           }
         }
       } // 6. 差引支給額マイナス
 
       if (calcResult.netPay < 0) {
-        errors.push(
-          `⚠ ${name}：差引支給額がマイナス（${formatCurrency(
-            calcResult.netPay
-          )}円）です。`
-        );
+        errors.push({ msg: `⚠ ${name}：差引支給額がマイナス（${formatCurrency(calcResult.netPay)}円）です。`, empId });
       } // 7. 所得税0円確認
 
       if (calcResult.grossPay > 0 && calcResult.incomeTax === 0) {
-        warnings.push(
-          `△ ${name}：支給額がありますが所得税が0円です。扶養人数・税区分を確認してください。`
-        );
+        warnings.push({ msg: `△ ${name}：支給額がありますが所得税が0円です。扶養人数・税区分を確認してください。`, empId });
       }
     });
 
@@ -4048,6 +4024,82 @@ const App = () => {
         [monthKey]: { errors, warnings, infos, at: Date.now() },
       },
     }));
+  };
+
+  // 月次チェック結果モーダルの「監査」ボタンから呼ばれる。
+  // 1社員×1月の calcLog を既存 logModalData モーダルに流し込む。
+  const openAuditLogForEmp = (empId, monthKey) => {
+    const emp = employees[empId];
+    if (!emp) return;
+    const yearDataObj =
+      emp.data?.years?.[selectedYear] ||
+      createInitialYearData(selectedYear, settings);
+    const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
+    const allowanceDefs =
+      settings?.allowanceDefinitions ||
+      emp.master?.allowanceDefinitions ||
+      [];
+    const deductionDefs =
+      settings?.deductionDefinitions ||
+      emp.master?.deductionDefinitions ||
+      [];
+    let calc, rowData;
+    if (isBonusList) {
+      rowData = yearDataObj[monthKey] || {};
+      calc = calculateBonusResult({
+        master: emp.master,
+        bonusRow: rowData,
+        bonusKey: monthKey,
+        settings: effectiveSettings,
+        yearData: yearDataObj,
+        allowanceDefs,
+        deductionDefs,
+        monthKeyForRates: getBonusRateMonth(rowData),
+        yearStr: selectedYear,
+        taxTables,
+        monthlyLocks,
+      });
+    } else {
+      rowData = yearDataObj.monthly?.[monthKey] || {};
+      calc = calculateMonthlyResult(
+        emp.master,
+        rowData,
+        effectiveSettings,
+        monthKey,
+        selectedYear,
+        taxTables,
+        monthlyLocks
+      );
+    }
+    const monthOvs = !isBonusList
+      ? yearDataObj.manualOverrides?.[monthKey] || {}
+      : {};
+    const labelMap = { health: "健康保険", pension: "厚生年金", nursing: "介護保険", childCare: "子ども・子育て支援金", employment: "雇用保険", incomeTax: "所得税", residentTax: "住民税", netPay: "差引支給額" };
+    const overrideDetails = [];
+    Object.entries(monthOvs).forEach(([key, ov]) => {
+      if (!ov?.enabled) return;
+      let label, autoVal;
+      if (key === "residentTax") { label = "住民税"; autoVal = Number(rowData.residentTax) || 0; }
+      else if (labelMap[key]) { label = labelMap[key]; autoVal = Number(calc[key]) || 0; }
+      else if (key.startsWith("deduction_")) {
+        const defId = key.slice("deduction_".length);
+        const def = deductionDefs.find((d) => d.id === defId);
+        label = def?.name || defId;
+        autoVal = Number(rowData.deductionAmounts?.[defId]) || 0;
+      } else return;
+      const manualVal = Number(ov.value) || 0;
+      overrideDetails.push({ label, auto: autoVal, manual: manualVal, diff: manualVal - autoVal, memo: ov.memo || "" });
+    });
+    const empName = emp.master?.name || "未設定";
+    const monthLabel = isBonusList
+      ? (monthKey === "bonus" ? "賞与①" : "賞与②")
+      : `${parseInt(monthKey, 10)}月支給分`;
+    setLogModalData({
+      title: `${empName}　${monthLabel} 計算ログ`,
+      log: calc.calcLog || [],
+      hasOverride: overrideDetails.length > 0,
+      overrideDetails,
+    });
   };
 
   const getDisplayValue = (month, fieldKey, calcValue) => {
@@ -8123,9 +8175,6 @@ const App = () => {
                         差引支給額
                       </th>
 
-                      <th className="border border-slate-200 p-2 min-w-[80px] bg-slate-200 text-slate-700 sticky right-0 z-50 border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
-                        操作
-                      </th>
                     </tr>
                   </thead>
                   <tbody className="text-xs whitespace-nowrap">
@@ -8572,14 +8621,6 @@ const App = () => {
                             {formatCurrency(calcResult.netPay)}
                           </td>
 
-                          <td className="border border-slate-200 p-1.5 sticky right-0 z-20 bg-white border-l-4 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.1)]">
-                            <button
-                              onClick={() => setSlipEmployeeId(empId)}
-                              className="w-full flex items-center justify-center gap-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-1.5 rounded text-[10px] font-bold transition-colors"
-                            >
-                              <FileText size={12} /> 明細表示
-                            </button>
-                          </td>
                         </tr>
                       );
                     })}
@@ -13640,13 +13681,21 @@ const App = () => {
                                            {" "}
                       <div className="p-4 space-y-2">
                                                {" "}
-                        {checkModalData.errors.map((msg, i) => (
+                        {checkModalData.errors.map((row, i) => (
                           <div
                             key={i}
-                            className="text-xs text-slate-700 font-bold"
+                            className="flex items-center justify-between gap-2 text-xs text-slate-700 font-bold"
                           >
-                                                        {msg}                   
-                                 {" "}
+                            <span>{typeof row === "string" ? row : row?.msg}</span>
+                            {row && typeof row === "object" && row.empId && (
+                              <button
+                                onClick={() => openAuditLogForEmp(row.empId, checkModalData.month)}
+                                className="flex-shrink-0 text-[9px] bg-white border border-indigo-200 text-indigo-600 px-2 py-0.5 rounded hover:bg-indigo-50 shadow-sm transition-colors"
+                                title="この社員・この月の計算ログを表示"
+                              >
+                                🔍監査
+                              </button>
+                            )}
                           </div>
                         ))}
                                              {" "}
@@ -13665,13 +13714,21 @@ const App = () => {
                                            {" "}
                       <div className="p-4 space-y-2">
                                                {" "}
-                        {checkModalData.warnings.map((msg, i) => (
+                        {checkModalData.warnings.map((row, i) => (
                           <div
                             key={i}
-                            className="text-xs text-slate-700 font-bold"
+                            className="flex items-center justify-between gap-2 text-xs text-slate-700 font-bold"
                           >
-                                                        {msg}                   
-                                 {" "}
+                            <span>{typeof row === "string" ? row : row?.msg}</span>
+                            {row && typeof row === "object" && row.empId && (
+                              <button
+                                onClick={() => openAuditLogForEmp(row.empId, checkModalData.month)}
+                                className="flex-shrink-0 text-[9px] bg-white border border-indigo-200 text-indigo-600 px-2 py-0.5 rounded hover:bg-indigo-50 shadow-sm transition-colors"
+                                title="この社員・この月の計算ログを表示"
+                              >
+                                🔍監査
+                              </button>
+                            )}
                           </div>
                         ))}
                                              {" "}
@@ -13690,13 +13747,21 @@ const App = () => {
                                            {" "}
                       <div className="p-4 space-y-2">
                                                {" "}
-                        {checkModalData.infos.map((msg, i) => (
+                        {checkModalData.infos.map((row, i) => (
                           <div
                             key={i}
-                            className="text-xs text-slate-700 font-bold"
+                            className="flex items-center justify-between gap-2 text-xs text-slate-700 font-bold"
                           >
-                                                        {msg}                   
-                                 {" "}
+                            <span>{typeof row === "string" ? row : row?.msg}</span>
+                            {row && typeof row === "object" && row.empId && (
+                              <button
+                                onClick={() => openAuditLogForEmp(row.empId, checkModalData.month)}
+                                className="flex-shrink-0 text-[9px] bg-white border border-indigo-200 text-indigo-600 px-2 py-0.5 rounded hover:bg-indigo-50 shadow-sm transition-colors"
+                                title="この社員・この月の計算ログを表示"
+                              >
+                                🔍監査
+                              </button>
+                            )}
                           </div>
                         ))}
                                              {" "}

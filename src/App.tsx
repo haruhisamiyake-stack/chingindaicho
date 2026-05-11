@@ -6020,8 +6020,8 @@ const App = () => {
 
               {selectedEmployeeId && master && data && selectedYear ? (
                 <>
-                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4 p-4 flex flex-col md:flex-row justify-between items-center gap-4">
-                    {/* 左側：氏名を一番左に、大きく強調 */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden mb-4 p-4 flex flex-wrap items-center gap-4">
+                    {/* 氏名・社員情報・操作系をすべて左寄せ1列に並べる（右側空白を作らない）。狭い画面では flex-wrap で自然に折り返す。 */}
                     <div className="flex items-center gap-6">
                       <div className="flex flex-col">
                         <div className="flex items-baseline gap-2">
@@ -6089,7 +6089,7 @@ const App = () => {
                       </div>
                     </div>
 
-                    {/* 右側：操作系（年度、社員切替、印刷など） */}
+                    {/* 操作系（年度、社員切替、住民税、前年コピー）：氏名・社員情報の右に続けて左寄せで並べる */}
                     <div className="flex flex-wrap items-center gap-3">
                       <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200 shadow-sm">
                         <span className="text-[10px] font-bold text-slate-500">

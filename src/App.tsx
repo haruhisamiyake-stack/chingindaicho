@@ -2848,9 +2848,17 @@ const App = () => {
     return () => unsubscribe();
   }, [isAuthReady]);
 
+  // selectedEmployeeId の自動補正:
+  // (1) selectedEmployeeId が null/空のとき → 先頭社員へ自動セット(初期表示用)
+  // (2) selectedEmployeeId が古い/存在しないIDのとき → 先頭社員へ補正(stale 検知)
+  //   旧実装は (1) だけを見ていたため、テナント切替後や旧データ移行直後に
+  //   employees[selectedEmployeeId] が undefined となり、賃金台帳が「新規従業員を追加」表示に
+  //   なってしまうことがあった。(2) のチェックを追加してこの状態から自動復旧する。
   useEffect(() => {
-    if (!selectedEmployeeId && Object.keys(employees).length > 0) {
-      setSelectedEmployeeId(Object.keys(employees)[0]);
+    const ids = Object.keys(employees);
+    if (ids.length === 0) return;
+    if (!selectedEmployeeId || !employees[selectedEmployeeId]) {
+      setSelectedEmployeeId(ids[0]);
     }
   }, [employees, selectedEmployeeId]);
 

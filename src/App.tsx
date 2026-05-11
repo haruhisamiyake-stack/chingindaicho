@@ -434,6 +434,25 @@ const getRateForMonth = (schedule = [], targetYearMonth) => {
   return currentRate;
 };
 
+// 厳密版: 対象月が一番早い適用開始年月より前なら 0 を返す。
+// 子ども・子育て支援金など「施行前は0」を明示したい新設制度向け。
+// 既存の getRateForMonth は施行前でも sorted[0].rate を返してしまうため別関数とし、
+// 健康保険・厚生年金・介護保険・雇用保険など既存料率の取得経路は変更しない。
+const getRateForMonthStrict = (schedule = [], targetYearMonth) => {
+  if (!schedule || schedule.length === 0) return 0;
+  const sorted = [...schedule].sort(
+    (a, b) => (a.startYearMonth || "").localeCompare(b.startYearMonth || "")
+  );
+  if (targetYearMonth < (sorted[0].startYearMonth || "")) return 0;
+  let currentRate = Number(sorted[0].rate) || 0;
+  sorted.forEach((row) => {
+    if ((row.startYearMonth || "") <= targetYearMonth) {
+      currentRate = Number(row.rate) || 0;
+    }
+  });
+  return currentRate;
+};
+
 // 優先順位: 締め時スナップショット > 会社個別/全体の料率スケジュール > デフォルト値
 // ※ individualValue は現在、通常の社会保険料率計算では原則 null を渡す設計
 const resolveRate = (individualValue, snapshotValue, schedule, targetYearMonth, defaultValue) => {
@@ -1490,7 +1509,15 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   const hRate = resolveRate(null, row.lockedSnapshotRates?.health, healthSchedule, targetYearMonth, 5.0);
   const pRate = resolveRate(null, row.lockedSnapshotRates?.pension, pensionSchedule, targetYearMonth, 9.15);
   const nRate = resolveRate(null, row.lockedSnapshotRates?.nursing, nursingSchedule, targetYearMonth, 0.8);
-  const cRate = resolveRate(null, row.lockedSnapshotRates?.childCare, childCareSchedule, targetYearMonth, 0.115);
+  // 子ども・子育て支援金は新設制度。施行年月より前の対象月は料率0とする(他の社保には影響させない)。
+  // 既存 resolveRate は対象月 < 最初の startYearMonth でも sorted[0].rate を返す仕様のため、childCare は専用に厳密版で取得する。
+  // lockedSnapshotRates?.childCare があれば従来通りそれを優先(ロック確定値を維持)。
+  const _cSnap = row.lockedSnapshotRates?.childCare;
+  const cRate = (_cSnap !== undefined && _cSnap !== null && _cSnap !== "")
+    ? Number(_cSnap)
+    : (childCareSchedule && childCareSchedule.length > 0
+        ? getRateForMonthStrict(childCareSchedule, targetYearMonth)
+        : 0.115);
   const eRate = resolveRate(null, row.lockedSnapshotRates?.employment, employmentSchedule, employmentTargetYearMonth, 6.0);
 
   const hasHealth =
@@ -1805,7 +1832,14 @@ const calculateBonusResult = ({
   const hRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.health, healthSchedule, bonusTargetYearMonth, 5.0);
   const pRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.pension, pensionSchedule, bonusTargetYearMonth, 9.15);
   const nRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.nursing, nursingSchedule, bonusTargetYearMonth, 0.8);
-  const cRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.childCare, childCareSchedule, bonusTargetYearMonth, 0.115);
+  // 子ども・子育て支援金は新設制度。賞与の場合も支給日(payDate)ベースの bonusTargetYearMonth で判定し、
+  // 施行年月より前なら 0 とする。bonusMonthRow.lockedSnapshotRates?.childCare があれば優先(ロック確定値を維持)。
+  const _bCSnap = bonusMonthRow.lockedSnapshotRates?.childCare;
+  const cRate = (_bCSnap !== undefined && _bCSnap !== null && _bCSnap !== "")
+    ? Number(_bCSnap)
+    : (childCareSchedule && childCareSchedule.length > 0
+        ? getRateForMonthStrict(childCareSchedule, bonusTargetYearMonth)
+        : 0.115);
   const eRate = resolveRate(null, bonusMonthRow.lockedSnapshotRates?.employment, employmentSchedule, bonusTargetYearMonth, 6.0);
 
 
@@ -2883,11 +2917,17 @@ const App = () => {
         row.periodEnd && typeof row.periodEnd === "string" && row.periodEnd.length >= 7
           ? row.periodEnd.slice(0, 7)
           : targetYearMonth;
+      // ★ childCare は新設制度。ロック対象月が施行年月より前ならスナップショットも 0 で固定する。
+      //   既存 resolveRate は施行前でも sorted[0].rate を返すため、childCare 専用に getRateForMonthStrict 経由で取得する。
+      //   他の社会保険・雇用保険は従来通り resolveRate を使用(挙動変更なし)。
+      const _snapChildCareRate = (_snapChildCareSched && _snapChildCareSched.length > 0)
+        ? getRateForMonthStrict(_snapChildCareSched, targetYearMonth)
+        : 0.115;
       const lockedSnapshotRates = {
         health: resolveRate(null, null, _snapHealthSched, targetYearMonth, 5.0),
         pension: resolveRate(null, null, _snapPensionSched, targetYearMonth, 9.15),
         nursing: resolveRate(null, null, _snapNursingSched, targetYearMonth, 0.8),
-        childCare: resolveRate(null, null, _snapChildCareSched, targetYearMonth, 0.115),
+        childCare: _snapChildCareRate,
         employment: resolveRate(null, null, _snapEmploymentSched, employmentTargetYearMonth, 6.0),
       };
       await saveDoc(PATHS.employee(tenantId, empId), {

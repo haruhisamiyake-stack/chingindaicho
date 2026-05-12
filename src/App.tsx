@@ -1275,6 +1275,10 @@ const calculateMonthlyCore = ({
         socialInsGross,
         employmentInsGross,
         stdAmount,
+        // estStdAmount: stdBase(=socialInsGross) から標準報酬月額表で推定。stdAmount 非依存のため未入力時も値はある。
+        // employment(雇用保険料) も grossPay ベースで算出済み(line 1262-1264)で stdAmount 非依存。
+        // どちらも calculateMonthlyResult 側で UI に伝播して、未入力時でも表示可能にする。
+        estStdAmount,
         hRate, pRate, nRate, cRate, eRate,
         employment,
         hasEmployment,
@@ -1668,7 +1672,18 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
         calcLog.push(...debug.incomeTaxResultLog);
       }
     }
-    return { ...row, totalDeductions: null, netPay: null, calcLog };
+    // stdAmount 未入力(error="stdAmountMissing")でも、stdAmount 非依存で算出済みの
+    // 想定報酬月額(estStdAmount)と雇用保険料(employment)は UI に届ける。
+    // incomeTaxNull 経路の debug にも employment は含まれており、
+    // estStdAmount は無いので ?? 0 で 0 にフォールバック(従来の「未算出=0」表示と同じ)。
+    return {
+      ...row,
+      estStdAmount: debug?.estStdAmount ?? 0,
+      employment: debug?.employment ?? 0,
+      totalDeductions: null,
+      netPay: null,
+      calcLog,
+    };
   }
 
   const totalDeductions = coreResult.socialTotal + coreResult.incomeTax + residentTax + coreResult.totalCustomDeds;
@@ -7230,16 +7245,20 @@ const App = () => {
                             </td>
                             {MONTHS.map((m) => {
                               const calcVal = results.monthlyResults[m]?.incomeTax;
+                              // stdAmount 未入力で calculateMonthlyResult が incomeTax フィールドを含まずに返した場合(undefined) も、
+                              // 明示的 null(税額表未登録 / 乙欄高額帯範囲外などで計算不可) も、どちらも「計算不可」表示として扱う。
+                              // undefined を formatCurrency(=> "0") に渡してしまい 0円と誤認されるのを防ぐ。
+                              const isUncalc = calcVal === null || calcVal === undefined;
                               const isOv = currentYearData.manualOverrides?.[m]?.incomeTax?.enabled;
                               const ovData = currentYearData.manualOverrides?.[m]?.incomeTax;
                               return (
                                 <td
                                   key={m}
-                                  className={`border border-gray-300 p-0.5 text-right font-bold text-[11px] ${isOv ? "bg-amber-50" : calcVal === null ? "bg-red-50" : ""}`}
+                                  className={`border border-gray-300 p-0.5 text-right font-bold text-[11px] ${isOv ? "bg-amber-50" : isUncalc ? "bg-red-50" : ""}`}
                                 >
                                   <div className="flex items-center justify-end gap-0.5">
-                                    <span className={isOv ? "text-amber-700 font-black" : calcVal === null ? "text-red-600" : "text-orange-600"}>
-                                      {isOv ? formatCurrency(Number(ovData.value) || 0) : calcVal === null ? "計算不可" : formatCurrency(calcVal)}
+                                    <span className={isOv ? "text-amber-700 font-black" : isUncalc ? "text-red-600" : "text-orange-600"}>
+                                      {isOv ? formatCurrency(Number(ovData.value) || 0) : isUncalc ? "計算不可" : formatCurrency(calcVal)}
                                     </span>
                                     <button
                                       disabled={isMonthCellLocked(m)}

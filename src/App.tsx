@@ -6318,7 +6318,11 @@ const App = () => {
                          印刷は .print-area の別 DOM(LedgerPrintModal)経由のためこのラッパーには影響しない。 */}
                     <div className="overflow-auto relative max-h-[calc(100vh-240px)] print:max-h-none print:overflow-visible">
                       <table className="w-full border-collapse">
-                        <thead className="sticky top-0 z-40 shadow-sm">
+                        {/* top-0 だと border-collapse の th 上端 border(1px gray-300) がスクロール容器の
+                            最上端と重なり、Chrome で月見出し行の上部が数px見切れる。top-[2px] で sticky 位置を
+                            2px 下げて border + 内容上端の描画余白を確保する。横スクロール時の sticky 左列
+                            (th sticky left-0 z-50) は別軸なので干渉しない。 */}
+                        <thead className="sticky top-[2px] z-40 shadow-sm">
                           <tr className="bg-gray-100 text-gray-500 text-[10px] font-black uppercase tracking-tighter">
                             <th className="border border-gray-300 p-2 sticky left-0 z-50 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
                               <div className="text-left font-black text-gray-500 text-[11px]">

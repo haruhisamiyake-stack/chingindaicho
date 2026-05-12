@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, fetchDocs, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
@@ -6186,7 +6186,7 @@ const App = () => {
                               key={idx}
                               className="ml-2 text-[10px] font-bold bg-amber-100 text-amber-700 px-2 py-0.5 rounded border border-amber-300 shadow-sm animate-pulse whitespace-nowrap"
                             >
-                                                            ⚠ {alertLabel} 確認
+                                                                                      ⚠ {alertLabel} 確認
                             </span>
                           ))}
                         </div>
@@ -6324,7 +6324,7 @@ const App = () => {
                             (th sticky left-0 z-50) は別軸なので干渉しない。 */}
                         <thead className="sticky top-[2px] z-40 shadow-sm">
                           <tr className="bg-gray-100 text-gray-500 text-[10px] font-black uppercase tracking-tighter">
-                            <th className="border border-gray-300 p-2 sticky left-0 z-50 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
+                            <th className="border border-gray-300 p-2 sticky top-[2px] left-0 z-50 bg-gray-100 min-w-[180px] w-[180px] align-bottom">
                               <div className="text-left font-black text-gray-500 text-[11px]">
                                 項目 / 支給月
                               </div>
@@ -6332,7 +6332,7 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <th
                                 key={m}
-                                className="border border-gray-300 p-1 min-w-[76px] w-[76px] text-center bg-slate-50 align-top group"
+                                className="border border-gray-300 p-1 min-w-[76px] w-[76px] text-center bg-slate-50 sticky top-[2px] z-40 align-bottom group"
                               >
                                 <div className="flex justify-between items-center mb-1 px-1">
                                   <button
@@ -6436,10 +6436,10 @@ const App = () => {
                               </th>
                             ))}
                             {/* ▼ 右側5列（給与累計・賞与1・賞与2・賞与累計・総合計） ▼ */}
-                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-slate-100 text-slate-600 sticky right-[350px] z-25 font-black border-l-0 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-slate-100 text-slate-600 sticky top-[2px] right-[350px] z-40 font-black border-l-0 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] align-bottom text-[10px]">
                               給与累計
                             </th>
-                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[270px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky top-[2px] right-[270px] z-40 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
                                 賞与①
                               </div>
@@ -6491,7 +6491,7 @@ const App = () => {
                                 <span>6カ月超</span>
                               </label>
                             </th>
-                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky right-[190px] z-25 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky top-[2px] right-[190px] z-40 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
                                 賞与②
                               </div>
@@ -6543,10 +6543,10 @@ const App = () => {
                                 <span>6カ月超</span>
                               </label>
                             </th>
-                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 font-black align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[90px] w-[90px] bg-indigo-50 text-indigo-800 sticky top-[2px] right-[100px] z-40 font-black align-bottom text-[10px]">
                               賞与累計
                             </th>
-                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-200 text-slate-800 sticky right-0 z-50 font-black align-bottom text-[10px]">
+                            <th className="border border-gray-300 p-1.5 min-w-[100px] w-[100px] bg-slate-200 text-slate-800 sticky top-[2px] right-0 z-50 font-black align-bottom text-[10px]">
                               総合計
                             </th>
                           </tr>

@@ -29,6 +29,7 @@ import {
   Lock,
   Unlock,
   Copy,
+  ChevronsRight,
   Building,
   Percent,
   Save,
@@ -1293,6 +1294,58 @@ const calculateMonthlyCore = ({
     ? roundEmploymentInsurance(employmentInsGross * (eRate / 1000))
     : 0;
 
+  // 支給なし月(grossPay <= 0)の早期 return。
+  // 入社前・退社後・休職月など、月次行は初期化済みだが実際の支給が無い月で、
+  // 標準報酬月額の入力有無に関わらず全控除を 0 にする。
+  // 「計算不可」表示や過去値 stdAmount による誤控除算定を防ぐ。
+  // result.calcSuccess=true, result.noIncome=true で返すため handleSave の null tax 判定にも影響しない。
+  if (grossPay <= 0) {
+    return {
+      result: {
+        grossPay: 0,
+        health: 0,
+        pension: 0,
+        nursing: 0,
+        childCare: 0,
+        employment: 0,
+        incomeTax: 0,
+        taxWarning: null,
+        isBlocking: false,
+        socialTotal: 0,
+        // 想定標準報酬月額は推定値として研ぐ(grossPay=0 でも stdBase=0 経由で最低等級値に約まる)
+        estStdAmount: estStdAmountHealth,
+        estStdAmountHealth,
+        estStdAmountPension,
+        totalCustomDeds: 0,
+        calcSuccess: true,
+        // 支給なし月フラグ。calculateMonthlyResult / UI / calcLog で判定に使う。
+        noIncome: true,
+      },
+      error: null,
+      debug: {
+        status: "noIncome",
+        noIncome: true,
+        grossPay: 0,
+        allowanceAmounts,
+        deductionAmounts,
+        socialInsGross: 0,
+        employmentInsGross: 0,
+        stdAmountHealth,
+        stdAmountPension,
+        estStdAmountHealth,
+        estStdAmountPension,
+        hRate, pRate, nRate, cRate, eRate,
+        ins: { health: 0, pension: 0, nursing: 0, childCare: 0 },
+        employment: 0,
+        socialTotal: 0,
+        gradeInfo: null,
+        gradeInfoHealth: null,
+        gradeInfoPension: null,
+        incomeTaxResultLog: [],
+      },
+    };
+  }
+
   // B案: 健保用・厚年用それぞれの「実際の標準報酬月額」未入力フラグを独立に持つ。
   // 加入区分が ON かつ stdAmount が null のときだけ true。
   const isMissingHealthStd = hasHealth && stdAmountHealth === null;
@@ -1561,30 +1614,47 @@ const pushSocialInsLogs = ({
 // 一覧UI（賃金台帳・給与明細一覧表・支給控除一覧表）の社会保険料セル表示用ヘルパー。
 // 0円表示が「未加入」と「計算不可（標準報酬月額未設定）」のどちらなのか判別できないという誤認
 // リスクを排除するため、各セルでこのヘルパーを使い「対象外/計算不可/実額」を切り分ける。
-const formatSocialInsCell = ({ kind, value, hasHealth, hasPension, hasEmployment, hasNursingIns, stdAmtSet }) => {
+const formatSocialInsCell = ({
+  kind, value,
+  hasHealth, hasPension, hasEmployment, hasNursingIns,
+  // 旧 stdAmtSet は後方互換のため受け取り続けるが、新フラグが未指定の場合のフォールバックとして使う。
+  stdAmtSet,
+  // 健保用 / 厚年用 別々のフラグ。健保用 stdAmount が設定済みなら stdAmtHealthSet=true、
+  // 厚年用 stdAmount が設定済みなら stdAmtPensionSet=true。
+  // health/nursing → stdAmtHealthSet、 pension/childCare → stdAmtPensionSet を見る。
+  stdAmtHealthSet,
+  stdAmtPensionSet,
+}) => {
+  const _hSet = (stdAmtHealthSet !== undefined) ? stdAmtHealthSet : stdAmtSet;
+  const _pSet = (stdAmtPensionSet !== undefined) ? stdAmtPensionSet : stdAmtSet;
   // 表示文言は空欄に統一（「対象外」「非加入」と書くと帳票上でノイズになるため）。
-  // 0円徴収は amount() 経由で従来通り "0" と区別表示される。内部判定ロジックは未変更。
+  // 0円徴収は amount() 経由で従来通り "0" と区別表示される。
+  // value === null は「片方未入力で計算不可」を意味する(B案 partial-missing 経路)。
   const exempt = { label: "", className: "text-slate-400 italic font-normal" };
   const uncalc = { label: "計算不可", className: "text-rose-600 font-black" };
   const amount = (v) => ({ label: formatCurrency(v ?? 0), className: "text-gray-500 font-mono" });
   if (kind === "health") {
     if (!hasHealth) return exempt;
-    if (!stdAmtSet) return uncalc;
+    if (!_hSet) return uncalc;
+    if (value === null) return uncalc;
     return amount(value);
   }
   if (kind === "pension") {
     if (!hasPension) return exempt;
-    if (!stdAmtSet) return uncalc;
+    if (!_pSet) return uncalc;
+    if (value === null) return uncalc;
     return amount(value);
   }
   if (kind === "nursing") {
     if (!hasHealth || !hasNursingIns) return exempt;
-    if (!stdAmtSet) return uncalc;
+    if (!_hSet) return uncalc;
+    if (value === null) return uncalc;
     return amount(value);
   }
   if (kind === "childCare") {
     if (!hasPension) return exempt;
-    if (!stdAmtSet) return uncalc;
+    if (!_pSet) return uncalc;
+    if (value === null) return uncalc;
     return amount(value);
   }
   if (kind === "employment") {
@@ -1733,6 +1803,17 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
   });
 
   calcLog.push(`- 総支給額: ${formatCurrency(debug.grossPay)}円`);
+
+  // 支給なし月(coreResult.noIncome=true): 控除計算を完全にスキップし、全項目 0 で短絡終了。
+  // stdAmountMissing チェックも通らず「計算不可」表示にもならない。
+  if (coreResult && coreResult.noIncome === true) {
+    calcLog.push("💤 支給なし月のため、社会保険料・所得税・差引支給額の計算をスキップします。");
+    calcLog.push("- 控除合計: 0円");
+    calcLog.push("- 差引支給額: 0円");
+    // residentTax の有無に関わらず totalDeductions / netPay を 0 に強制。
+    return { ...row, ...coreResult, totalDeductions: 0, netPay: 0, calcLog };
+  }
+
   calcLog.push(`\n【社会保険料】`);
   calcLog.push(`- 社保対象額(報酬月額): ${formatCurrency(debug.socialInsGross)}円`);
   // 標準報酬月額の表示を「未加入で対象外」「加入だが未設定」「設定済み」の3ケースに分離。
@@ -4710,6 +4791,13 @@ const App = () => {
   const dispChildCare = isBonus ? (calcResult.childCare || 0) : slipOvOr("childCare", calcResult.childCare);
   const dispIncomeTax = isBonus ? (calcResult.incomeTax || 0) : slipOvOr("incomeTax", calcResult.incomeTax);
   const dispResidentTax = isBonus ? (Number(rowData.residentTax) || 0) : slipOvOr("residentTax", Number(rowData.residentTax) || 0);
+  // SocialInsCell 用: null を保持(override 有効時は数値、それ以外は calcResult.X をそのまま渡す)。
+  // dispXxx は 0 化されてしまうため、formatSocialInsCell の value===null 判定が効かない。
+  // employment は常に数値のため特別処理不要。
+  const dispHealthCell    = isBonus ? calcResult.health    : (slipMonthOvs.health?.enabled    ? (Number(slipMonthOvs.health.value)    || 0) : calcResult.health);
+  const dispPensionCell   = isBonus ? calcResult.pension   : (slipMonthOvs.pension?.enabled   ? (Number(slipMonthOvs.pension.value)   || 0) : calcResult.pension);
+  const dispNursingCell   = isBonus ? calcResult.nursing   : (slipMonthOvs.nursing?.enabled   ? (Number(slipMonthOvs.nursing.value)   || 0) : calcResult.nursing);
+  const dispChildCareCell = isBonus ? calcResult.childCare : (slipMonthOvs.childCare?.enabled ? (Number(slipMonthOvs.childCare.value) || 0) : calcResult.childCare);
   const dispCustomDeductions = deductionDefs.map(def => ({
     id: def.id,
     name: def.name,
@@ -4737,25 +4825,46 @@ const App = () => {
   const _slipHasPension = emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1;
   const _slipHasEmployment = emp.master.employmentIns === 1;
   const _slipHasNursingIns = !isBonus && rowData.hasNursingIns === 1;
-  const _slipStdAmtSet = isBonus || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+  // 健保用 / 厚年用 / legacy stdAmount をそれぞれ判定。賞与時は標準報酬月額に依存しないため両方 true。
+  // health/nursing → stdAmtHealthSet、 pension/childCare → stdAmtPensionSet を参照する。
+  // legacy stdAmount のみ入力された旧データもフォールバックで認識する。
+  // 支給なし月(calcResult.noIncome=true) は全控除が 0 確定のため、stdAmount 未入力でも「計算不可」ではなく「0」を表示。
+  const _slipStdAmtHealthSet = isBonus
+    || calcResult.noIncome === true
+    || (rowData.stdAmountHealth != null && rowData.stdAmountHealth !== "" && Number(rowData.stdAmountHealth) > 0)
+    || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+  const _slipStdAmtPensionSet = isBonus
+    || calcResult.noIncome === true
+    || (rowData.stdAmountPension != null && rowData.stdAmountPension !== "" && Number(rowData.stdAmountPension) > 0)
+    || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+  // 後方互換: 旧 stdAmtSet は「両方とも設定済み」を意味する(片方欠落でも banner などで警告を出すため厳しめ判定)。
+  const _slipStdAmtSet = _slipStdAmtHealthSet && _slipStdAmtPensionSet;
   const _slipInsFlags = {
     hasHealth: _slipHasHealth,
     hasPension: _slipHasPension,
     hasEmployment: _slipHasEmployment,
     hasNursingIns: _slipHasNursingIns,
     stdAmtSet: _slipStdAmtSet,
+    stdAmtHealthSet: _slipStdAmtHealthSet,
+    stdAmtPensionSet: _slipStdAmtPensionSet,
   };
   // 標準報酬月額未設定で健保／厚年が「計算不可」になるケース。banner で帳票冒頭に明示する。
   const _slipStdMissingWarning = !isBonus && !_slipStdAmtSet && (_slipHasHealth || _slipHasPension);
 
+  // 所得税が null(片方の標準報酬月額未入力で計算不可) のときは「計算不可」を明示表示する。
+  // override が有効ならそちらを優先(slipOvOr で 0 化されたものは override 数値なので使ってよい)。
+  const _slipIncomeTaxRaw = isBonus ? calcResult.incomeTax : (slipMonthOvs.incomeTax?.enabled ? (Number(slipMonthOvs.incomeTax.value) || 0) : calcResult.incomeTax);
+  const _slipIncomeTaxIsUncalc = _slipIncomeTaxRaw === null || _slipIncomeTaxRaw === undefined;
   const deductionItems = [
-    { label: "健康保険料", value: <SocialInsCell kind="health" value={dispHealth} {..._slipInsFlags} /> },
-    { label: "厚生年金保険料", value: <SocialInsCell kind="pension" value={dispPension} {..._slipInsFlags} /> },
-    // 健保加入かつ介護対象なら、std未設定でも「計算不可」を見せたいので _slipHasNursingIns ベースで表示判定する。
-    ...(_slipHasNursingIns ? [{ label: "介護保険料", value: <SocialInsCell kind="nursing" value={dispNursing} {..._slipInsFlags} /> }] : []),
+    { label: "健康保険料", value: <SocialInsCell kind="health" value={dispHealthCell} {..._slipInsFlags} /> },
+    { label: "厚生年金保険料", value: <SocialInsCell kind="pension" value={dispPensionCell} {..._slipInsFlags} /> },
+    // 健保加入かつ介護対象なら、std未設定/null でも「計算不可」を見せたいので _slipHasNursingIns ベースで表示判定する。
+    ...(_slipHasNursingIns ? [{ label: "介護保険料", value: <SocialInsCell kind="nursing" value={dispNursingCell} {..._slipInsFlags} /> }] : []),
     { label: "雇用保険料", value: <SocialInsCell kind="employment" value={dispEmployment} {..._slipInsFlags} /> },
-    ...(dispChildCare > 0 ? [{ label: "子ども・子育て", value: formatCurrency(dispChildCare) }] : []),
-    { label: "所得税", value: formatCurrency(dispIncomeTax) },
+    // 子ども子育て: 厚年加入なら無条件で表示(従来の「> 0 で非表示」を撤廃)。SocialInsCell が「計算不可/0/数値」を正しく出し分ける。
+    ...(_slipHasPension ? [{ label: "子ども・子育て", value: <SocialInsCell kind="childCare" value={dispChildCareCell} {..._slipInsFlags} /> }] : []),
+    // 所得税: null は「計算不可」と明示表示する(¥0 表示の誤認を防ぐ)。
+    { label: "所得税", value: _slipIncomeTaxIsUncalc ? <span className="text-rose-600 font-black">計算不可</span> : formatCurrency(dispIncomeTax) },
     { label: "住民税", value: formatCurrency(dispResidentTax) },
     ...dispCustomDeductions.map(d => ({ label: d.name, value: formatCurrency(d.value) })),
   ];
@@ -4866,7 +4975,12 @@ const App = () => {
             差引支給額
           </div>
           <div className="w-3/5 text-right p-3 text-3xl font-black font-mono tracking-tighter">
-            <span className="text-xl mr-1 font-sans font-bold">¥</span>{formatCurrency(dispNetPay)}
+            {/* netPay が null(片方の標準報酬月額未入力で計算不可) の場合、grossPay - dispTotalDeductions の
+                arithmetic 再計算結果ではなく「計算不可」を表示する(誤った金額の印字を防ぐ)。
+                override が有効なら override の数値が dispNetPay に入っているので通常表示でよい。 */}
+            {(!isBonus && !slipMonthOvs.netPay?.enabled && (calcResult.netPay === null || calcResult.netPay === undefined))
+              ? <span className="text-rose-600">計算不可</span>
+              : <><span className="text-xl mr-1 font-sans font-bold">¥</span>{formatCurrency(dispNetPay)}</>}
           </div>
         </div>
       </div>
@@ -4980,7 +5094,7 @@ const App = () => {
           return out;
         })(),
       };
-      // 表示用個別控除値
+      // 表示用個別控除値(算術用、null は 0 に倒される)
       const _dHealth = isBonus ? (calc.health || 0) : ovOr("health", calc.health);
       const _dPension = isBonus ? (calc.pension || 0) : ovOr("pension", calc.pension);
       const _dNursing = isBonus ? (calc.nursing || 0) : ovOr("nursing", calc.nursing);
@@ -4995,6 +5109,14 @@ const App = () => {
         : (empOvs.netPay?.enabled
             ? (Number(empOvs.netPay.value) || 0)
             : ((Number(calc.grossPay) || 0) - _dTotalDeductions));
+      // null 保持版(SocialInsCell / 所得税 / 差引支給額の「計算不可」表示判定用)。
+      // override が有効ならその数値、無効なら calc.X(null or 数値) をそのまま採用。
+      const _dHealthCell    = isBonus ? calc.health    : (empOvs.health?.enabled    ? (Number(empOvs.health.value)    || 0) : calc.health);
+      const _dPensionCell   = isBonus ? calc.pension   : (empOvs.pension?.enabled   ? (Number(empOvs.pension.value)   || 0) : calc.pension);
+      const _dNursingCell   = isBonus ? calc.nursing   : (empOvs.nursing?.enabled   ? (Number(empOvs.nursing.value)   || 0) : calc.nursing);
+      const _dChildCareCell = isBonus ? calc.childCare : (empOvs.childCare?.enabled ? (Number(empOvs.childCare.value) || 0) : calc.childCare);
+      const _dIncomeTaxRaw  = isBonus ? calc.incomeTax : (empOvs.incomeTax?.enabled ? (Number(empOvs.incomeTax.value) || 0) : calc.incomeTax);
+      const _dNetPayRaw     = isBonus ? calc.netPay    : (empOvs.netPay?.enabled    ? (Number(empOvs.netPay.value)    || 0) : calc.netPay);
       const dispCalc = isBonus ? calc : {
         ...calc,
         health: _dHealth,
@@ -5005,6 +5127,13 @@ const App = () => {
         incomeTax: _dIncomeTax,
         netPay: _dNetPay,
         totalDeductions: _dTotalDeductions,
+        // null 保持版を追加(印刷物の「計算不可」表示判定用、sum 計算には影響しない)
+        healthCell: _dHealthCell,
+        pensionCell: _dPensionCell,
+        nursingCell: _dNursingCell,
+        childCareCell: _dChildCareCell,
+        incomeTaxRaw: _dIncomeTaxRaw,
+        netPayRaw: _dNetPayRaw,
       };
 
       if (calc.grossPay > 0 || Number(row.basePay) > 0) {
@@ -5033,9 +5162,24 @@ const App = () => {
         const _hasPension = m.pensionIns !== undefined ? m.pensionIns === 1 : m.socialIns === 1;
         const _hasEmployment = m.employmentIns === 1;
         const _hasNursingIns = !isBonus && row.hasNursingIns === 1;
-        // 賞与は標準報酬月額に依存しないため stdAmtSet=true 扱いで実額表示にする。
-        const _stdAmtSet = isBonus || (row.stdAmount != null && row.stdAmount !== "" && Number(row.stdAmount) > 0);
-        const _insFlags = { hasHealth: _hasHealth, hasPension: _hasPension, hasEmployment: _hasEmployment, hasNursingIns: _hasNursingIns, stdAmtSet: _stdAmtSet };
+        // 賞与は標準報酬月額に依存しないため両方 true 扱いで実額表示にする。
+        // 健保用 stdAmount は health/nursing、 厚年用 stdAmount は pension/childCare の判定に使う。
+        // legacy stdAmount のみのデータもフォールバック認識する。
+        // 支給なし月(calc.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
+        const _stdAmtHealthSet = isBonus
+          || calc.noIncome === true
+          || (row.stdAmountHealth != null && row.stdAmountHealth !== "" && Number(row.stdAmountHealth) > 0)
+          || (row.stdAmount != null && row.stdAmount !== "" && Number(row.stdAmount) > 0);
+        const _stdAmtPensionSet = isBonus
+          || calc.noIncome === true
+          || (row.stdAmountPension != null && row.stdAmountPension !== "" && Number(row.stdAmountPension) > 0)
+          || (row.stdAmount != null && row.stdAmount !== "" && Number(row.stdAmount) > 0);
+        const _stdAmtSet = _stdAmtHealthSet && _stdAmtPensionSet;
+        const _insFlags = {
+          hasHealth: _hasHealth, hasPension: _hasPension, hasEmployment: _hasEmployment,
+          hasNursingIns: _hasNursingIns,
+          stdAmtSet: _stdAmtSet, stdAmtHealthSet: _stdAmtHealthSet, stdAmtPensionSet: _stdAmtPensionSet,
+        };
         return { empCode: m.employeeCode || "-", name: m.name || "未設定", row: dispRow, calc: dispCalc, flags: _insFlags };
       }
       return null;
@@ -5096,17 +5240,23 @@ const App = () => {
                 ))}
                 <td className="border-r border-black p-1 text-right font-bold text-blue-700 bg-blue-50/50">{formatCurrency(d.calc.grossPay)}</td>
                 
-                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="health" value={d.calc.health} {...d.flags} /></td>
-                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="pension" value={d.calc.pension} {...d.flags} /></td>
-                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="nursing" value={d.calc.nursing} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="health" value={d.calc.healthCell} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="pension" value={d.calc.pensionCell} {...d.flags} /></td>
+                <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="nursing" value={d.calc.nursingCell} {...d.flags} /></td>
                 <td className="border-r border-gray-400 p-1 text-right"><SocialInsCell kind="employment" value={d.calc.employment} {...d.flags} /></td>
-                <td className="border-r border-gray-400 p-1 text-right font-bold text-orange-700">{formatCurrency(d.calc.incomeTax)}</td>
+                {/* 所得税: null は「計算不可」と明示表示する(¥0 表示の誤認を防ぐ)。 */}
+                <td className={`border-r border-gray-400 p-1 text-right font-bold ${d.calc.incomeTaxRaw === null || d.calc.incomeTaxRaw === undefined ? "text-rose-600 font-black" : "text-orange-700"}`}>
+                  {d.calc.incomeTaxRaw === null || d.calc.incomeTaxRaw === undefined ? "計算不可" : formatCurrency(d.calc.incomeTax)}
+                </td>
                 <td className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.row.residentTax)}</td>
                 {deductionDefs.map(def => (
                   <td key={def.id} className="border-r border-gray-400 p-1 text-right font-mono">{formatCurrency(d.row.deductionAmounts?.[def.id])}</td>
                 ))}
-                
-                <td className="p-1 text-right font-bold text-emerald-700 bg-emerald-50/50">{formatCurrency(d.calc.netPay)}</td>
+
+                {/* 差引支給額: null は「計算不可」と明示表示する。grossPay - dispTotalDeductions の arithmetic 結果を出さない。 */}
+                <td className={`p-1 text-right font-bold ${d.calc.netPayRaw === null || d.calc.netPayRaw === undefined ? "bg-rose-50 text-rose-600 font-black" : "bg-emerald-50/50 text-emerald-700"}`}>
+                  {d.calc.netPayRaw === null || d.calc.netPayRaw === undefined ? "計算不可" : formatCurrency(d.calc.netPay)}
+                </td>
               </tr>
             )) : (
               <tr>
@@ -6140,12 +6290,23 @@ const App = () => {
                           const isDisabled = isYearLocked || isMonthLocked || isMonthGloballyLocked(selectedYear, ledgerSelectedMonth);
 
                           // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。
+                          // 健保用 stdAmount (健保・介護)、 厚年用 stdAmount (厚年・子ども子育て) を別々に判定。
+                          // legacy stdAmount のみのデータもフォールバック認識する。
+                          // 支給なし月(calcResult.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
+                          const _ic_stdAmtHealthSet = calcResult.noIncome === true
+                            || (rowData.stdAmountHealth != null && rowData.stdAmountHealth !== "" && Number(rowData.stdAmountHealth) > 0)
+                            || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+                          const _ic_stdAmtPensionSet = calcResult.noIncome === true
+                            || (rowData.stdAmountPension != null && rowData.stdAmountPension !== "" && Number(rowData.stdAmountPension) > 0)
+                            || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
                           const _insFlags = {
                             hasHealth: emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1,
                             hasPension: emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1,
                             hasEmployment: emp.master.employmentIns === 1,
                             hasNursingIns: rowData.hasNursingIns === 1,
-                            stdAmtSet: rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0,
+                            stdAmtSet: _ic_stdAmtHealthSet && _ic_stdAmtPensionSet,
+                            stdAmtHealthSet: _ic_stdAmtHealthSet,
+                            stdAmtPensionSet: _ic_stdAmtPensionSet,
                           };
 
                           return (
@@ -6236,8 +6397,9 @@ const App = () => {
                                 <SocialInsCell kind="employment" value={calcResult.employment} {..._insFlags} />
                               </td>
                                                          {" "}
-                              <td className="border border-slate-200 p-2 text-right bg-orange-50/30 text-orange-600 font-bold">
-                                {formatCurrency(calcResult.incomeTax)}
+                              <td className={`border border-slate-200 p-2 text-right font-bold ${calcResult.incomeTax === null || calcResult.incomeTax === undefined ? "bg-rose-50 text-rose-600 font-black" : "bg-orange-50/30 text-orange-600"}`}>
+                                {/* 所得税: null は「計算不可」表示(¥0 表示で誤認を防ぐ) */}
+                                {calcResult.incomeTax === null || calcResult.incomeTax === undefined ? "計算不可" : formatCurrency(calcResult.incomeTax)}
                               </td>
                                                                                
                                    {" "}
@@ -6297,8 +6459,9 @@ const App = () => {
                                 </td>
                               ))}
                                                          {" "}
-                              <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700">
-                                {formatCurrency(calcResult.netPay)}
+                              <td className={`border border-slate-200 p-2 text-right font-black ${calcResult.netPay === null || calcResult.netPay === undefined ? "bg-rose-50 text-rose-600" : "bg-emerald-50/50 text-emerald-700"}`}>
+                                {/* 差引支給額: null は「計算不可」表示 */}
+                                {calcResult.netPay === null || calcResult.netPay === undefined ? "計算不可" : formatCurrency(calcResult.netPay)}
                               </td>
                                                        {" "}
                             </tr>
@@ -7982,46 +8145,95 @@ const App = () => {
                                       </span>
                                     </div>
                                   )}
-                                  <input
-                                    type="number"
-                                    disabled={
-                                      isMonthCellLocked(m) ||
-                                      !isApplicable
-                                    }
-                                    value={stdAmount || ""}
-                                    onChange={(e) =>
-                                      updateMonthly(
-                                        selectedYear,
-                                        m,
-                                        "stdAmountHealth",
-                                        Number(e.target.value)
-                                      )
-                                    }
-                                    className={`w-full text-right outline-none font-black font-mono text-[11px] px-0.5 mt-2 bg-transparent ${
-                                      isUnset
-                                        ? "text-red-600 placeholder-red-300"
-                                        : gradeDiff >= 2
-                                        ? "text-red-600"
-                                        : hasDeviation
-                                        ? "text-amber-700"
-                                        : "text-blue-900"
-                                    } ${
-                                      isMonthCellLocked(m) ||
-                                      !isApplicable
-                                        ? "cursor-not-allowed text-slate-400"
-                                        : ""
-                                    }`}
-                                    placeholder={
-                                      isApplicable ? "入力必須" : "不要"
-                                    }
-                                    title={
-                                      gradeDiff >= 2
-                                        ? `標準報酬月額が推定値と大きく異なります（${gradeDiff}等級差）。届出内容または入力誤りを確認してください。`
-                                        : hasDeviation
-                                        ? "給与額から推定される標準報酬月額と入力値が異なります。算定基礎届・月額変更届の内容を確認してください。"
-                                        : ""
-                                    }
-                                  />
+                                  <div className="flex items-center gap-0.5 mt-2">
+                                    {/* 前月コピー: 押下で前月の stdAmountHealth(無ければ legacy stdAmount)を当月へ複製する。
+                                        1月(=前月なし)、月次ロック中、未加入(!isApplicable) は disabled。 */}
+                                    <button
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable ||
+                                        m === "01"
+                                      }
+                                      onClick={() => {
+                                        const prevKey = String(parseInt(m, 10) - 1).padStart(2, "0");
+                                        const prevRow = currentYearData.monthly[prevKey] || {};
+                                        const prevVal = (prevRow.stdAmountHealth != null && prevRow.stdAmountHealth !== "")
+                                          ? prevRow.stdAmountHealth
+                                          : ((prevRow.stdAmount != null && prevRow.stdAmount !== "") ? prevRow.stdAmount : "");
+                                        // 前月が空欄なら 0 ではなく "" を保存。0 と「未入力」を区別するため。
+                                        updateMonthly(selectedYear, m, "stdAmountHealth", prevVal === "" ? "" : Number(prevVal));
+                                      }}
+                                      title="前月の標準報酬月額をコピー"
+                                      aria-label="前月の標準報酬月額をコピー"
+                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                    >
+                                      <Copy size={9} />
+                                    </button>
+                                    {/* 12月までコピー: 現在月の値をその月以降〜12月の同キーへ一括コピー。
+                                        ロック済み月はスキップして続行。空欄("")はそのまま空欄でコピー(0 に変換しない)。
+                                        12月セル(コピー先がない)・現在月ロック中・未加入時は disabled。 */}
+                                    <button
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable ||
+                                        m === "12"
+                                      }
+                                      onClick={() => {
+                                        const valueToCopy = stdAmount === "" ? "" : Number(stdAmount);
+                                        const startNum = parseInt(m, 10);
+                                        for (let n = startNum; n <= 12; n++) {
+                                          const target = String(n).padStart(2, "0");
+                                          if (isMonthCellLocked(target)) continue;
+                                          updateMonthly(selectedYear, target, "stdAmountHealth", valueToCopy);
+                                        }
+                                      }}
+                                      title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
+                                      aria-label="12月までコピー"
+                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                    >
+                                      <ChevronsRight size={9} />
+                                    </button>
+                                    <input
+                                      type="number"
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable
+                                      }
+                                      value={stdAmount || ""}
+                                      onChange={(e) =>
+                                        updateMonthly(
+                                          selectedYear,
+                                          m,
+                                          "stdAmountHealth",
+                                          Number(e.target.value)
+                                        )
+                                      }
+                                      className={`flex-1 min-w-0 text-right outline-none font-black font-mono text-[11px] px-0.5 bg-transparent ${
+                                        isUnset
+                                          ? "text-red-600 placeholder-red-300"
+                                          : gradeDiff >= 2
+                                          ? "text-red-600"
+                                          : hasDeviation
+                                          ? "text-amber-700"
+                                          : "text-blue-900"
+                                      } ${
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable
+                                          ? "cursor-not-allowed text-slate-400"
+                                          : ""
+                                      }`}
+                                      placeholder={
+                                        isApplicable ? "入力必須" : "不要"
+                                      }
+                                      title={
+                                        gradeDiff >= 2
+                                          ? `標準報酬月額が推定値と大きく異なります（${gradeDiff}等級差）。届出内容または入力誤りを確認してください。`
+                                          : hasDeviation
+                                          ? "給与額から推定される標準報酬月額と入力値が異なります。算定基礎届・月額変更届の内容を確認してください。"
+                                          : ""
+                                      }
+                                    />
+                                  </div>
                                 </td>
                               );
                             })}
@@ -8104,46 +8316,95 @@ const App = () => {
                                       </span>
                                     </div>
                                   )}
-                                  <input
-                                    type="number"
-                                    disabled={
-                                      isMonthCellLocked(m) ||
-                                      !isApplicable
-                                    }
-                                    value={stdAmount || ""}
-                                    onChange={(e) =>
-                                      updateMonthly(
-                                        selectedYear,
-                                        m,
-                                        "stdAmountPension",
-                                        Number(e.target.value)
-                                      )
-                                    }
-                                    className={`w-full text-right outline-none font-black font-mono text-[11px] px-0.5 mt-2 bg-transparent ${
-                                      isUnset
-                                        ? "text-red-600 placeholder-red-300"
-                                        : gradeDiff >= 2
-                                        ? "text-red-600"
-                                        : hasDeviation
-                                        ? "text-amber-700"
-                                        : "text-blue-900"
-                                    } ${
-                                      isMonthCellLocked(m) ||
-                                      !isApplicable
-                                        ? "cursor-not-allowed text-slate-400"
-                                        : ""
-                                    }`}
-                                    placeholder={
-                                      isApplicable ? "入力必須" : "不要"
-                                    }
-                                    title={
-                                      gradeDiff >= 2
-                                        ? `標準報酬月額が推定値と大きく異なります（${gradeDiff}等級差）。届出内容または入力誤りを確認してください。`
-                                        : hasDeviation
-                                        ? "給与額から推定される標準報酬月額と入力値が異なります。算定基礎届・月額変更届の内容を確認してください。"
-                                        : ""
-                                    }
-                                  />
+                                  <div className="flex items-center gap-0.5 mt-2">
+                                    {/* 前月コピー: 押下で前月の stdAmountPension(無ければ legacy stdAmount)を当月へ複製する。
+                                        1月(=前月なし)、月次ロック中、未加入(!isApplicable) は disabled。 */}
+                                    <button
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable ||
+                                        m === "01"
+                                      }
+                                      onClick={() => {
+                                        const prevKey = String(parseInt(m, 10) - 1).padStart(2, "0");
+                                        const prevRow = currentYearData.monthly[prevKey] || {};
+                                        const prevVal = (prevRow.stdAmountPension != null && prevRow.stdAmountPension !== "")
+                                          ? prevRow.stdAmountPension
+                                          : ((prevRow.stdAmount != null && prevRow.stdAmount !== "") ? prevRow.stdAmount : "");
+                                        // 前月が空欄なら 0 ではなく "" を保存。0 と「未入力」を区別するため。
+                                        updateMonthly(selectedYear, m, "stdAmountPension", prevVal === "" ? "" : Number(prevVal));
+                                      }}
+                                      title="前月の標準報酬月額をコピー"
+                                      aria-label="前月の標準報酬月額をコピー"
+                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                    >
+                                      <Copy size={9} />
+                                    </button>
+                                    {/* 12月までコピー: 現在月の値をその月以降〜12月の同キーへ一括コピー。
+                                        ロック済み月はスキップして続行。空欄("")はそのまま空欄でコピー(0 に変換しない)。
+                                        12月セル(コピー先がない)・現在月ロック中・未加入時は disabled。 */}
+                                    <button
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable ||
+                                        m === "12"
+                                      }
+                                      onClick={() => {
+                                        const valueToCopy = stdAmount === "" ? "" : Number(stdAmount);
+                                        const startNum = parseInt(m, 10);
+                                        for (let n = startNum; n <= 12; n++) {
+                                          const target = String(n).padStart(2, "0");
+                                          if (isMonthCellLocked(target)) continue;
+                                          updateMonthly(selectedYear, target, "stdAmountPension", valueToCopy);
+                                        }
+                                      }}
+                                      title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
+                                      aria-label="12月までコピー"
+                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                    >
+                                      <ChevronsRight size={9} />
+                                    </button>
+                                    <input
+                                      type="number"
+                                      disabled={
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable
+                                      }
+                                      value={stdAmount || ""}
+                                      onChange={(e) =>
+                                        updateMonthly(
+                                          selectedYear,
+                                          m,
+                                          "stdAmountPension",
+                                          Number(e.target.value)
+                                        )
+                                      }
+                                      className={`flex-1 min-w-0 text-right outline-none font-black font-mono text-[11px] px-0.5 bg-transparent ${
+                                        isUnset
+                                          ? "text-red-600 placeholder-red-300"
+                                          : gradeDiff >= 2
+                                          ? "text-red-600"
+                                          : hasDeviation
+                                          ? "text-amber-700"
+                                          : "text-blue-900"
+                                      } ${
+                                        isMonthCellLocked(m) ||
+                                        !isApplicable
+                                          ? "cursor-not-allowed text-slate-400"
+                                          : ""
+                                      }`}
+                                      placeholder={
+                                        isApplicable ? "入力必須" : "不要"
+                                      }
+                                      title={
+                                        gradeDiff >= 2
+                                          ? `標準報酬月額が推定値と大きく異なります（${gradeDiff}等級差）。届出内容または入力誤りを確認してください。`
+                                          : hasDeviation
+                                          ? "給与額から推定される標準報酬月額と入力値が異なります。算定基礎届・月額変更届の内容を確認してください。"
+                                          : ""
+                                      }
+                                    />
+                                  </div>
                                 </td>
                               );
                             })}
@@ -8696,13 +8957,25 @@ const App = () => {
                         isMonthLocked = rowData?.isLocked === true;
                       }
                       const isDisabled = isYearLocked || isMonthLocked || (!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth));
-                      // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。賞与時は stdAmtSet=true で実額表示に倒す。
+                      // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。賞与時は両方 true で実額表示に倒す。
+                      // 健保用 stdAmount は健保・介護、 厚年用 stdAmount は厚年・子ども子育ての判定に使う。legacy stdAmount もフォールバック認識する。
+                      // 支給なし月(calcResult.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
+                      const _pl_stdAmtHealthSet = isBonusList
+                        || calcResult.noIncome === true
+                        || (rowData.stdAmountHealth != null && rowData.stdAmountHealth !== "" && Number(rowData.stdAmountHealth) > 0)
+                        || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
+                      const _pl_stdAmtPensionSet = isBonusList
+                        || calcResult.noIncome === true
+                        || (rowData.stdAmountPension != null && rowData.stdAmountPension !== "" && Number(rowData.stdAmountPension) > 0)
+                        || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0);
                       const _insFlags = {
                         hasHealth: emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1,
                         hasPension: emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1,
                         hasEmployment: emp.master.employmentIns === 1,
                         hasNursingIns: !isBonusList && rowData.hasNursingIns === 1,
-                        stdAmtSet: isBonusList || (rowData.stdAmount != null && rowData.stdAmount !== "" && Number(rowData.stdAmount) > 0),
+                        stdAmtSet: _pl_stdAmtHealthSet && _pl_stdAmtPensionSet,
+                        stdAmtHealthSet: _pl_stdAmtHealthSet,
+                        stdAmtPensionSet: _pl_stdAmtPensionSet,
                       };
 
                       return (
@@ -8952,8 +9225,9 @@ const App = () => {
                           <td className="border border-slate-200 p-2 text-right bg-white">
                             <SocialInsCell kind="employment" value={calcResult.employment} {..._insFlags} />
                           </td>
-                          <td className={`border border-slate-200 p-2 text-right ${calcResult.incomeTax === null ? "bg-red-50 text-red-600 font-black" : "bg-white text-orange-600 font-bold"}`}>
-                            <div>{calcResult.incomeTax === null ? "計算不可" : formatCurrency(calcResult.incomeTax)}</div>
+                          <td className={`border border-slate-200 p-2 text-right ${calcResult.incomeTax === null || calcResult.incomeTax === undefined ? "bg-red-50 text-red-600 font-black" : "bg-white text-orange-600 font-bold"}`}>
+                            {/* incomeTax: 明示 null(計算不可) と undefined(未計算)の両方を「計算不可」表示 */}
+                            <div>{calcResult.incomeTax === null || calcResult.incomeTax === undefined ? "計算不可" : formatCurrency(calcResult.incomeTax)}</div>
                             {calcResult.taxWarning && (
                               <div
                                 className={`text-[9px] mt-0.5 leading-none ${calcResult.isBlocking ? "text-red-700 font-black" : "text-red-600"}`}
@@ -9092,8 +9366,9 @@ const App = () => {
                             );
                           })}
 
-                          <td className="border border-slate-200 p-2 text-right bg-emerald-50/50 font-black text-emerald-700 border-l-2">
-                            {formatCurrency(calcResult.netPay)}
+                          <td className={`border border-slate-200 p-2 text-right font-black border-l-2 ${calcResult.netPay === null || calcResult.netPay === undefined ? "bg-rose-50 text-rose-600" : "bg-emerald-50/50 text-emerald-700"}`}>
+                            {/* 差引支給額: null は「計算不可」表示(¥0 表示で誤認を防ぐ) */}
+                            {calcResult.netPay === null || calcResult.netPay === undefined ? "計算不可" : formatCurrency(calcResult.netPay)}
                           </td>
 
                         </tr>

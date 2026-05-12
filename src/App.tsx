@@ -3985,16 +3985,28 @@ const App = () => {
     handleSave(empId, emp.master, updatedData);
   };
 
+  // 給与明細単票モーダルを開く入口を一本化する共通関数。
+  // 帳票出力側／一括印刷キュー側どちらから開いても empId と monthKey を必ず両方セットし、
+  // モーダル内 renderPayslip(slipEmployeeId, ..., selectedListMonth) の参照月がドリフトしないようにする。
+  const openPayslipPrintPreview = (empId, monthKey) => {
+    if (!empId) return;
+    setSelectedListMonth(monthKey);
+    setSlipEmployeeId(empId);
+  };
+
   // 一括印刷キューを開始: 在籍社員IDを並べて先頭社員を単票モーダルへ表示。
   // 自動連続印刷は行わない(ユーザーが手動で「印刷する」→「次の社員へ」を押す)。
-  const startBulkPrint = () => {
+  // monthKey を引数で受け取れるようにして、呼び出し元が「直前に setSelectedListMonth した値」を
+  // 同期反映できないクロージャ問題(同イベント内では state 更新が反映されないため旧値が読まれる)を回避する。
+  // 引数省略時は現在の selectedListMonth (=一覧表セレクタ駆動の値) を使う。
+  const startBulkPrint = (monthKey = selectedListMonth) => {
     const queue = Object.entries(employees)
       .filter(([, emp]) => emp.master?.status !== "retired")
       .map(([id]) => id);
     if (queue.length === 0) return;
     setBulkPrintQueue(queue);
     setBulkPrintIndex(0);
-    setSlipEmployeeId(queue[0]);
+    openPayslipPrintPreview(queue[0], monthKey);
   };
 
   const handleMonthlyCheck = (monthKey) => {
@@ -8218,7 +8230,7 @@ const App = () => {
                   <ShieldCheck size={14} /> 月次チェック
                 </button>
                 <button
-                  onClick={startBulkPrint}
+                  onClick={() => startBulkPrint()}
                   title="この月の全社員分の給与明細を1人ずつ順番に印刷します"
                   aria-label="一括印刷"
                   className="flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
@@ -11871,8 +11883,9 @@ const App = () => {
                   </button>
                   <button
                     onClick={() => {
-                      setSelectedListMonth(monthlyCloseMonth);
-                      startBulkPrint();
+                      // 月は引数で渡すこと。setSelectedListMonth を事前に呼んで startBulkPrint() を呼ぶと、
+                      // クロージャが旧 selectedListMonth を捕捉していて意図と異なる月で印刷される。
+                      startBulkPrint(monthlyCloseMonth);
                     }}
                     title="この月の全社員分の給与明細を1人ずつ順番に印刷します"
                     className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
@@ -12112,8 +12125,7 @@ const App = () => {
                           // 月別支給控除一覧表は既存モーダルが無いため、従来どおり印刷センター自身の print-area を印刷する。
                           if (printDocType === "payslip") {
                             if (!selectedEmployeeId) return;
-                            setSelectedListMonth(printTargetMonth);
-                            setSlipEmployeeId(selectedEmployeeId);
+                            openPayslipPrintPreview(selectedEmployeeId, printTargetMonth);
                             return;
                           }
                           if (printDocType === "ledger") {
@@ -12910,7 +12922,7 @@ const App = () => {
                     onClick={() => {
                       const next = bulkPrintIndex + 1;
                       setBulkPrintIndex(next);
-                      setSlipEmployeeId(bulkPrintQueue[next]);
+                      openPayslipPrintPreview(bulkPrintQueue[next], selectedListMonth);
                     }}
                     className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors"
                   >

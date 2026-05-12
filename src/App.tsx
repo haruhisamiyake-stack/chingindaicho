@@ -11166,26 +11166,38 @@ const App = () => {
                       </p>
                     </div>
 
-                    <div className="flex items-center gap-2 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 shadow-sm">
-                      <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                        対象年度:
-                      </span>
-                      <select
-                        value={selectedYear || ""}
-                        onChange={(e) => setSelectedYear(e.target.value)}
-                        className="bg-transparent border-none outline-none text-lg font-black text-slate-800 cursor-pointer"
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 shadow-sm">
+                        <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                          対象年度:
+                        </span>
+                        <select
+                          value={selectedYear || ""}
+                          onChange={(e) => setSelectedYear(e.target.value)}
+                          className="bg-transparent border-none outline-none text-lg font-black text-slate-800 cursor-pointer"
+                        >
+                          {yearsList.map((y) => {
+                            const hasTable = Object.values(taxTables).some(
+                              (t) => normalizeYear(t.year) === normalizeYear(y)
+                            );
+                            return (
+                              <option key={y} value={y}>
+                                {y} {!hasTable ? " (税額表未登録)" : ""}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                      {/* 印刷ボタン: 共通 .no-print ルールで印刷物には出ない。
+                          window.print() で現在表示中の集計内容(白カード配下=print-area)を印刷する。 */}
+                      <button
+                        onClick={() => window.print()}
+                        title="この画面の内容を印刷します"
+                        aria-label="印刷"
+                        className="no-print flex items-center gap-2 bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
                       >
-                        {yearsList.map((y) => {
-                          const hasTable = Object.values(taxTables).some(
-                            (t) => normalizeYear(t.year) === normalizeYear(y)
-                          );
-                          return (
-                            <option key={y} value={y}>
-                              {y} {!hasTable ? " (税額表未登録)" : ""}
-                            </option>
-                          );
-                        })}
-                      </select>
+                        <Printer size={16} /> 印刷
+                      </button>
                     </div>
                   </div>
 
@@ -11276,9 +11288,13 @@ const App = () => {
                   </div>
 
                   {/* === 結果パネル === */}
+                  {/* 各モードの帳票本体パネルにだけ print-area を付与し、画面タイトル・年度セレクタ・
+                      モード切替ボタン等の操作 UI を印刷対象から除外する。
+                      集計・申告タブは activeTab === "aggregation" のときだけレンダーされるため
+                      他タブの DOM と二重に print-area が出ることはない。 */}
                   {isSantei ? (
                     // 算定基礎シミュレーターのUI
-                    <div className="bg-white border-2 border-emerald-800 rounded-lg p-6 relative overflow-hidden">
+                    <div className="bg-white border-2 border-emerald-800 rounded-lg p-6 relative overflow-hidden print-area">
                       <div className="absolute top-0 left-0 bg-emerald-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
                         算定基礎 判定結果一覧
                       </div>
@@ -11466,7 +11482,7 @@ const App = () => {
                     </div>
                   ) : isRoubou ? (
                     // 労働保険のUI
-                    <div className="bg-white border-2 border-teal-800 rounded-lg p-6 relative overflow-hidden">
+                    <div className="bg-white border-2 border-teal-800 rounded-lg p-6 relative overflow-hidden print-area">
                       <div className="absolute top-0 left-0 bg-teal-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
                         確定保険料 算定内訳
                       </div>
@@ -11592,7 +11608,7 @@ const App = () => {
                     </div>
                   ) : (
                     <>
-                    <div className="bg-white border-2 border-slate-800 rounded-lg p-8 relative">
+                    <div className="bg-white border-2 border-slate-800 rounded-lg p-8 relative print-area">
                       <div className="absolute top-0 left-0 bg-slate-800 text-white text-xs font-black px-4 py-1 rounded-br-lg tracking-widest">
                         納付書 転記用データ
                       </div>

@@ -15206,41 +15206,57 @@ const App = () => {
             padding: 0 !important;
           }
 
-          /* ▼▼▼ 支給控除一覧表専用：空白ページ除去と最上部配置 ▼▼▼ */
-          /* 1. 印刷エリア以外の兄弟要素を完全に非表示にする */
-          body:has(.monthly-summary-print-area) > *:not(:has(.monthly-summary-print-area)) {
-            display: none !important;
-          }
+          /* ▼▼▼ 支給控除一覧表専用：書式崩れ・白紙ページ除去と最上部配置 ▼▼▼ */
           
-          /* 2. html, body, rootの高さと余白を完全にリセットして1枚目に固定 */
-          html:has(.monthly-summary-print-area),
-          body:has(.monthly-summary-print-area),
-          body:has(.monthly-summary-print-area) #root,
-          body:has(.monthly-summary-print-area) #root > div {
-            height: auto !important;
-            min-height: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            position: static !important;
-            overflow: visible !important;
-          }
-
-          /* 3. 印刷エリア自身を1枚目の絶対的な最上部に配置 */
+          /* 1. 印刷エリア自身を紙の一番上に絶対配置し、見えない余白に押し出されるのを防ぐ */
           .monthly-summary-print-area {
             position: absolute !important;
             top: 0 !important;
             left: 0 !important;
-            width: 100% !important;
+            right: 0 !important;
             margin: 0 !important;
             padding: 0 !important;
-            page-break-before: avoid !important;
           }
 
-          /* 4. テーブルの改ページ制御 */
+          /* 2. 親要素の高さ制約を全解除（絶対配置でも2ページ目以降が途切れず印刷されるようにする） */
+          html:has(.monthly-summary-print-area),
+          body:has(.monthly-summary-print-area),
+          body:has(.monthly-summary-print-area) *:has(.monthly-summary-print-area) {
+            position: static !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: transparent !important;
+          }
+
+          /* 3. 画面に残る印刷対象外の要素を完全に消去して干渉を防ぐ */
+          body:has(.monthly-summary-print-area) *:not(:has(.monthly-summary-print-area)):not(.monthly-summary-print-area):not(.monthly-summary-print-area *) {
+            display: none !important;
+          }
+
+          /* 4. 末尾の白紙ページ（3枚目など）の原因となる強制改ページを無効化 */
+          .monthly-summary-print-area .slip-page {
+            page-break-after: auto !important;
+            break-after: auto !important;
+            page-break-before: auto !important;
+            break-before: auto !important;
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+          }
+
+          /* 5. テーブルの列幅自動調整（文字の変な縦並び・崩れを直す） */
           .monthly-summary-print-area table {
             page-break-inside: auto !important;
             break-inside: auto !important;
-            table-layout: auto !important;
+            table-layout: auto !important; /* 文字の長さに合わせて列幅を自動調整 */
+            width: 100% !important;
+            max-width: 100% !important;
             margin-top: 0 !important;
           }
           .monthly-summary-print-area tr {
@@ -15250,7 +15266,7 @@ const App = () => {
           .monthly-summary-print-area thead {
             display: table-header-group !important;
           }
-          /* ▲▲▲ 支給控除一覧表専用：空白ページ除去と最上部配置 ▲▲▲ */
+          /* ▲▲▲ 支給控除一覧表専用：書式崩れ・白紙ページ除去と最上部配置 ▲▲▲ */
 
           /* ▼▼▼ 賃金台帳専用：正確なDOM階層に基づいた改ページ対応リファクタリング ▼▼▼ */
           

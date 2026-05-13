@@ -14596,7 +14596,7 @@ const App = () => {
         </div>
       )}
             {/* ▲▲▲ ここまで追加 ▲▲▲ */}     {" "}
-      <style
+     <style
         dangerouslySetInnerHTML={{
           __html: `
         .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 8px; }
@@ -14657,32 +14657,27 @@ const App = () => {
             padding: 0 !important;
           }
 
-          /* ▼▼▼ 賃金台帳「だけ」の複数ページ印刷対応（最適化・安全版） ▼▼▼ */
+          /* ▼▼▼ 賃金台帳専用：正確なDOM階層に基づいた改ページ対応リファクタリング ▼▼▼ */
           
-          /* 1. 印刷に不要な左メニュー、ヘッダー、裏側の通常画面をピンポイントで隠す */
-          body:has(#modal-backdrop-ledger-print) aside,
-          body:has(#modal-backdrop-ledger-print) header,
-          body:has(#modal-backdrop-ledger-print) main > div:not(#modal-backdrop-ledger-print) {
-            display: none !important;
-          }
-
-          /* 2. 親要素たちの枠（高さ制限・スクロール制限）を明示的に解除する */
+          /* 1. 大元の枠（body, #root, および制約を持つ直下のdiv）の制限を解除 */
           body:has(#modal-backdrop-ledger-print),
           body:has(#modal-backdrop-ledger-print) #root,
-          body:has(#modal-backdrop-ledger-print) .flex.h-screen,
-          body:has(#modal-backdrop-ledger-print) .flex-1.flex-col,
-          body:has(#modal-backdrop-ledger-print) main {
+          body:has(#modal-backdrop-ledger-print) #root > div {
             position: static !important;
             height: auto !important;
             min-height: 0 !important;
             max-height: none !important;
             overflow: visible !important;
             display: block !important;
-            margin: 0 !important;
-            padding: 0 !important;
+            background: transparent !important;
           }
 
-          /* 3. モーダル背景の固定配置・高さ制限を解除 */
+          /* 2. App Root 直下の「モーダル以外の要素（サイドバーやメイン画面）」を非表示にする */
+          body:has(#modal-backdrop-ledger-print) #root > div > :not(#modal-backdrop-ledger-print) {
+            display: none !important;
+          }
+
+          /* 3. 賃金台帳モーダル背景の固定配置・高さ制限を解除し、通常配置に戻す */
           #modal-backdrop-ledger-print {
             position: static !important;
             height: auto !important;
@@ -14695,7 +14690,7 @@ const App = () => {
             margin: 0 !important;
           }
 
-          /* 4. 印刷エリア本体の絶対配置を解除し、全幅を使わせる */
+          /* 4. モーダル内部の印刷エリア本体の絶対配置を解除し、全幅を使わせる */
           #modal-backdrop-ledger-print .print-area {
             position: static !important;
             width: 100% !important;
@@ -14703,10 +14698,9 @@ const App = () => {
             margin: 0 auto !important;
             padding: 0 !important;
             display: block !important;
-            visibility: visible !important;
           }
 
-          /* 5. 表の行が途中で不自然に切れないようにする */
+          /* 5. 表の改ページ制御 */
           #modal-backdrop-ledger-print table {
             page-break-inside: auto !important;
             break-inside: auto !important;

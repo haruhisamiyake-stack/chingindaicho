@@ -14609,33 +14609,20 @@ const App = () => {
         main ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
         main ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
-        /* 通常画面では非表示。印刷時のみ display:block で表示する専用クラス。
-           Tailwind の hidden(display:none) と @media print の visibility 制御が
-           衝突するケース(display:none のままで印刷不可) を確実に回避するため、
-           !important で display を強制する。 */
         .print-only-block { display: none; }
 
         @media print {
-          /* A4用紙設定。デフォルトは portrait（給与明細書など）。
-             landscape-print クラスを付けたページだけ named-page で landscape + 狭余白へ切替する。
-             これにより支給控除一覧表・賃金台帳のような横長帳票で印刷領域を最大化し、
-             縦長帳票（給与明細書）の 15mm 余白には影響を与えない。 */
           @page { margin: 15mm; }
           @page landscape-page { size: A4 landscape; margin: 8mm; }
           .landscape-print { page: landscape-page; }
+          
           body * { visibility: hidden; }
           .print-area, .print-area * { visibility: visible; }
           .print-area { position: absolute; top: 0; left: 0; width: 100%; margin: 0; padding: 0; box-shadow: none !important; border: none !important; }
-          /* visibility:hidden は不可視化のみでレイアウト空間は占有したまま。
-             その結果、左 aside (w-72=288px) が幅を消費し、右側ラッパー(position:relative)が
-             ページ幅未満になり、印刷時 .print-area の absolute width:100% が連鎖的に縮む。
-             これが「A4横なのに中央に小さく表示」の根本原因。
-             印刷時は aside を完全に display:none にして右ラッパーをページ幅まで伸ばす。 */
           aside { display: none !important; }
           .no-print, .no-print * { display: none !important; }
           .print-only-block { display: block !important; }
 
-          /* A4の紙幅に合わせて強制的にスケールさせる */
           .slip-page {
             page-break-after: always;
             break-after: page;
@@ -14643,17 +14630,6 @@ const App = () => {
             max-width: none !important;
           }
           .slip-page:last-child { page-break-after: auto; break-after: auto; }
-          /* landscape-print 帳票はページ幅いっぱい使う。Tailwind の p-6 由来の内側余白も
-             印刷時は 0 になるよう既存の print:p-0 と整合し、表が紙端まで届く設計とする。
-             max-width:100% だと親 containing block より大きくなれず、印刷プレビューで親側に
-             flex/auto-margin/min-content 由来の縮みがあった場合に表が縮こまる事象があった
-             ため max-width:none に変更し、direct children(h1/metadata flex/table/footer)
-             すべてにも幅指定を適用して途中ラッパーでの縮小を抑止する。 */
-          /* 横帳票の余白は @page landscape-page { margin: 8mm } のみで管理する。
-             wrapper / table 側に追加マージン(calc width, margin-left/right, auto margin)
-             を入れると二重計算になり、プリンタの描画誤差と相まって左右切れ・左寄り等の
-             事象が頻発するため、ここでは width:100% でフル表示し box-sizing:border-box で
-             padding/border を含めて印刷可能領域 (281mm) 内に収める。 */
           .landscape-print {
             width: 100% !important;
             max-width: none !important;
@@ -14668,26 +14644,76 @@ const App = () => {
           .landscape-print table {
             width: 100% !important;
             max-width: 100% !important;
-            /* table-layout:auto だと Chrome 印刷で内容幅ベースに列が縮み、
-               width:100% を指定しても紙端まで届かない事象があった。
-               fixed にすると table 全体幅 100% を確実に消費し、
-               明示幅のない列は残幅を均等分配する。
-               1行目のセル幅(w-12=社員CD, w-24=氏名)は確定し、残列が均等配分される。 */
             table-layout: fixed !important;
             box-sizing: border-box !important;
           }
-          /* セル padding を p-1 (4px) から 1px 2px へ縮小し、列幅余裕を確保。
-             text-[9px] の数字内容は 1mm 未満の padding でも視認性に影響しない。 */
           .landscape-print th,
           .landscape-print td {
             padding: 1px 2px !important;
             box-sizing: border-box !important;
           }
-          /* ブラウザデフォルトの body margin (~8px=2mm) が印刷可能幅を縮め
-             表が右端を超過する原因になるため、印刷時は明示的に 0 にする。 */
           body {
             margin: 0 !important;
             padding: 0 !important;
+          }
+
+          /* ▼▼▼ 賃金台帳「だけ」の複数ページ印刷対応（最適化・安全版） ▼▼▼ */
+          
+          /* 1. 印刷に不要な左メニュー、ヘッダー、裏側の通常画面をピンポイントで隠す */
+          body:has(#modal-backdrop-ledger-print) aside,
+          body:has(#modal-backdrop-ledger-print) header,
+          body:has(#modal-backdrop-ledger-print) main > div:not(#modal-backdrop-ledger-print) {
+            display: none !important;
+          }
+
+          /* 2. 親要素たちの枠（高さ制限・スクロール制限）を明示的に解除する */
+          body:has(#modal-backdrop-ledger-print),
+          body:has(#modal-backdrop-ledger-print) #root,
+          body:has(#modal-backdrop-ledger-print) .flex.h-screen,
+          body:has(#modal-backdrop-ledger-print) .flex-1.flex-col,
+          body:has(#modal-backdrop-ledger-print) main {
+            position: static !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            display: block !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+
+          /* 3. モーダル背景の固定配置・高さ制限を解除 */
+          #modal-backdrop-ledger-print {
+            position: static !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            background: transparent !important;
+            display: block !important;
+            padding: 0 !important;
+            margin: 0 !important;
+          }
+
+          /* 4. 印刷エリア本体の絶対配置を解除し、全幅を使わせる */
+          #modal-backdrop-ledger-print .print-area {
+            position: static !important;
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 auto !important;
+            padding: 0 !important;
+            display: block !important;
+            visibility: visible !important;
+          }
+
+          /* 5. 表の行が途中で不自然に切れないようにする */
+          #modal-backdrop-ledger-print table {
+            page-break-inside: auto !important;
+            break-inside: auto !important;
+          }
+          #modal-backdrop-ledger-print tr {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
           }
         }
 
@@ -14697,7 +14723,7 @@ const App = () => {
           margin: 0;
         }
         input[type="number"] { -moz-appearance: textfield; }
-      `,
+      `
         }}
       />
     </div>

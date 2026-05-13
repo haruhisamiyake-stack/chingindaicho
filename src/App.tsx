@@ -2359,6 +2359,516 @@ const createInitialEmployee = (
   return initialData;
 };
 
+// ============================================================================
+// [定数] 月次ステータス
+// ============================================================================
+const MONTHLY_STATUS_TYPES = {
+  NO_DATA: "no-data",
+  UNCHECKED: "unchecked",
+  ERROR: "error",
+  WARNING: "warning",
+  OK: "ok",
+  LOCKED: "locked",
+};
+
+// ============================================================================
+// [月次ステータスエンジン] 責務分離
+// ============================================================================
+
+// 1. 集計処理
+const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache }) => {
+  let activeEmployeeCount = 0;
+  let totalGrossPay = 0;
+  let calcedCount = 0;
+  let manualOverrideCount = 0;
+  const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
+
+  Object.entries(employees).forEach(([empId, emp]) => {
+    const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
+    const _row = isBonusList ? (_yd[monthKey] || {}) : (_yd.monthly?.[monthKey] || {});
+
+    // 退職者のうち、実績データがない場合はスキップ
+    if (emp.master?.status === "retired") {
+      if (!(Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0)) return;
+    }
+
+    if (!(Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0)) return;
+
+    activeEmployeeCount++;
+
+    // キャッシュ戦略: プリミティブな更新日時またはJSON文字列をバージョンとしてキーに含める
+    const empVersion = emp.updatedAt || emp.modifiedAt || emp.data?.updatedAt || JSON.stringify(_row);
+    const cacheKey = `${empId}_${selectedYear}_${monthKey}_${empVersion}`;
+
+    let _calc;
+    if (calcCache.has(cacheKey)) {
+      _calc = calcCache.get(cacheKey);
+    } else {
+      _calc = isBonusList
+        ? calculateBonusResult({
+            master: emp.master, bonusRow: _row, bonusKey: monthKey,
+            settings: effectiveSettings, yearData: _yd,
+            allowanceDefs: settings?.allowanceDefinitions || emp.master?.allowanceDefinitions || [],
+            deductionDefs: settings?.deductionDefinitions || emp.master?.deductionDefinitions || [],
+            monthKeyForRates: getBonusRateMonth(_row), yearStr: selectedYear, taxTables, monthlyLocks,
+          })
+        : calculateMonthlyResult(emp.master, _row, effectiveSettings, monthKey, selectedYear, taxTables, monthlyLocks);
+      
+      calcCache.set(cacheKey, _calc);
+    }
+
+    if (_calc?.calcSuccess === true) calcedCount++;
+    totalGrossPay += _calc?.grossPay || 0;
+
+    if (!isBonusList) {
+      const _ovs = _yd.manualOverrides?.[monthKey] || {};
+      if (Object.values(_ovs).some((o) => o?.enabled)) manualOverrideCount++;
+    }
+  });
+
+  return { activeEmployeeCount, totalGrossPay, calcedCount, manualOverrideCount };
+};
+
+// 2. ステータス種別の決定
+const determineMonthlyStatusType = ({ isNoData, isLocked, errorCount, warningCount, isStale }) => {
+  if (isNoData) return MONTHLY_STATUS_TYPES.NO_DATA;
+  if (isLocked) return MONTHLY_STATUS_TYPES.LOCKED;
+  if (errorCount > 0) return MONTHLY_STATUS_TYPES.ERROR;
+  if (!isStale && warningCount > 0) return MONTHLY_STATUS_TYPES.WARNING;
+  if (!isStale) return MONTHLY_STATUS_TYPES.OK;
+  return MONTHLY_STATUS_TYPES.UNCHECKED;
+};
+
+// 3. 許可されるアクションの決定
+const buildMonthlyActions = ({ isNoData, isLocked, isStale, errorCount, warningCount }) => {
+  return {
+    canCheck: !isNoData && !isLocked && (isStale || errorCount > 0 || warningCount > 0),
+    canLock: !isNoData && !isStale && errorCount === 0 && !isLocked,
+    canUnlock: isLocked,
+    canViewErrors: !isStale && (errorCount > 0 || warningCount > 0),
+    canPrint: !isNoData
+  };
+};
+
+// 4. メイン統合関数
+const buildMonthlyCloseStatus = ({ monthKey, selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, calcCache }) => {
+  const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
+  const monthLabel = monthKey === "bonus" ? "賞与①" : monthKey === "bonus2" ? "賞与②" : `${parseInt(monthKey, 10)}月支給分`;
+
+  const aggregates = calculateMonthlyAggregates({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache });
+  const isNoData = aggregates.activeEmployeeCount === 0;
+  
+  const _result = monthlyCheckResults?.[selectedYear]?.[monthKey];
+  const isStale = !_result;
+  const isLocked = monthlyLocks?.[selectedYear]?.[monthKey]?.locked === true;
+
+  const errorCount = isStale ? 0 : _result.errors.length;
+  const warningCount = isStale ? 0 : _result.warnings.length;
+  const infoCount = isStale ? 0 : _result.infos.length;
+
+  const statusType = determineMonthlyStatusType({ isNoData, isLocked, errorCount, warningCount, isStale });
+  const availableActions = buildMonthlyActions({ isNoData, isLocked, isStale, errorCount, warningCount });
+
+  let statusLabel = "";
+  let statusColor = "";
+  let cardClass = "";
+
+  switch (statusType) {
+    case MONTHLY_STATUS_TYPES.NO_DATA:
+      cardClass = "bg-slate-50 opacity-60 border-slate-200";
+      statusLabel = "データなし";
+      statusColor = "text-slate-500 bg-slate-100 border-slate-200";
+      break;
+    case MONTHLY_STATUS_TYPES.LOCKED:
+      cardClass = "bg-purple-50 border-purple-200 shadow-sm";
+      statusLabel = "🔒 ロック済";
+      statusColor = "text-purple-700 bg-purple-100 border-purple-300";
+      break;
+    case MONTHLY_STATUS_TYPES.ERROR:
+      cardClass = "bg-red-50 border-red-200 shadow-sm";
+      statusLabel = "⚠️ 重大エラーあり";
+      statusColor = "text-red-700 bg-red-100 border-red-300";
+      break;
+    case MONTHLY_STATUS_TYPES.WARNING:
+      cardClass = "bg-emerald-50 border-emerald-200 shadow-sm";
+      statusLabel = "✅ 確認完了 (警告あり)";
+      statusColor = "text-amber-700 bg-amber-100 border-amber-300";
+      break;
+    case MONTHLY_STATUS_TYPES.OK:
+      cardClass = "bg-emerald-50 border-emerald-200 shadow-sm";
+      statusLabel = "✅ 確認完了";
+      statusColor = "text-emerald-700 bg-emerald-100 border-emerald-300";
+      break;
+    case MONTHLY_STATUS_TYPES.UNCHECKED:
+    default:
+      cardClass = "bg-white border-blue-200 shadow-sm";
+      statusLabel = "📝 未チェック";
+      statusColor = "text-blue-700 bg-blue-100 border-blue-300";
+      break;
+  }
+
+  return {
+    monthKey, monthLabel, statusType, statusLabel, statusColor, cardClass,
+    ...aggregates,
+    errorCount, warningCount, infoCount, isLocked, isStale, isBonus: isBonusList,
+    availableActions,
+    rawErrors: _result?.errors || [],
+    rawWarnings: _result?.warnings || [],
+    rawInfos: _result?.infos || []
+  };
+};
+
+// ============================================================================
+// [カスタムHook] 月次ステータスの同期・キャッシュ管理
+// ============================================================================
+const useMonthlyCloseStatuses = ({ selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, monthlyCloseMonth }) => {
+  // キャッシュスコープのバージョン判定。このキーが変わった時だけ同期的にMapをリセットする。
+  const settingsVersion = effectiveSettings?.updatedAt || effectiveSettings?.version || JSON.stringify({
+    rateSchedules: effectiveSettings?.rateSchedules,
+    standardRewardTable: effectiveSettings?.standardRewardTable,
+    taxCalcMethod: effectiveSettings?.taxCalcMethod,
+  });
+  const taxTablesVersion = taxTables?.updatedAt || taxTables?.version || JSON.stringify(taxTables || {});
+  const locksVersion = monthlyLocks?.updatedAt || monthlyLocks?.version || JSON.stringify(monthlyLocks?.[selectedYear] || {});
+
+  const cacheScopeKey = JSON.stringify({
+    selectedYear,
+    settingsVersion,
+    taxTablesVersion,
+    locksVersion,
+  });
+
+  const cacheRef = useRef({ scopeKey: null, map: new Map() });
+  
+  // Renderフェーズで同期的にキャッシュを破棄し、新しいMapを生成する（Stale Data防止）
+  if (cacheRef.current.scopeKey !== cacheScopeKey) {
+    cacheRef.current = {
+      scopeKey: cacheScopeKey,
+      map: new Map()
+    };
+  }
+
+  const monthlyCloseStatuses = useMemo(() => {
+    if (!employees || !selectedYear) return [];
+    return [...MONTHS, "bonus", "bonus2"].map((monthKey) =>
+      buildMonthlyCloseStatus({
+        monthKey, selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables,
+        calcCache: cacheRef.current.map
+      })
+    );
+  }, [employees, selectedYear, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, cacheScopeKey]);
+
+  const currentStatus = monthlyCloseStatuses.find(s => s.monthKey === monthlyCloseMonth);
+
+  return { monthlyCloseStatuses, currentStatus };
+};
+
+// ============================================================================
+// [UIコンポーネント] 月次締めダッシュボード 行アイテム
+// ============================================================================
+const MonthlyCloseRow = ({ status, selectedYear, onCheck, onLock, onUnlock, onViewDetails, onPrintSummary, onPrintPayslip }) => {
+  const [unlockReason, setUnlockReason] = useState("");
+
+  return (
+    <div className={`flex flex-col md:flex-row items-stretch md:items-center justify-between p-5 rounded-xl border transition-all ${status.cardClass}`}>
+      <div className="flex-1 mb-4 md:mb-0">
+        <div className="flex items-center gap-3 mb-2">
+          <h3 className={`text-lg font-black ${status.statusType === MONTHLY_STATUS_TYPES.NO_DATA ? "text-slate-400" : "text-slate-800"}`}>
+            {status.monthLabel}
+          </h3>
+          <span className={`text-xs font-black px-2 py-0.5 rounded border ${status.statusColor}`}>
+            {status.statusLabel}
+          </span>
+        </div>
+        
+        {status.statusType !== MONTHLY_STATUS_TYPES.NO_DATA ? (
+          <div className="flex flex-wrap gap-4 text-xs font-bold text-slate-600">
+            <div className="flex items-center gap-1">
+              <Users size={14} className="text-slate-400" />
+              対象: <span className="font-mono text-sm">{status.activeEmployeeCount} 名</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">総支給額:</span>
+              <span className="font-mono text-sm">¥{formatCurrency(status.totalGrossPay)}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-slate-400 font-bold">※ この月の計算実績はまだありません。</div>
+        )}
+
+        {status.statusType !== MONTHLY_STATUS_TYPES.NO_DATA && !status.isLocked && !status.isStale && (
+          <div className="mt-2 text-xs">
+            {status.errorCount > 0 ? (
+              <span className="text-red-600 font-bold">❌ 月次チェック：エラー {status.errorCount} 件</span>
+            ) : (
+              <span className="text-emerald-600 font-bold">✓ 月次チェック完了：エラーはありません。{status.warningCount > 0 && `（警告 ${status.warningCount}件）`}</span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        {status.availableActions.canPrint && (
+          <>
+            <button onClick={() => onPrintSummary(status.monthKey)} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-slate-600 hover:bg-slate-50 border border-slate-300 shadow-sm">
+              <Printer size={14} /> 一覧表
+            </button>
+            <button onClick={() => onPrintPayslip(status.monthKey)} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-indigo-600 hover:bg-indigo-50 border border-indigo-200 shadow-sm">
+              <Printer size={14} /> 給与明細
+            </button>
+          </>
+        )}
+
+        {status.availableActions.canUnlock && (
+          <div className="flex gap-2 items-center">
+            <input
+              type="text"
+              placeholder="解除理由を入力"
+              value={unlockReason}
+              onChange={(e) => setUnlockReason(e.target.value)}
+              className="border border-purple-300 rounded-lg px-3 py-1.5 text-xs w-40 focus:outline-none focus:ring-1 ring-purple-500"
+            />
+            <button
+              onClick={() => {
+                if (!unlockReason) return alert("理由を入力してください");
+                onUnlock(selectedYear, status.monthKey, unlockReason);
+                setUnlockReason("");
+              }}
+              className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-md transition-colors"
+            >
+              🔓 解除
+            </button>
+          </div>
+        )}
+
+        {status.statusType === MONTHLY_STATUS_TYPES.ERROR && (
+          <div className="flex gap-2">
+            <button onClick={() => onCheck(status.monthKey)} className="bg-amber-500 hover:bg-amber-400 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-md transition-colors">
+              🛡️ 再チェック
+            </button>
+            <span className="text-xs font-bold text-red-500 flex items-center px-2">※エラー解消が必要です</span>
+          </div>
+        )}
+
+        {status.statusType === MONTHLY_STATUS_TYPES.UNCHECKED && !status.isNoData && (
+          <button onClick={() => onCheck(status.monthKey)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded text-xs font-bold shadow-sm transition-colors">
+            🛡️ 月次チェックを実行
+          </button>
+        )}
+
+        {status.availableActions.canViewErrors && (
+          <button onClick={() => onViewDetails(status)} className="bg-white text-slate-600 border border-slate-300 hover:bg-slate-50 px-3 py-2 rounded-lg text-sm font-bold shadow-sm">
+            <Search size={14} /> 詳細
+          </button>
+        )}
+
+        {status.availableActions.canLock && (
+          <button onClick={() => onLock(selectedYear, status.monthKey)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg text-sm font-bold shadow-md transition-colors">
+            <Lock size={14} /> ロックして確定
+          </button>
+        )}
+
+        {status.statusType === MONTHLY_STATUS_TYPES.NO_DATA && (
+          <div className="text-slate-400 text-sm font-bold px-4 py-2">操作不可</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// [UIコンポーネント] ロック・解除履歴
+// ============================================================================
+const MonthlyLockHistory = ({ monthlyLocks, showLockHistoryKey, setShowLockHistoryKey }) => {
+  if (!monthlyLocks || Object.keys(monthlyLocks).length === 0) return null;
+  return (
+    <div className="mt-8 pt-4 border-t border-slate-200">
+      <p className="text-xs font-bold text-slate-600 mb-2">ロック履歴</p>
+      <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
+        {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
+          Object.entries(months).map(([mk, info]) => {
+            const mLabel = mk === "bonus" ? "賞与1" : mk === "bonus2" ? "賞与2" : `${parseInt(mk, 10)}月`;
+            const key = `${yr}_${mk}`;
+            return (
+              <div key={key} className="flex flex-wrap items-center gap-3 text-xs bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
+                <span className={`font-black ${info.locked ? "text-purple-700" : "text-slate-500"}`}>
+                  {info.locked ? "🔒" : "🔓"} {yr}年度 {mLabel}
+                </span>
+                {info.locked && <span className="text-slate-600">確定: {info.lockedAt ? new Date(info.lockedAt).toLocaleString("ja-JP") : "-"}</span>}
+                {!info.locked && info.unlockedAt && <span className="text-slate-600">解除: {new Date(info.unlockedAt).toLocaleString("ja-JP")} — 理由: {info.unlockReason}</span>}
+                <button
+                  onClick={() => setShowLockHistoryKey(showLockHistoryKey === key ? null : key)}
+                  className="ml-auto text-indigo-600 font-bold hover:underline"
+                >
+                  詳細履歴
+                </button>
+                {showLockHistoryKey === key && (
+                  <div className="w-full mt-2 pl-4 border-l-2 border-slate-300">
+                    {(info.history || []).map((h, hi) => (
+                      <div key={hi} className="mb-1 text-slate-600">
+                        <span className={h.action === "lock" ? "text-purple-600 font-bold" : "text-orange-600 font-bold"}>
+                          {h.action === "lock" ? "🔒 ロック" : "🔓 解除"}
+                        </span>
+                        <span className="ml-2">{new Date(h.at).toLocaleString("ja-JP")} by {h.by}</span>
+                        {h.reason && <span className="ml-2 bg-slate-100 px-1 rounded">理由: {h.reason}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// [UIコンポーネント] 月次締めダッシュボード 本体
+// ============================================================================
+const MonthlyCloseDashboard = ({
+  selectedYear, setSelectedYear, yearsList,
+  monthlyCloseMonth, setMonthlyCloseMonth,
+  monthlyCloseStatuses, currentStatus,
+  handleMonthlyCheck, handleLockMonth, handleUnlockMonth,
+  startBulkPrint, BULK_PRINT_TYPES,
+  setMonthlyClosePrintMode, setCheckModalData,
+  monthlyLocks, showLockHistoryKey, setShowLockHistoryKey
+}) => {
+  return (
+    <div className="p-6 max-w-[1400px] mx-auto h-full overflow-y-auto pb-20">
+      <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6">
+        <div className="flex items-center gap-3">
+          <div className="bg-purple-100 p-2 rounded-lg text-purple-600">
+            <Lock size={24} />
+          </div>
+          <div>
+            <h2 className="font-black text-xl text-slate-800">月次締め・確定ダッシュボード</h2>
+            <p className="text-xs text-slate-500 mt-1">各月の給与計算結果を検証し、確定（ロック）します。</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">
+          <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">年度:</span>
+          <select value={selectedYear || ""} onChange={(e) => setSelectedYear(e.target.value)} className="bg-transparent border-none outline-none text-lg font-black text-slate-800 cursor-pointer">
+            {yearsList.map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* サマリーカード */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
+          <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
+            <ShieldCheck size={18} className="text-amber-500" /> 月次チェック
+          </h3>
+          <div className="flex items-center gap-2 mb-4">
+            <select value={monthlyCloseMonth} onChange={(e) => setMonthlyCloseMonth(e.target.value)} className="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-sm font-bold text-slate-700 outline-none">
+              {MONTHS.map((m) => <option key={m} value={m}>{parseInt(m, 10)}月支給分</option>)}
+              <option value="bonus">賞与①</option>
+              <option value="bonus2">賞与②</option>
+            </select>
+            <button onClick={() => handleMonthlyCheck(monthlyCloseMonth)} className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow-sm transition-colors">
+              <ShieldCheck size={16} /> 実行
+            </button>
+          </div>
+          {currentStatus && (
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-xs font-black text-slate-700">チェック結果サマリー</h4>
+                <span className={`text-[10px] font-black px-2 py-0.5 rounded border ${currentStatus.statusColor}`}>{currentStatus.statusLabel}</span>
+              </div>
+              {currentStatus.isStale ? (
+                <p className="text-xs text-slate-400 italic">まだ月次チェックは実行されていません。</p>
+              ) : (
+                <ul className="text-[11px] text-slate-700 space-y-1">
+                  <li className="flex justify-between"><span>対象社員：</span><span className="font-mono font-bold">{currentStatus.activeEmployeeCount} 人</span></li>
+                  <li className="flex justify-between"><span>計算済み：</span><span className="font-mono font-bold">{currentStatus.calcedCount} 人</span></li>
+                  <li className="flex justify-between"><span className={currentStatus.errorCount > 0 ? "text-red-600 font-bold" : ""}>重大エラー：</span><span className={`font-mono font-bold ${currentStatus.errorCount > 0 ? "text-red-600" : ""}`}>{currentStatus.errorCount} 件</span></li>
+                  <li className="flex justify-between"><span className={currentStatus.warningCount > 0 ? "text-amber-700 font-bold" : ""}>警告：</span><span className={`font-mono font-bold ${currentStatus.warningCount > 0 ? "text-amber-700" : ""}`}>{currentStatus.warningCount} 件</span></li>
+                  <li className="flex justify-between"><span>案内（年齢到達等）：</span><span className="font-mono font-bold">{currentStatus.infoCount} 件</span></li>
+                  <li className="flex justify-between"><span>手入力修正：</span><span className="font-mono font-bold">{currentStatus.manualOverrideCount} 人</span></li>
+                  <li className="flex justify-between"><span>月次ロック：</span><span className={`font-mono font-bold ${currentStatus.isLocked ? "text-purple-700" : "text-slate-500"}`}>{currentStatus.isLocked ? "🔒 ロック中" : "未ロック"}</span></li>
+                </ul>
+              )}
+              {currentStatus.availableActions.canViewErrors && (
+                <button
+                  onClick={() => setCheckModalData({ month: currentStatus.monthKey, errors: currentStatus.rawErrors, warnings: currentStatus.rawWarnings, infos: currentStatus.rawInfos })}
+                  className="mt-3 text-[10px] font-bold text-indigo-600 hover:text-indigo-500 underline"
+                >
+                  詳細を確認する
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 帳票確認カード */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
+          <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
+            <Printer size={18} className="text-blue-600" /> 帳票確認
+          </h3>
+          <p className="text-xs text-slate-500 mb-4">対象月の帳票を印刷・PDF保存できます。</p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => {
+                setMonthlyClosePrintMode("monthlySummary");
+                let cleaned = false;
+                const cleanup = () => {
+                  if (cleaned) return;
+                  cleaned = true;
+                  setMonthlyClosePrintMode(null);
+                  window.removeEventListener("afterprint", cleanup);
+                };
+                window.addEventListener("afterprint", cleanup, { once: true });
+                setTimeout(() => { window.print(); setTimeout(cleanup, 1000); }, 0);
+              }}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
+            >
+              <Printer size={16} /> 支給控除一覧表
+            </button>
+            <button
+              onClick={() => startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, monthlyCloseMonth)}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
+            >
+              <Printer size={16} /> 給与明細を一括
+            </button>
+          </div>
+        </div>
+
+        {/* ダッシュボード */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5 md:col-span-2">
+          <h3 className="text-sm font-black text-slate-800 mb-4 flex items-center gap-2">
+            <Lock size={18} className="text-purple-600" /> 月次ステータス管理
+          </h3>
+          <div className="space-y-3">
+            {monthlyCloseStatuses.map(status => (
+              <MonthlyCloseRow
+                key={status.monthKey}
+                status={status}
+                selectedYear={selectedYear}
+                onCheck={(m) => { setMonthlyCloseMonth(m); handleMonthlyCheck(m); }}
+                onLock={handleLockMonth}
+                onUnlock={handleUnlockMonth}
+                onViewDetails={(st) => setCheckModalData({ month: st.monthKey, errors: st.rawErrors, warnings: st.rawWarnings, infos: st.rawInfos })}
+                onPrintSummary={(m) => {
+                  setMonthlyCloseMonth(m);
+                  setMonthlyClosePrintMode("monthlySummary");
+                  let cleaned = false;
+                  const cleanup = () => { if (cleaned) return; cleaned = true; setMonthlyClosePrintMode(null); window.removeEventListener("afterprint", cleanup); };
+                  window.addEventListener("afterprint", cleanup, { once: true });
+                  setTimeout(() => { window.print(); setTimeout(cleanup, 1000); }, 0);
+                }}
+                onPrintPayslip={(m) => startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, m)}
+              />
+            ))}
+          </div>
+          <MonthlyLockHistory monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey} />
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const App = () => {
   const [activeTab, setActiveTab] = useState("portal");
@@ -2521,7 +3031,10 @@ const App = () => {
   const [localRateSchedules, setLocalRateSchedules] = useState(null);
   const [rateTableErrors, setRateTableErrors] = useState([]);
 
-  
+  const { monthlyCloseStatuses, currentStatus } = useMonthlyCloseStatuses({
+    selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, monthlyCloseMonth
+  });
+
   // ★追加: 年度別比較用データの集計
   const taxYearStats = useMemo(() => {
     const stats = {};
@@ -12378,402 +12891,24 @@ const App = () => {
         );
       })()}
 
-       {/* --- 月次締め 画面（既存機能の集約 ＋ ロック管理リスト型UI） --- */}
+       {/* --- 月次締め 画面 --- */}
         {activeTab === "monthlyClose" && (
-          <div className="p-6 max-w-[1400px] mx-auto h-full overflow-y-auto pb-20">
-            {/* 上部：年度・対象月選択 */}
-            <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-lg shadow-sm border border-gray-200 mb-4 w-fit max-w-full">
-              <h2 className="font-black text-lg text-slate-800 flex items-center gap-2 mr-2">
-                <Lock size={20} className="text-purple-600" /> 月次締め
-              </h2>
-              <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">年度:</span>
-                <select
-                  value={selectedYear || ""}
-                  onChange={(e) => setSelectedYear(e.target.value)}
-                  className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
-                >
-                  {yearsList.map((y) => (
-                    <option key={y} value={y}>{y}</option>
-                  ))}
-                </select>
+          <>
+            <MonthlyCloseDashboard
+              selectedYear={selectedYear} setSelectedYear={setSelectedYear} yearsList={yearsList}
+              monthlyCloseMonth={monthlyCloseMonth} setMonthlyCloseMonth={setMonthlyCloseMonth}
+              monthlyCloseStatuses={monthlyCloseStatuses} currentStatus={currentStatus}
+              handleMonthlyCheck={handleMonthlyCheck} handleLockMonth={handleLockMonth} handleUnlockMonth={handleUnlockMonth}
+              startBulkPrint={startBulkPrint} BULK_PRINT_TYPES={BULK_PRINT_TYPES}
+              setMonthlyClosePrintMode={setMonthlyClosePrintMode} setCheckModalData={setCheckModalData}
+              monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey}
+            />
+            {monthlyClosePrintMode === "monthlySummary" && !isBulkPrintOpen && !slipEmployeeId && !isLedgerPrintOpen && (
+              <div className="print-only-block print-area">
+                {renderMonthlySummary(monthlyCloseMonth)}
               </div>
-              <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
-                <span className="text-[10px] font-bold text-slate-500 uppercase">対象月:</span>
-                <select
-                  value={monthlyCloseMonth}
-                  onChange={(e) => setMonthlyCloseMonth(e.target.value)}
-                  className="bg-transparent border-none outline-none text-sm font-black text-slate-800 cursor-pointer"
-                >
-                  {MONTHS.map((m) => (
-                    <option key={m} value={m}>{parseInt(m, 10)}月支給分</option>
-                  ))}
-                  <option value="bonus">賞与①</option>
-                  <option value="bonus2">賞与②</option>
-                </select>
-              </div>
-              {isMonthGloballyLocked(selectedYear, monthlyCloseMonth) && (
-                <span className="bg-purple-100 text-purple-700 text-[11px] font-black px-2 py-1 rounded border border-purple-300">
-                  🔒 この月はロック中
-                </span>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* カード1：月次チェック */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
-                <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
-                  <ShieldCheck size={18} className="text-amber-500" /> 月次チェック
-                </h3>
-                <p className="text-xs text-slate-500 mb-4">
-                  対象月の入力内容（社会保険・所得税・差引支給額の整合性）を一括検証します。
-                </p>
-                <button
-                  onClick={() => handleMonthlyCheck(monthlyCloseMonth)}
-                  title="この月の入力内容を月次チェックにかけます"
-                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                >
-                  <ShieldCheck size={16} /> 月次チェックを実行
-                </button>
-
-                {/* チェック結果サマリー */}
-                {(() => {
-                  const _result = monthlyCheckResults?.[selectedYear]?.[monthlyCloseMonth];
-                  const isStale = !_result;
-                  const _isBonusList = monthlyCloseMonth === "bonus" || monthlyCloseMonth === "bonus2";
-                  
-                  const activeEmps = Object.entries(employees).filter(([, emp]) => {
-                    if (emp.master?.status !== "retired") return true;
-                    const _yd = emp.data?.years?.[selectedYear];
-                    if (!_yd) return false;
-                    const _row = _isBonusList ? (_yd[monthlyCloseMonth] || {}) : (_yd.monthly?.[monthlyCloseMonth] || {});
-                    return Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0;
-                  });
-                  let calcedCount = 0;
-                  let manualOverrideCount = 0;
-                  activeEmps.forEach(([, emp]) => {
-                    const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
-                    const _row = _isBonusList ? (_yd[monthlyCloseMonth] || {}) : (_yd.monthly?.[monthlyCloseMonth] || {});
-                    const _calc = _isBonusList
-                      ? calculateBonusResult({
-                          master: emp.master, bonusRow: _row, bonusKey: monthlyCloseMonth,
-                          settings: effectiveSettings, yearData: _yd,
-                          allowanceDefs: settings?.allowanceDefinitions || emp.master?.allowanceDefinitions || [],
-                          deductionDefs: settings?.deductionDefinitions || emp.master?.deductionDefinitions || [],
-                          monthKeyForRates: getBonusRateMonth(_row), yearStr: selectedYear, taxTables, monthlyLocks,
-                        })
-                      : calculateMonthlyResult(emp.master, _row, effectiveSettings, monthlyCloseMonth, selectedYear, taxTables, monthlyLocks);
-                    if (_calc?.calcSuccess === true) calcedCount += 1;
-                    if (!_isBonusList) {
-                      const _ovs = _yd.manualOverrides?.[monthlyCloseMonth] || {};
-                      if (Object.values(_ovs).some((o) => o?.enabled)) manualOverrideCount += 1;
-                    }
-                  });
-                  const isLocked = isMonthGloballyLocked(selectedYear, monthlyCloseMonth);
-                  const errCount = isStale ? 0 : _result.errors.length;
-                  const warnCount = isStale ? 0 : _result.warnings.length;
-                  const infoCount = isStale ? 0 : _result.infos.length;
-                  const monthLabel = monthlyCloseMonth === "bonus" ? "賞与1" : monthlyCloseMonth === "bonus2" ? "賞与2" : `${parseInt(monthlyCloseMonth, 10)}月支給分`;
-                  
-                  let statusLabel = "未実行";
-                  let statusClass = "bg-slate-100 text-slate-600 border-slate-300";
-                  if (!isStale) {
-                    if (errCount > 0) { statusLabel = "重大エラーあり"; statusClass = "bg-red-50 text-red-700 border-red-300"; }
-                    else if (warnCount > 0) { statusLabel = "警告あり"; statusClass = "bg-amber-50 text-amber-700 border-amber-300"; }
-                    else { statusLabel = "問題なし"; statusClass = "bg-emerald-50 text-emerald-700 border-emerald-300"; }
-                  }
-                  return (
-                    <div className="mt-4 pt-4 border-t border-slate-100">
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-xs font-black text-slate-700">チェック結果サマリー</h4>
-                        <span className={`text-[10px] font-black px-2 py-0.5 rounded border ${statusClass}`}>{statusLabel}</span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mb-2">対象：{selectedYear} / {monthLabel}</div>
-                      {isStale ? (
-                        <p className="text-xs text-slate-400 italic">まだ月次チェックは実行されていません。</p>
-                      ) : (
-                        <ul className="text-[11px] text-slate-700 space-y-1">
-                          <li className="flex justify-between"><span>対象社員：</span><span className="font-mono font-bold">{activeEmps.length} 人</span></li>
-                          <li className="flex justify-between"><span>計算済み：</span><span className="font-mono font-bold">{calcedCount} 人</span></li>
-                          <li className="flex justify-between"><span className={errCount > 0 ? "text-red-600 font-bold" : ""}>重大エラー：</span><span className={`font-mono font-bold ${errCount > 0 ? "text-red-600" : ""}`}>{errCount} 件</span></li>
-                          <li className="flex justify-between"><span className={warnCount > 0 ? "text-amber-700 font-bold" : ""}>警告：</span><span className={`font-mono font-bold ${warnCount > 0 ? "text-amber-700" : ""}`}>{warnCount} 件</span></li>
-                          <li className="flex justify-between"><span>案内（年齢到達等）：</span><span className="font-mono font-bold">{infoCount} 件</span></li>
-                          <li className="flex justify-between"><span>手入力修正：</span><span className="font-mono font-bold">{manualOverrideCount} 人</span></li>
-                          <li className="flex justify-between"><span>月次ロック：</span><span className={`font-mono font-bold ${isLocked ? "text-purple-700" : "text-slate-500"}`}>{isLocked ? "🔒 ロック中" : "未ロック"}</span></li>
-                        </ul>
-                      )}
-                      {!isStale && (errCount > 0 || warnCount > 0) && (
-                        <button
-                          onClick={() => {
-                            setCheckModalData({
-                              month: monthlyCloseMonth,
-                              errors: _result.errors,
-                              warnings: _result.warnings,
-                              infos: _result.infos,
-                            });
-                          }}
-                          className="mt-3 text-[10px] font-bold text-indigo-600 hover:text-indigo-500 underline"
-                        >
-                          詳細を確認する
-                        </button>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-
-              {/* カード2：帳票確認 */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
-                <h3 className="text-sm font-black text-slate-800 mb-2 flex items-center gap-2">
-                  <Printer size={18} className="text-blue-600" /> 帳票確認
-                </h3>
-                <p className="text-xs text-slate-500 mb-4">
-                  既存の印刷形式そのままで、対象月の帳票を印刷・PDF保存できます。
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => {
-                      const monthStr = monthlyCloseMonth === "bonus" ? "賞与1" : monthlyCloseMonth === "bonus2" ? "賞与2" : `${parseInt(monthlyCloseMonth, 10)}月分`;
-                      const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
-                      const originalTitle = document.title;
-                      
-                      setMonthlyClosePrintMode("monthlySummary");
-                      let cleaned = false;
-                      const cleanup = () => {
-                        if (cleaned) return;
-                        cleaned = true;
-                        setMonthlyClosePrintMode(null);
-                        document.title = originalTitle;
-                        window.removeEventListener("afterprint", cleanup);
-                      };
-                      window.addEventListener("afterprint", cleanup, { once: true });
-                      
-                      setTimeout(() => {
-                        document.title = fileName;
-                        window.print();
-                        setTimeout(cleanup, 1000);
-                      }, 0);
-                    }}
-                    title="帳票出力の支給控除一覧表（月別・全社員）と同じ形式で印刷します"
-                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                  >
-                    <Printer size={16} /> 支給控除一覧表を印刷
-                  </button>
-                  <button
-                    onClick={() => {
-                      startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, monthlyCloseMonth);
-                    }}
-                    title="この月の全社員分の給与明細を1人ずつ順番に印刷します"
-                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
-                  >
-                    <Printer size={16} /> 給与明細を一括印刷
-                  </button>
-                </div>
-              </div>
-
-              {/* カード3：月次全体ロック管理（リスト型ダッシュボード・A案対応版） */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5 md:col-span-2">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
-                    <Lock size={18} className="text-purple-600" /> 月次全体ロック・ステータス管理
-                  </h3>
-                </div>
-                <p className="text-xs text-slate-500 mb-4">
-                  1年間の給与・賞与の計算進捗を一目で確認し、確定（ロック）操作を行えます。<br/>
-                  ※ロックを行うには、事前に月次チェックを実行してください（警告△があってもロック可能です）。
-                </p>
-
-                <div className="space-y-3">
-                  {[...MONTHS, "bonus", "bonus2"].map((monthKey) => {
-                    const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
-                    const monthLabel = monthKey === "bonus" ? "賞与①" : monthKey === "bonus2" ? "賞与②" : `${parseInt(monthKey, 10)}月支給分`;
-
-                    // データの集計
-                    const activeEmps = Object.entries(employees).filter(([, emp]) => {
-                      if (emp.master?.status !== "retired") return true;
-                      const _yd = emp.data?.years?.[selectedYear];
-                      if (!_yd) return false;
-                      const _row = isBonusList ? (_yd[monthKey] || {}) : (_yd.monthly?.[monthKey] || {});
-                      return Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0;
-                    });
-
-                    const isNoData = activeEmps.length === 0;
-                    const _result = monthlyCheckResults?.[selectedYear]?.[monthKey];
-                    const isStale = !_result;
-                    const isLocked = isMonthGloballyLocked(selectedYear, monthKey);
-                    
-                    const errCount = isStale ? 0 : _result.errors.length;
-                    const warnCount = isStale ? 0 : _result.warnings.length;
-
-                    let totalGrossPay = 0;
-                    if (!isNoData) {
-                      activeEmps.forEach(([, emp]) => {
-                        const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
-                        const _row = isBonusList ? (_yd[monthKey] || {}) : (_yd.monthly?.[monthKey] || {});
-                        const _calc = isBonusList
-                          ? calculateBonusResult({ master: emp.master, bonusRow: _row, bonusKey: monthKey, settings: effectiveSettings, yearData: _yd, allowanceDefs: settings?.allowanceDefinitions || emp.master?.allowanceDefinitions || [], deductionDefs: settings?.deductionDefinitions || emp.master?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(_row), yearStr: selectedYear, taxTables, monthlyLocks })
-                          : calculateMonthlyResult(emp.master, _row, effectiveSettings, monthKey, selectedYear, taxTables, monthlyLocks);
-                        totalGrossPay += _calc?.grossPay || 0;
-                      });
-                    }
-
-                    // UIのステータスと色
-                    let cardClass = "bg-white border-slate-200";
-                    let statusLabel = "📝 未チェック";
-                    let statusColor = "text-blue-700 bg-blue-100 border-blue-300";
-
-                    if (isNoData) {
-                      cardClass = "bg-slate-50 opacity-60 border-slate-200";
-                      statusLabel = "データなし";
-                      statusColor = "text-slate-500 bg-slate-100 border-slate-200";
-                    } else if (isLocked) {
-                      cardClass = "bg-purple-50 border-purple-200";
-                      statusLabel = "🔒 ロック済";
-                      statusColor = "text-purple-700 bg-purple-100 border-purple-300";
-                    } else if (errCount > 0) {
-                      cardClass = "bg-red-50 border-red-200";
-                      statusLabel = "⚠️ 重大エラーあり";
-                      statusColor = "text-red-700 bg-red-100 border-red-300";
-                    } else if (!isStale) {
-                      cardClass = "bg-emerald-50 border-emerald-200";
-                      statusLabel = warnCount > 0 ? "✅ 確認完了 (警告あり)" : "✅ 確認完了";
-                      statusColor = warnCount > 0 ? "text-amber-700 bg-amber-100 border-amber-300" : "text-emerald-700 bg-emerald-100 border-emerald-300";
-                    }
-
-                    return (
-                      <div key={monthKey} className={`flex flex-col md:flex-row items-center justify-between p-4 rounded-lg border ${cardClass}`}>
-                        <div className="flex items-center gap-4 w-full md:w-auto mb-3 md:mb-0">
-                          <div className="w-24 font-black text-sm text-slate-700">{monthLabel}</div>
-                          <div className={`text-[10px] font-bold px-2 py-1 rounded border ${statusColor} w-36 text-center`}>
-                            {statusLabel}
-                          </div>
-                          {!isNoData && (
-                            <div className="flex gap-4 text-xs font-bold text-slate-500 ml-2">
-                              <span className="font-mono">対象: {activeEmps.length}名</span>
-                              <span className="font-mono">総支給: ¥{formatCurrency(totalGrossPay)}</span>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 w-full md:w-auto justify-end">
-                          {isNoData ? (
-                            <span className="text-xs font-bold text-slate-400">操作不可</span>
-                          ) : isLocked ? (
-                            <div className="flex gap-2 items-center">
-                              <input
-                                type="text"
-                                placeholder="解除理由を入力"
-                                value={monthlyCloseMonth === monthKey ? unlockReason : ""}
-                                onChange={(e) => {
-                                  setMonthlyCloseMonth(monthKey);
-                                  setUnlockReason(e.target.value);
-                                }}
-                                className="border border-purple-300 rounded px-2 py-1.5 text-xs w-36 focus:outline-none focus:border-purple-500"
-                              />
-                              <button
-                                onClick={() => {
-                                  if (monthlyCloseMonth !== monthKey || !unlockReason) {
-                                    alert("理由を入力してください");
-                                    return;
-                                  }
-                                  handleUnlockMonth(selectedYear, monthKey, unlockReason);
-                                }}
-                                className="bg-orange-600 hover:bg-orange-500 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
-                              >
-                                🔓 解除
-                              </button>
-                            </div>
-                          ) : errCount > 0 ? (
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => {
-                                  setMonthlyCloseMonth(monthKey);
-                                  handleMonthlyCheck(monthKey);
-                                }}
-                                className="bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
-                              >
-                                🛡️ 再チェック
-                              </button>
-                              <span className="text-xs font-bold text-red-500 flex items-center px-2">※エラー解消が必要です</span>
-                            </div>
-                          ) : isStale ? (
-                            <button
-                              onClick={() => {
-                                setMonthlyCloseMonth(monthKey);
-                                handleMonthlyCheck(monthKey);
-                              }}
-                              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
-                            >
-                              🛡️ 月次チェックを実行
-                            </button>
-                          ) : (
-                            // A案: 警告があってもロック可能
-                            <button
-                              onClick={() => handleLockMonth(selectedYear, monthKey)}
-                              className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-xs font-bold shadow-sm transition-colors"
-                            >
-                              🔒 ロックして確定
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {Object.keys(monthlyLocks).length > 0 && (
-                  <div className="mt-8 pt-4 border-t border-slate-200">
-                    <p className="text-xs font-bold text-slate-600 mb-2">ロック履歴</p>
-                    <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
-                      {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
-                        Object.entries(months).map(([mk, info]) => {
-                          const mLabel = mk === "bonus" ? "賞与1" : mk === "bonus2" ? "賞与2" : `${parseInt(mk, 10)}月`;
-                          return (
-                            <div key={`${yr}_${mk}`} className="flex flex-wrap items-center gap-3 text-xs bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
-                              <span className={`font-black ${info.locked ? "text-purple-700" : "text-slate-500"}`}>
-                                {info.locked ? "🔒" : "🔓"} {yr}年度 {mLabel}
-                              </span>
-                              {info.locked && <span className="text-slate-600">確定: {info.lockedAt ? new Date(info.lockedAt).toLocaleString("ja-JP") : "-"}</span>}
-                              {!info.locked && info.unlockedAt && <span className="text-slate-600">解除: {new Date(info.unlockedAt).toLocaleString("ja-JP")} — 理由: {info.unlockReason}</span>}
-                              <button
-                                onClick={() => setShowLockHistoryKey(showLockHistoryKey === `${yr}_${mk}` ? null : `${yr}_${mk}`)}
-                                className="ml-auto text-indigo-600 font-bold hover:underline"
-                              >
-                                詳細履歴
-                              </button>
-                              {showLockHistoryKey === `${yr}_${mk}` && (
-                                <div className="w-full mt-2 pl-4 border-l-2 border-slate-300">
-                                  {(info.history || []).map((h, hi) => (
-                                    <div key={hi} className="mb-1 text-slate-600">
-                                      <span className={h.action === "lock" ? "text-purple-600 font-bold" : "text-orange-600 font-bold"}>
-                                        {h.action === "lock" ? "🔒 ロック" : "🔓 解除"}
-                                      </span>
-                                      <span className="ml-2">{new Date(h.at).toLocaleString("ja-JP")} by {h.by}</span>
-                                      {h.reason && <span className="ml-2 bg-slate-100 px-1 rounded">理由: {h.reason}</span>}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* 印刷用の print-area */}
-            {monthlyClosePrintMode === "monthlySummary" &&
-              !isBulkPrintOpen &&
-              !slipEmployeeId &&
-              !isLedgerPrintOpen && (
-                <div className="print-only-block print-area">
-                  {renderMonthlySummary(monthlyCloseMonth)}
-                </div>
-              )}
-          </div>
+            )}
+          </>
         )}
 
        {/* --- 帳票出力 独立画面 --- */}

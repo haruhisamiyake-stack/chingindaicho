@@ -3023,6 +3023,15 @@ const App = () => {
   const [selectedYear, setSelectedYear] = useState(null);
   const initializedYearsRef = useRef({});
 
+  // ★ save 副作用分離用 ref 群
+  //   updater 内で handleSave を直接呼ぶ旧構造は、StrictMode/Concurrent Rendering で updater が
+  //   再実行/中断されると save 多重発火・順序逆転を招く。pendingSavesRef にペイロードを積み、
+  //   debounce で最新の1件のみを保存する。順序逆転は seq 番号で検知してスキップする。
+  const pendingSavesRef = useRef(new Map());   // empId -> { empId, master, data, seq }
+  const saveTimersRef = useRef(new Map());     // empId -> setTimeout handle
+  const saveSeqRef = useRef(0);                // モノトニック増加カウンタ
+  const latestSaveSeqByEmpRef = useRef(new Map()); // empId -> 最新 seq (古い save を破棄するため)
+
   const [importFile, setImportFile] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [importError, setImportError] = useState("");
@@ -3624,6 +3633,7 @@ const App = () => {
         }
         emps[doc.id] = empData;
       });
+      console.log("[snapshot replace]", { incoming: Object.keys(emps).length });
       setEmployees(emps);
       setLoading(false);
     });
@@ -3670,7 +3680,14 @@ const App = () => {
       unsubSettings();
       unsubLocks();
     };
-  }, [isAuthReady, userId, selectedTenantId, settings?.editableYear]);
+    // ★ settings?.editableYear を deps から削除。
+    //   旧実装は editableYear 変更で unsub→再 sub が起こり、その瞬間の onSnapshot で
+    //   setEmployees(emps) 全置換が発生 → ローカルの未保存変更が消える事故の温床だった。
+    //   subscribe 内で settings を closure 参照する箇所（getDefaultYear 等）は editableYear の
+    //   旧値を見続けることになるが、defaultYear 由来の初期化は新規社員追加直後の一度限りで
+    //   実害は限定的。ここでは「データ消失防止」を優先する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthReady, userId, selectedTenantId]);
 
   // ★ 追加：税額表データの取得（全テナント共通）
   useEffect(() => {
@@ -4082,11 +4099,11 @@ const App = () => {
       }
     }
 
-    if (hasNullTax) {
-      setSaveStatus("保存停止中(計算不可)");
-      setTimeout(() => setSaveStatus(""), 3000);
-      return false;
-    }
+    // ★ hasNullTax でも保存続行する。
+    //   旧実装は save を完全スキップしていたため、ローカル変更だけが存在し Firestore は古い
+    //   状態のまま → 任意のタイミングで onSnapshot が来ると古い値で setEmployees 全置換 →
+    //   入力が消える事故が頻発。今回 status 表示は残しつつ、保存自体は必ず行う方針へ変更。
+    console.log("[handleSave]", { empId, hasNullTax });
 
     setSaveStatus("保存中...");
     try {
@@ -4100,14 +4117,83 @@ const App = () => {
         },
         { merge: true }
       );
-      setSaveStatus("完了");
-      setTimeout(() => setSaveStatus(""), 2000);
+      // 計算不可項目が残っているときは警告表示、それ以外は通常の完了表示
+      if (hasNullTax) {
+        setSaveStatus("保存完了（⚠ 計算不可項目あり）");
+        setTimeout(() => setSaveStatus(""), 3000);
+      } else {
+        setSaveStatus("完了");
+        setTimeout(() => setSaveStatus(""), 2000);
+      }
       return true;
     } catch (e) {
       setSaveStatus("エラー");
       return false;
     }
   };
+
+  // ★ save 副作用分離 helper
+  //   update 系関数の setEmployees updater から handleSave 直接呼出を分離するための
+  //   debounce queue。同一社員への複数 save を最後の1件にまとめ、順序逆転は seq で検知。
+  //   debounce=300ms（keystroke / Tab 移動で連発しない最小値）。
+  const queueEmployeeSave = (empId, master, data) => {
+    if (!empId) return;
+    const seq = ++saveSeqRef.current;
+
+    pendingSavesRef.current.set(empId, { empId, master, data, seq });
+    latestSaveSeqByEmpRef.current.set(empId, seq);
+
+    // 同一社員に既存タイマーがあればキャンセル（最新ペイロードで上書き）
+    if (saveTimersRef.current.has(empId)) {
+      clearTimeout(saveTimersRef.current.get(empId));
+    }
+
+    console.log("[queueEmployeeSave]", { empId, seq });
+
+    const timer = setTimeout(async () => {
+      const pending = pendingSavesRef.current.get(empId);
+      if (!pending) return;
+
+      // 自分が登録された seq よりさらに新しい save が積まれている場合はスキップ
+      const latestSeq = latestSaveSeqByEmpRef.current.get(empId);
+      if (pending.seq !== latestSeq) {
+        console.log("[save stale skip]", { empId, seq: pending.seq, latestSeq });
+        // ペンディング自体は次の最新タイマーがクリアして上書きしているはずだが、念のため
+        return;
+      }
+
+      // タイマー発火・実行に入る前に pending を取り出して削除（再入抑止）
+      pendingSavesRef.current.delete(empId);
+      saveTimersRef.current.delete(empId);
+
+      console.log("[save timer fire]", { empId, seq: pending.seq });
+      let ok = false;
+      try {
+        ok = await handleSave(pending.empId, pending.master, pending.data);
+      } catch (e) {
+        ok = false;
+      }
+
+      // save 完了後にさらに新しい save が積まれていれば、ここの結果は無視扱い
+      const latestSeqAfter = latestSaveSeqByEmpRef.current.get(empId);
+      if (pending.seq !== latestSeqAfter) {
+        console.log("[save stale skip]", { empId, seq: pending.seq, latestSeq: latestSeqAfter });
+        return;
+      }
+      console.log("[save complete]", { empId, seq: pending.seq, ok });
+    }, 300);
+
+    saveTimersRef.current.set(empId, timer);
+  };
+
+  // ★ unmount cleanup: 残存タイマーをクリア。
+  //   今回は単純な timer clear のみ（pending を flush する責任は次回以降に検討）。
+  useEffect(() => {
+    return () => {
+      saveTimersRef.current.forEach((timer) => clearTimeout(timer));
+      saveTimersRef.current.clear();
+    };
+  }, []);
 
   const handleAddEmployee = () => {
     if (!selectedTenantId) return;
@@ -4402,40 +4488,73 @@ const App = () => {
     updateDataObj(selectedYear, newData);
   };
 
+  // ★ functional update 化: prev から最新 employee を取得し、master も prev 由来を使う。
+  //   save 副作用は updater 外の queueEmployeeSave 経由で実行（debounce + seq による順序保証）。
+  //   newData 自体は呼び出し元から渡されるため、本関数を直接呼ぶ legacy パス
+  //   (updateManualOverride / toggleNursingIns / copyPreviousMonth 等) は依然
+  //   呼び出し元の closure data 経由で newData を組んでいるが、commit と save は
+  //   prev ベースに統一して連続更新時の取りこぼしを防ぐ。
   const updateDataObj = (year, newData) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId) return;
-    setEmployees((prev) => ({
-      ...prev,
-      [selectedEmployeeId]: { ...prev[selectedEmployeeId], data: newData },
-    }));
-    handleSave(selectedEmployeeId, master, newData);
+    const empId = selectedEmployeeId;
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      savePayload = { empId, master: currentEmp.master, data: newData };
+      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
+    }
   };
 
+  // ★ functional update 化: closure の data を一切読まず、prev から最新値を取得して
+  //   newData を組み立てる。連続入力時に前の入力が「古い data ベースで上書き」される事故を防ぐ。
+  //   既存年度が無ければ明示的に createInitialYearData で生成（既存破壊しない分岐）。
+  //   save 副作用は updater 外の queueEmployeeSave 経由で実行（StrictMode/Concurrent 対応）。
   const updateMonthly = (year, m, field, val) => {
     if (isLockedYear(year) || !year) return;
-    if (!selectedEmployeeId || !data) return;
-    const currentYearDataObj =
-      data.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[m] || {};
-
-    // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
-    if (field !== "isLocked" && currentMonthData.isLocked) return;
-    if (field !== "isLocked" && isMonthGloballyLocked(year, m)) return;
-    const newData = {
-      ...data,
-      years: {
-        ...data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [m]: { ...currentMonthData, [field]: val },
+    if (!selectedEmployeeId) return;
+    const empId = selectedEmployeeId;
+    console.log("[updateMonthly]", { empId, year, month: m, field, value: val });
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      const currentData = currentEmp.data || { years: {} };
+      // 明示分岐: 既存があれば既存、無ければ生成（既存破壊を防ぐ）
+      let currentYearDataObj;
+      if (currentData.years?.[year]) {
+        currentYearDataObj = currentData.years[year];
+      } else {
+        currentYearDataObj = createInitialYearData(year, settings);
+      }
+      const currentMonthData = currentYearDataObj.monthly?.[m] || {};
+      // ロック判定（isLocked 自身の切替は許可）
+      if (field !== "isLocked" && currentMonthData.isLocked) return prev;
+      if (field !== "isLocked" && isMonthGloballyLocked(year, m)) return prev;
+      const newData = {
+        ...currentData,
+        years: {
+          ...(currentData.years || {}),
+          [year]: {
+            ...currentYearDataObj,
+            monthly: {
+              ...(currentYearDataObj.monthly || {}),
+              [m]: { ...currentMonthData, [field]: val },
+            },
           },
         },
-      },
-    };
-    updateDataObj(year, newData);
+      };
+      console.log("[setEmployees latest]", { prevData: currentData, newData });
+      savePayload = { empId, master: currentEmp.master, data: newData };
+      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
+    }
   };
 
   const updateManualOverride = (year, month, fieldKey, overrideObj) => {
@@ -4469,32 +4588,52 @@ const App = () => {
     updateDataObj(year, newData);
   };
 
+  // ★ functional update 化: closure の data を読まず、prev から最新値で newData を構築。
+  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
   const updateBonus = (year, bonusKey, field, id, val) => {
     if (isLockedYear(year) || !year) return;
-    if (!selectedEmployeeId || !data) return;
-    const currentYearDataObj =
-      data.years?.[year] || createInitialYearData(year, settings);
-    const currentBonus = currentYearDataObj[bonusKey] || {
-      basePay: 0,
-      allowanceAmounts: {},
-      deductionAmounts: {},
-      incomeTax: 0,
-      residentTax: 0,
-    };
-    const newBonus = { ...currentBonus };
-    if (id) newBonus[field] = { ...(newBonus[field] || {}), [id]: val };
-    else newBonus[field] = val;
-    const newData = {
-      ...data,
-      years: {
-        ...data.years,
-        [year]: {
-          ...currentYearDataObj,
-          [bonusKey]: newBonus,
+    if (!selectedEmployeeId) return;
+    const empId = selectedEmployeeId;
+    console.log("[updateBonus]", { empId, year, bonusKey, field, id, value: val });
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      const currentData = currentEmp.data || { years: {} };
+      // 明示分岐: 既存があれば既存、無ければ生成
+      let currentYearDataObj;
+      if (currentData.years?.[year]) {
+        currentYearDataObj = currentData.years[year];
+      } else {
+        currentYearDataObj = createInitialYearData(year, settings);
+      }
+      const currentBonus = currentYearDataObj[bonusKey] || {
+        basePay: 0,
+        allowanceAmounts: {},
+        deductionAmounts: {},
+        incomeTax: 0,
+        residentTax: 0,
+      };
+      const newBonus = { ...currentBonus };
+      if (id) newBonus[field] = { ...(newBonus[field] || {}), [id]: val };
+      else newBonus[field] = val;
+      const newData = {
+        ...currentData,
+        years: {
+          ...(currentData.years || {}),
+          [year]: {
+            ...currentYearDataObj,
+            [bonusKey]: newBonus,
+          },
         },
-      },
-    };
-    updateDataObj(year, newData);
+      };
+      console.log("[setEmployees latest]", { prevData: currentData, newData });
+      savePayload = { empId, master: currentEmp.master, data: newData };
+      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
+    }
   };
 
   const toggleNursingIns = (year, targetMonth) => {
@@ -4608,38 +4747,52 @@ const App = () => {
     handleSave(empId, emp.master, updatedEmpData);
   };
 
+  // ★ functional update 化: closure の employees[empId] を読まず、prev から最新値を取得。
+  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
   const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
     if (isLockedYear(year) || !year) return;
-    const emp = employees[empId];
-    if (!emp) return;
-    const currentYearDataObj =
-      emp.data?.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
-
-    // ★追加: 月がロックされていたら編集無効 (isLocked自身の切り替えは許可)
-    if (field !== "isLocked" && currentMonthData.isLocked) return;
-    if (field !== "isLocked" && isMonthGloballyLocked(year, monthKey)) return;
-    const newData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [monthKey]: { ...currentMonthData, [field]: val },
+    console.log("[updateEmployeeMonthly]", { empId, year, month: monthKey, field, value: val });
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      const currentData = currentEmp.data || { years: {} };
+      // 明示分岐: 既存があれば既存、無ければ生成
+      let currentYearDataObj;
+      if (currentData.years?.[year]) {
+        currentYearDataObj = currentData.years[year];
+      } else {
+        currentYearDataObj = createInitialYearData(year, settings);
+      }
+      const currentMonthData = currentYearDataObj.monthly?.[monthKey] || {};
+      // ロック判定（isLocked 自身の切替は許可）
+      if (field !== "isLocked" && currentMonthData.isLocked) return prev;
+      if (field !== "isLocked" && isMonthGloballyLocked(year, monthKey)) return prev;
+      const newData = {
+        ...currentData,
+        years: {
+          ...(currentData.years || {}),
+          [year]: {
+            ...currentYearDataObj,
+            monthly: {
+              ...(currentYearDataObj.monthly || {}),
+              [monthKey]: { ...currentMonthData, [field]: val },
+            },
           },
         },
-      },
-    };
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: newData },
-    }));
-    handleSave(empId, emp.master, newData);
+      };
+      console.log("[setEmployees latest]", { prevData: currentData, newData });
+      savePayload = { empId, master: currentEmp.master, data: newData };
+      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
+    }
   };
 
   // 月別ビュー用の手当・控除オブジェクト更新関数
+  // ★ functional update 化: closure の employees[empId] を読まず、prev から最新値を取得。
+  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
   const updateEmployeeMonthlyObject = (
     empId,
     year,
@@ -4649,37 +4802,44 @@ const App = () => {
     val
   ) => {
     if (isLockedYear(year) || !year) return;
-    const emp = employees[empId];
-    if (!emp) return;
-    const currentYearDataObj =
-      emp.data?.years?.[year] || createInitialYearData(year, settings);
-    const currentMonthData = currentYearDataObj.monthly[monthKey] || {};
-
-    // 月がロックされていたら編集無効
-    if (currentMonthData.isLocked) return;
-    if (isMonthGloballyLocked(year, monthKey)) return;
-
-    const currentObj = currentMonthData[field] || {};
-    const newObj = { ...currentObj, [objKey]: val };
-
-    const newData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [year]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [monthKey]: { ...currentMonthData, [field]: newObj },
+    console.log("[updateEmployeeMonthlyObject]", { empId, year, month: monthKey, field, objKey, value: val });
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      const currentData = currentEmp.data || { years: {} };
+      // 明示分岐: 既存があれば既存、無ければ生成
+      let currentYearDataObj;
+      if (currentData.years?.[year]) {
+        currentYearDataObj = currentData.years[year];
+      } else {
+        currentYearDataObj = createInitialYearData(year, settings);
+      }
+      const currentMonthData = currentYearDataObj.monthly?.[monthKey] || {};
+      if (currentMonthData.isLocked) return prev;
+      if (isMonthGloballyLocked(year, monthKey)) return prev;
+      const currentObj = currentMonthData[field] || {};
+      const newObj = { ...currentObj, [objKey]: val };
+      const newData = {
+        ...currentData,
+        years: {
+          ...(currentData.years || {}),
+          [year]: {
+            ...currentYearDataObj,
+            monthly: {
+              ...(currentYearDataObj.monthly || {}),
+              [monthKey]: { ...currentMonthData, [field]: newObj },
+            },
           },
         },
-      },
-    };
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: newData },
-    }));
-    handleSave(empId, emp.master, newData);
+      };
+      console.log("[setEmployees latest]", { prevData: currentData, newData });
+      savePayload = { empId, master: currentEmp.master, data: newData };
+      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
+    }
   };
 
   const handleSaveResidentTaxBulk = async (

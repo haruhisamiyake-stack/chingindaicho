@@ -6843,8 +6843,8 @@ const App = () => {
               </div>
               {/* ▼ 印刷用の print-only print-area: 帳票出力と同じ renderMonthlySummary を描画 ▼ */}
               {/* Tailwind の hidden は display:none で、@media print の visibility 制御では復元されないため
-                  専用の .print-only-block クラスで !important display:block を強制する。 */}
-              <div className="print-only-block print-area">
+                 専用の .print-only-block クラスで !important display:block を強制する。 */}
+              <div className="print-only-block print-area monthly-summary-print-area">
                 {renderMonthlySummary(ledgerSelectedMonth)}
               </div>
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col mb-4">
@@ -12971,7 +12971,7 @@ const App = () => {
               monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey}
             />
             {monthlyClosePrintMode === "monthlySummary" && !isBulkPrintOpen && !slipEmployeeId && !isLedgerPrintOpen && (
-              <div className="print-only-block print-area">
+              <div className="print-only-block print-area monthly-summary-print-area">
                 {renderMonthlySummary(monthlyCloseMonth)}
               </div>
             )}
@@ -13157,7 +13157,7 @@ const App = () => {
             {/* 印刷センター固有(支給控除一覧表)を印刷する時のみ自身を print-area として扱う。
                 給与明細・賃金台帳は既存印刷モーダルへ委譲するため、その間は print-area を外して
                 印刷時の二重表示・レイアウト衝突を防ぐ。 */}
-            <div className={`flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative ${(slipEmployeeId || isBulkPrintOpen || isLedgerPrintOpen) ? "" : "print-area print:rounded-none print:shadow-none print:border-0 print:p-0 print:m-0 print:overflow-visible print:block"}`}>
+            <div className={`flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative ${(slipEmployeeId || isBulkPrintOpen || isLedgerPrintOpen) ? "" : "print-area print:rounded-none print:shadow-none print:border-0 print:p-0 print:m-0 print:overflow-visible print:block monthly-summary-print-area"}`}>
               <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-300 no-print">
                 <h3 className="text-lg font-black text-slate-700 flex items-center gap-2">
                   <Printer size={20} className="text-slate-500" />
@@ -15037,6 +15037,52 @@ const App = () => {
             margin: 0 !important;
             padding: 0 !important;
           }
+
+          /* ▼▼▼ 支給控除一覧表専用：空白ページ除去と最上部配置 ▼▼▼ */
+          /* 1. 印刷エリア以外の兄弟要素を完全に非表示にする */
+          body:has(.monthly-summary-print-area) > *:not(:has(.monthly-summary-print-area)) {
+            display: none !important;
+          }
+          
+          /* 2. html, body, rootの高さと余白を完全にリセットして1枚目に固定 */
+          html:has(.monthly-summary-print-area),
+          body:has(.monthly-summary-print-area),
+          body:has(.monthly-summary-print-area) #root,
+          body:has(.monthly-summary-print-area) #root > div {
+            height: auto !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            position: static !important;
+            overflow: visible !important;
+          }
+
+          /* 3. 印刷エリア自身を1枚目の絶対的な最上部に配置 */
+          .monthly-summary-print-area {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            page-break-before: avoid !important;
+          }
+
+          /* 4. テーブルの改ページ制御 */
+          .monthly-summary-print-area table {
+            page-break-inside: auto !important;
+            break-inside: auto !important;
+            table-layout: auto !important;
+            margin-top: 0 !important;
+          }
+          .monthly-summary-print-area tr {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          .monthly-summary-print-area thead {
+            display: table-header-group !important;
+          }
+          /* ▲▲▲ 支給控除一覧表専用：空白ページ除去と最上部配置 ▲▲▲ */
 
           /* ▼▼▼ 賃金台帳専用：正確なDOM階層に基づいた改ページ対応リファクタリング ▼▼▼ */
           

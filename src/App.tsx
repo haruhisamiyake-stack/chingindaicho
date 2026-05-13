@@ -2375,6 +2375,25 @@ const MONTHLY_STATUS_TYPES = {
 // [月次ステータスエンジン] 責務分離
 // ============================================================================
 
+// 軽量なハッシュキーを生成する関数（JSON.stringifyの代替）
+const getRowHash = (_row) => {
+  if (!_row) return "null";
+  const keys = [
+    _row.basePay, _row.workingDays, _row.workingHours, _row.overtimeHours, _row.lateNightHours, _row.holidayHours,
+    _row.residentTax, _row.stdAmountHealth, _row.stdAmountPension, _row.stdAmount, _row.isLocked, _row.hasNursingIns,
+    _row.payDate, _row.isDoubleSocialIns, _row.over6Months
+  ];
+  let alw = "";
+  if (_row.allowanceAmounts) {
+    for (const k in _row.allowanceAmounts) alw += `${k}:${_row.allowanceAmounts[k]},`;
+  }
+  let ded = "";
+  if (_row.deductionAmounts) {
+    for (const k in _row.deductionAmounts) ded += `${k}:${_row.deductionAmounts[k]},`;
+  }
+  return keys.join("|") + "|" + alw + "|" + ded;
+};
+
 // 1. 集計処理
 const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache }) => {
   let activeEmployeeCount = 0;
@@ -2384,10 +2403,10 @@ const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, setting
   const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
 
   Object.entries(employees).forEach(([empId, emp]) => {
+    // モジュールスコープの純粋関数を直接参照
     const _yd = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
     const _row = isBonusList ? (_yd[monthKey] || {}) : (_yd.monthly?.[monthKey] || {});
 
-    // 退職者のうち、実績データがない場合はスキップ
     if (emp.master?.status === "retired") {
       if (!(Number(_row.basePay) > 0 || Object.keys(_row.allowanceAmounts || {}).length > 0)) return;
     }
@@ -2396,14 +2415,15 @@ const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, setting
 
     activeEmployeeCount++;
 
-    // キャッシュ戦略: プリミティブな更新日時またはJSON文字列をバージョンとしてキーに含める
-    const empVersion = emp.updatedAt || emp.modifiedAt || emp.data?.updatedAt || JSON.stringify(_row);
+    const rowHash = getRowHash(_row);
+    const empVersion = emp.updatedAt || emp.modifiedAt || emp.data?.updatedAt || rowHash;
     const cacheKey = `${empId}_${selectedYear}_${monthKey}_${empVersion}`;
 
     let _calc;
     if (calcCache.has(cacheKey)) {
       _calc = calcCache.get(cacheKey);
     } else {
+      // モジュールスコープの純粋関数を直接参照
       _calc = isBonusList
         ? calculateBonusResult({
             master: emp.master, bonusRow: _row, bonusKey: monthKey,
@@ -2455,6 +2475,7 @@ const buildMonthlyCloseStatus = ({ monthKey, selectedYear, employees, monthlyChe
   const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
   const monthLabel = monthKey === "bonus" ? "賞与①" : monthKey === "bonus2" ? "賞与②" : `${parseInt(monthKey, 10)}月支給分`;
 
+  // depsの受け渡しを廃止
   const aggregates = calculateMonthlyAggregates({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache });
   const isNoData = aggregates.activeEmployeeCount === 0;
   
@@ -2521,6 +2542,12 @@ const buildMonthlyCloseStatus = ({ monthKey, selectedYear, employees, monthlyChe
 // ============================================================================
 // [カスタムHook] 月次ステータスの同期・キャッシュ管理
 // ============================================================================
+// 【設計方針の明文化】 Domain State と UI State の分離
+// 将来の Reducer 化において、当 Hook が扱う以下の引数は「Domain State」として
+// MonthlyCloseContext (または Reducer) に格納されるべきデータです。
+// - monthlyCheckResults, monthlyLocks
+// 対して、以下のデータは「UI State」であり、高頻度で更新されるため別管理とします。
+// - monthlyClosePrintMode, checkModalData (モーダル開閉) 等
 const useMonthlyCloseStatuses = ({ selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, monthlyCloseMonth }) => {
   // キャッシュスコープのバージョン判定。このキーが変わった時だけ同期的にMapをリセットする。
   const settingsVersion = effectiveSettings?.updatedAt || effectiveSettings?.version || JSON.stringify({
@@ -2554,6 +2581,7 @@ const useMonthlyCloseStatuses = ({ selectedYear, employees, monthlyCheckResults,
       buildMonthlyCloseStatus({
         monthKey, selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables,
         calcCache: cacheRef.current.map
+        // deps の注入を廃止し、純粋関数はモジュールスコープから直接参照させる
       })
     );
   }, [employees, selectedYear, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, cacheScopeKey]);
@@ -2562,11 +2590,63 @@ const useMonthlyCloseStatuses = ({ selectedYear, employees, monthlyCheckResults,
 
   return { monthlyCloseStatuses, currentStatus };
 };
+// ============================================================================
+// [UIコンポーネント] Custom Hook: 月次締めアクションの分離
+// ============================================================================
+const useMonthlyCloseActions = ({
+  selectedYear,
+  setMonthlyCloseMonth,
+  handleMonthlyCheck,
+  handleLockMonth,
+  handleUnlockMonth,
+  startBulkPrint,
+  BULK_PRINT_TYPES,
+  setMonthlyClosePrintMode,
+  setCheckModalData
+}) => {
+  const handleCheck = React.useCallback((monthKey) => {
+    setMonthlyCloseMonth(monthKey);
+    handleMonthlyCheck(monthKey);
+  }, [setMonthlyCloseMonth, handleMonthlyCheck]);
 
+  const handleLock = React.useCallback((monthKey) => {
+    handleLockMonth(selectedYear, monthKey);
+  }, [handleLockMonth, selectedYear]);
+
+  const handleUnlock = React.useCallback((monthKey, reason) => {
+    handleUnlockMonth(selectedYear, monthKey, reason);
+  }, [handleUnlockMonth, selectedYear]);
+
+  const handleViewDetails = React.useCallback((status) => {
+    setCheckModalData({ month: status.monthKey, errors: status.rawErrors, warnings: status.rawWarnings, infos: status.rawInfos });
+  }, [setCheckModalData]);
+
+  const handlePrintSummary = React.useCallback((monthKey) => {
+    setMonthlyCloseMonth(monthKey);
+    setMonthlyClosePrintMode("monthlySummary");
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      setMonthlyClosePrintMode(null);
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup, { once: true });
+    setTimeout(() => { window.print(); setTimeout(cleanup, 1000); }, 0);
+  }, [setMonthlyCloseMonth, setMonthlyClosePrintMode]);
+
+  const handlePrintPayslip = React.useCallback((monthKey) => {
+    startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, monthKey);
+  }, [startBulkPrint, BULK_PRINT_TYPES]);
+
+  return React.useMemo(() => ({
+    handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip
+  }), [handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip]);
+};
 // ============================================================================
 // [UIコンポーネント] 月次締めダッシュボード 行アイテム
 // ============================================================================
-const MonthlyCloseRow = ({ status, selectedYear, onCheck, onLock, onUnlock, onViewDetails, onPrintSummary, onPrintPayslip }) => {
+const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onUnlock, onViewDetails, onPrintSummary, onPrintPayslip }) => {
   const [unlockReason, setUnlockReason] = useState("");
 
   return (
@@ -2631,7 +2711,7 @@ const MonthlyCloseRow = ({ status, selectedYear, onCheck, onLock, onUnlock, onVi
             <button
               onClick={() => {
                 if (!unlockReason) return alert("理由を入力してください");
-                onUnlock(selectedYear, status.monthKey, unlockReason);
+                onUnlock(status.monthKey, unlockReason);
                 setUnlockReason("");
               }}
               className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-md transition-colors"
@@ -2663,7 +2743,7 @@ const MonthlyCloseRow = ({ status, selectedYear, onCheck, onLock, onUnlock, onVi
         )}
 
         {status.availableActions.canLock && (
-          <button onClick={() => onLock(selectedYear, status.monthKey)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg text-sm font-bold shadow-md transition-colors">
+          <button onClick={() => onLock(status.monthKey)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg text-sm font-bold shadow-md transition-colors">
             <Lock size={14} /> ロックして確定
           </button>
         )}
@@ -2674,7 +2754,7 @@ const MonthlyCloseRow = ({ status, selectedYear, onCheck, onLock, onUnlock, onVi
       </div>
     </div>
   );
-};
+});
 
 // ============================================================================
 // [UIコンポーネント] ロック・解除履歴
@@ -2727,7 +2807,7 @@ const MonthlyLockHistory = ({ monthlyLocks, showLockHistoryKey, setShowLockHisto
 // ============================================================================
 // [UIコンポーネント] 月次締めダッシュボード 本体
 // ============================================================================
-const MonthlyCloseDashboard = ({
+const MonthlyCloseDashboard = React.memo(({
   selectedYear, setSelectedYear, yearsList,
   monthlyCloseMonth, setMonthlyCloseMonth,
   monthlyCloseStatuses, currentStatus,
@@ -2736,6 +2816,11 @@ const MonthlyCloseDashboard = ({
   setMonthlyClosePrintMode, setCheckModalData,
   monthlyLocks, showLockHistoryKey, setShowLockHistoryKey
 }) => {
+  const actions = useMonthlyCloseActions({
+    selectedYear, setMonthlyCloseMonth, handleMonthlyCheck, handleLockMonth, handleUnlockMonth,
+    startBulkPrint, BULK_PRINT_TYPES, setMonthlyClosePrintMode, setCheckModalData
+  });
+
   return (
     <div className="p-6 max-w-[1400px] mx-auto h-full overflow-y-auto pb-20">
       <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6">
@@ -2768,7 +2853,7 @@ const MonthlyCloseDashboard = ({
               <option value="bonus">賞与①</option>
               <option value="bonus2">賞与②</option>
             </select>
-            <button onClick={() => handleMonthlyCheck(monthlyCloseMonth)} className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow-sm transition-colors">
+            <button onClick={() => actions.handleCheck(monthlyCloseMonth)} className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow-sm transition-colors">
               <ShieldCheck size={16} /> 実行
             </button>
           </div>
@@ -2793,7 +2878,7 @@ const MonthlyCloseDashboard = ({
               )}
               {currentStatus.availableActions.canViewErrors && (
                 <button
-                  onClick={() => setCheckModalData({ month: currentStatus.monthKey, errors: currentStatus.rawErrors, warnings: currentStatus.rawWarnings, infos: currentStatus.rawInfos })}
+                  onClick={() => actions.handleViewDetails(currentStatus)}
                   className="mt-3 text-[10px] font-bold text-indigo-600 hover:text-indigo-500 underline"
                 >
                   詳細を確認する
@@ -2811,24 +2896,13 @@ const MonthlyCloseDashboard = ({
           <p className="text-xs text-slate-500 mb-4">対象月の帳票を印刷・PDF保存できます。</p>
           <div className="flex flex-wrap gap-2">
             <button
-              onClick={() => {
-                setMonthlyClosePrintMode("monthlySummary");
-                let cleaned = false;
-                const cleanup = () => {
-                  if (cleaned) return;
-                  cleaned = true;
-                  setMonthlyClosePrintMode(null);
-                  window.removeEventListener("afterprint", cleanup);
-                };
-                window.addEventListener("afterprint", cleanup, { once: true });
-                setTimeout(() => { window.print(); setTimeout(cleanup, 1000); }, 0);
-              }}
+              onClick={() => actions.handlePrintSummary(monthlyCloseMonth)}
               className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
             >
               <Printer size={16} /> 支給控除一覧表
             </button>
             <button
-              onClick={() => startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, monthlyCloseMonth)}
+              onClick={() => actions.handlePrintPayslip(monthlyCloseMonth)}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors"
             >
               <Printer size={16} /> 給与明細を一括
@@ -2847,19 +2921,12 @@ const MonthlyCloseDashboard = ({
                 key={status.monthKey}
                 status={status}
                 selectedYear={selectedYear}
-                onCheck={(m) => { setMonthlyCloseMonth(m); handleMonthlyCheck(m); }}
-                onLock={handleLockMonth}
-                onUnlock={handleUnlockMonth}
-                onViewDetails={(st) => setCheckModalData({ month: st.monthKey, errors: st.rawErrors, warnings: st.rawWarnings, infos: st.rawInfos })}
-                onPrintSummary={(m) => {
-                  setMonthlyCloseMonth(m);
-                  setMonthlyClosePrintMode("monthlySummary");
-                  let cleaned = false;
-                  const cleanup = () => { if (cleaned) return; cleaned = true; setMonthlyClosePrintMode(null); window.removeEventListener("afterprint", cleanup); };
-                  window.addEventListener("afterprint", cleanup, { once: true });
-                  setTimeout(() => { window.print(); setTimeout(cleanup, 1000); }, 0);
-                }}
-                onPrintPayslip={(m) => startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, m)}
+                onCheck={actions.handleCheck}
+                onLock={actions.handleLock}
+                onUnlock={actions.handleUnlock}
+                onViewDetails={actions.handleViewDetails}
+                onPrintSummary={actions.handlePrintSummary}
+                onPrintPayslip={actions.handlePrintPayslip}
               />
             ))}
           </div>
@@ -2868,7 +2935,7 @@ const MonthlyCloseDashboard = ({
       </div>
     </div>
   );
-};
+});
 
 const App = () => {
   const [activeTab, setActiveTab] = useState("portal");

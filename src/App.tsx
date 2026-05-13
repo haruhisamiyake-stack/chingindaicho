@@ -14700,10 +14700,18 @@ const App = () => {
             display: block !important;
           }
 
-          /* 5. 表の改ページ制御 */
+          /* 5. 表の改ページ制御と罫線・ヘッダーの安定化 */
           #modal-backdrop-ledger-print table {
             page-break-inside: auto !important;
             break-inside: auto !important;
+            border-collapse: collapse !important;
+            table-layout: auto !important; /* 賃金台帳のみ fixed を解除して自然な列幅にする */
+          }
+          #modal-backdrop-ledger-print thead {
+            display: table-header-group !important; /* 2ページ目以降にヘッダーを繰り返す */
+          }
+          #modal-backdrop-ledger-print tfoot {
+            display: table-footer-group !important;
           }
           #modal-backdrop-ledger-print tr {
             page-break-inside: avoid !important;

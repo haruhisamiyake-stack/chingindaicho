@@ -13317,7 +13317,7 @@ const App = () => {
             {/* 印刷センター固有(支給控除一覧表)を印刷する時のみ自身を print-area として扱う。
                 給与明細・賃金台帳は既存印刷モーダルへ委譲するため、その間は print-area を外して
                 印刷時の二重表示・レイアウト衝突を防ぐ。 */}
-            <div className={`flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative ${(slipEmployeeId || isBulkPrintOpen || isLedgerPrintOpen) ? "" : "print-area print:rounded-none print:shadow-none print:border-0 print:p-0 print:m-0 print:overflow-visible print:block monthly-summary-print-area"}`}>
+            <div className={`flex-1 bg-slate-200 print:bg-white rounded-xl shadow-inner border border-slate-300 p-4 md:p-8 flex flex-col overflow-y-auto relative ${(slipEmployeeId || isBulkPrintOpen || isLedgerPrintOpen || printDocType === "monthlySummary") ? "" : "print-area print:rounded-none print:shadow-none print:border-0 print:p-0 print:m-0 print:overflow-visible print:block"}`}>
               <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-300 no-print">
                 <h3 className="text-lg font-black text-slate-700 flex items-center gap-2">
                   <Printer size={20} className="text-slate-500" />
@@ -13650,6 +13650,14 @@ const App = () => {
 
           </div>
         )}
+
+        {/* ▼▼▼ 追加：帳票出力用の「印刷専用ブロック」 ▼▼▼ */}
+        {activeTab === "printCenter" && printDocType === "monthlySummary" && (
+          <div className="print-only-block print-area monthly-summary-print-area">
+            {renderMonthlySummary(printTargetMonth)}
+          </div>
+        )}
+        {/* ▲▲▲ ここまで追加 ▲▲▲ */}
 
         </main>
       </div>

@@ -2390,12 +2390,24 @@ const App = () => {
 
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
+  // 事務所マスタ（全テナント共通）：社会保険料率・標準報酬月額表を事務所単位で共有
+  // 初期値は null。subscribe で doc 由来の値だけを格納し、未保存フィールドは undefined のままにする。
+  // これにより effectiveSettings の3段フォールバック（officeMaster → tenant settings → DEFAULT）が機能する。
+  const [officeMaster, setOfficeMaster] = useState(null);
+
   const [tenants, setTenants] = useState([]);
   const [selectedTenantId, setSelectedTenantId] = useState(null);
   const tenantId = selectedTenantId;
   const effectiveSettings = {
     ...settings,
     businessType: tenants.find(t => t.id === selectedTenantId)?.businessType || settings?.businessType || "general",
+    // officeMaster優先 → tenant settings (legacy) → DEFAULT。customRateSchedules は tenant別維持のため除外。
+    rateSchedules: officeMaster?.rateSchedules ?? settings?.rateSchedules ?? DEFAULT_RATE_SCHEDULES,
+    standardRewardTable: (Array.isArray(officeMaster?.standardRewardTable) && officeMaster.standardRewardTable.length > 0)
+      ? officeMaster.standardRewardTable
+      : (Array.isArray(settings?.standardRewardTable) && settings.standardRewardTable.length > 0
+        ? settings.standardRewardTable
+        : DEFAULT_STD_REWARD_TABLE),
   };
   const [tenantSearchQuery, setTenantSearchQuery] = useState("");
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -3087,6 +3099,37 @@ const App = () => {
     return () => unsubscribe();
   }, [isAuthReady]);
 
+  // ★ 追加：事務所マスタ（社会保険料率・標準報酬月額表）の取得（全テナント共通）
+  // tenant非依存で subscribe。tenant 切替で officeMaster はリセットされない。
+  // doc 由来の値だけを格納し、未保存フィールドは undefined のまま保持して
+  // effectiveSettings の3段フォールバック（officeMaster → tenant settings → DEFAULT）を機能させる。
+  useEffect(() => {
+    if (!isAuthReady) return;
+    const docRef = getDocRef(...PATHS.officeMaster());
+    const unsubscribe = subscribe(docRef, (snap) => {
+      if (!snap.exists()) {
+        // doc 未作成 → 全フィールド undefined のまま（旧 tenant settings へフォールバックさせる）
+        setOfficeMaster({});
+        return;
+      }
+      const d = snap.data();
+      setOfficeMaster({
+        // rateSchedules フィールドが doc にあれば取得、無ければ undefined のまま
+        rateSchedules: d.rateSchedules
+          ? migrateRateSchedules(
+              { ...DEFAULT_RATE_SCHEDULES, ...d.rateSchedules },
+              DEFAULT_SETTINGS.editableYear
+            )
+          : undefined,
+        // standardRewardTable フィールドが doc にあって非空配列なら取得、それ以外は undefined のまま
+        standardRewardTable: Array.isArray(d.standardRewardTable) && d.standardRewardTable.length > 0
+          ? d.standardRewardTable
+          : undefined,
+      });
+    });
+    return () => unsubscribe();
+  }, [isAuthReady]);
+
   // selectedEmployeeId の自動補正:
   // (1) selectedEmployeeId が null/空のとき → 先頭社員へ自動セット(初期表示用)
   // (2) selectedEmployeeId が古い/存在しないIDのとき → 先頭社員へ補正(stale 検知)
@@ -3152,7 +3195,8 @@ const App = () => {
 
   useEffect(() => {
     if (activeTab === "rateTable") {
-      setLocalRateSchedules(JSON.parse(JSON.stringify(settings?.rateSchedules || DEFAULT_RATE_SCHEDULES)));
+      const src = officeMaster?.rateSchedules || settings?.rateSchedules || DEFAULT_RATE_SCHEDULES;
+      setLocalRateSchedules(JSON.parse(JSON.stringify(src)));
       setRateTableErrors([]);
     }
   }, [activeTab]);
@@ -4579,8 +4623,8 @@ const App = () => {
     // ★追加: 月額変更（随時改定）のアラート判定ロジック
     const getsuhenAlerts = {};
     const table =
-      settings?.standardRewardTable?.length > 0
-        ? settings.standardRewardTable
+      effectiveSettings?.standardRewardTable?.length > 0
+        ? effectiveSettings.standardRewardTable
         : DEFAULT_STD_REWARD_TABLE;
 
     for (let i = 3; i < MONTHS.length; i++) {
@@ -8111,7 +8155,7 @@ const App = () => {
                               let hasDeviation = false;
                               if (isApplicable && stdNum > 0 && estAmt > 0 && stdNum !== estAmt) {
                                 hasDeviation = true;
-                                const tbl = settings?.standardRewardTable?.length > 0 ? settings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
+                                const tbl = effectiveSettings?.standardRewardTable?.length > 0 ? effectiveSettings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
                                 const getGrade = (amt) => { const r = tbl.find(rr => amt >= Number(rr.min) && amt < Number(rr.max)); return r ? Number(r.grade) : null; };
                                 const stdGrade = getGrade(stdNum);
                                 const estGrade = getGrade(estAmt);
@@ -8145,7 +8189,11 @@ const App = () => {
                                       </span>
                                     </div>
                                   )}
-                                  <div className="flex items-center gap-0.5 mt-2">
+                                  {/* absolute inset-0: コピーボタン2つ+input を in-flow から外し、
+                                      td の min-content 幅計算(table-layout:auto)に影響させない。
+                                      これがないと月列が min-w-[76px] を超えて広がる。
+                                      wrapper は td の内側(padding inner edge)に貼り付き、内部は通常の flex 横並び。 */}
+                                  <div className="absolute inset-0 flex items-center gap-0.5 mt-2">
                                     {/* 前月コピー: 押下で前月の stdAmountHealth(無ければ legacy stdAmount)を当月へ複製する。
                                         1月(=前月なし)、月次ロック中、未加入(!isApplicable) は disabled。 */}
                                     <button
@@ -8282,7 +8330,7 @@ const App = () => {
                               let hasDeviation = false;
                               if (isApplicable && stdNum > 0 && estAmt > 0 && stdNum !== estAmt) {
                                 hasDeviation = true;
-                                const tbl = settings?.standardRewardTable?.length > 0 ? settings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
+                                const tbl = effectiveSettings?.standardRewardTable?.length > 0 ? effectiveSettings.standardRewardTable : DEFAULT_STD_REWARD_TABLE;
                                 const getGrade = (amt) => { const r = tbl.find(rr => amt >= Number(rr.min) && amt < Number(rr.max)); return r ? Number(r.grade) : null; };
                                 const stdGrade = getGrade(stdNum);
                                 const estGrade = getGrade(estAmt);
@@ -8316,7 +8364,11 @@ const App = () => {
                                       </span>
                                     </div>
                                   )}
-                                  <div className="flex items-center gap-0.5 mt-2">
+                                  {/* absolute inset-0: コピーボタン2つ+input を in-flow から外し、
+                                      td の min-content 幅計算(table-layout:auto)に影響させない。
+                                      これがないと月列が min-w-[76px] を超えて広がる。
+                                      wrapper は td の内側(padding inner edge)に貼り付き、内部は通常の flex 横並び。 */}
+                                  <div className="absolute inset-0 flex items-center gap-0.5 mt-2">
                                     {/* 前月コピー: 押下で前月の stdAmountPension(無ければ legacy stdAmount)を当月へ複製する。
                                         1月(=前月なし)、月次ロック中、未加入(!isApplicable) は disabled。 */}
                                     <button
@@ -9618,7 +9670,7 @@ const App = () => {
                         employmentGeneral: "雇用保険料率（一般の事業）(‰)",
                         employmentConstruction: "雇用保険料率（建設業）(‰)",
                       };
-                      const schedule = settings.rateSchedules?.[typeKey] || [
+                      const schedule = effectiveSettings?.rateSchedules?.[typeKey] || [
                         { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
                       ];
                       const customRSEnabled = settings?.customRateSchedules?.[typeKey]?.enabled === true;
@@ -9627,34 +9679,6 @@ const App = () => {
                       ];
                       const unitLabel = typeKey.includes("employment") ? "‰" : "%";
 
-                      const addSchedule = () => {
-                        const newSched = [
-                          ...schedule,
-                          { startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 },
-                        ];
-                        handleSettingChange("rateSchedules", {
-                          ...settings.rateSchedules,
-                          [typeKey]: newSched,
-                        });
-                      };
-                      const removeSchedule = (idx) => {
-                        const newSched = [...schedule];
-                        newSched.splice(idx, 1);
-                        if (newSched.length === 0)
-                          newSched.push({ startYearMonth: `${reiwaToWestern(settings.editableYear) || 2026}-01`, rate: 0 });
-                        handleSettingChange("rateSchedules", {
-                          ...settings.rateSchedules,
-                          [typeKey]: newSched,
-                        });
-                      };
-                      const updateSchedule = (idx, field, val) => {
-                        const newSched = [...schedule];
-                        newSched[idx] = { ...newSched[idx], [field]: val };
-                        handleSettingChange("rateSchedules", {
-                          ...settings.rateSchedules,
-                          [typeKey]: newSched,
-                        });
-                      };
                       const addCustomSchedule = () => {
                         const newSched = [
                           ...customSchedule,
@@ -9751,42 +9775,31 @@ const App = () => {
                             </div>
                           ) : (
                             <div>
+                              <p className="text-[10px] text-slate-400 mb-2">
+                                ※共通料率は「事務所マスタ」で管理されています（読み取り専用）
+                              </p>
                               <div className="space-y-2 opacity-60">
                                 {schedule.map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-2">
                                     <input
                                       type="month"
                                       value={item.startYearMonth || ""}
-                                      onChange={(e) => updateSchedule(idx, "startYearMonth", e.target.value)}
+                                      readOnly
                                       disabled
-                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none focus:border-indigo-400 w-36 cursor-not-allowed"
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs bg-white text-slate-700 outline-none w-36 cursor-not-allowed"
                                     />
                                     <input
                                       type="number"
                                       step="0.01"
                                       value={item.rate}
-                                      onChange={(e) => updateSchedule(idx, "rate", Number(e.target.value))}
+                                      readOnly
                                       disabled
-                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none focus:border-indigo-400 font-mono cursor-not-allowed"
+                                      className="border border-slate-300 rounded px-2 py-1.5 text-xs w-20 text-right outline-none font-mono cursor-not-allowed"
                                     />
                                     <span className="text-xs text-slate-500">{unitLabel}{unitLabel === "‰" && `（${(item.rate / 10).toFixed(2)}%）`}</span>
-                                    {schedule.length > 1 && (
-                                      <button
-                                        onClick={() => removeSchedule(idx)}
-                                        className="text-red-400 hover:text-red-600 p-1 ml-auto"
-                                      >
-                                        <Trash2 size={14} />
-                                      </button>
-                                    )}
                                   </div>
                                 ))}
                               </div>
-                              <button
-                                onClick={addSchedule}
-                                className="mt-3 text-xs font-bold text-indigo-600 hover:text-indigo-500 flex items-center gap-1 transition-colors"
-                              >
-                                <PlusCircle size={12} /> 変更月を追加
-                              </button>
                             </div>
                           )}
                           {typeKey.includes("employment") && (
@@ -10340,16 +10353,16 @@ const App = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {(settings.standardRewardTable || []).map((row, idx) => {
+                      {(effectiveSettings.standardRewardTable || []).map((row, idx) => {
                         const updateRow = (field, val) => {
-                          const newTable = [...settings.standardRewardTable];
+                          const newTable = [...(effectiveSettings.standardRewardTable || [])];
                           newTable[idx] = { ...newTable[idx], [field]: val };
-                          handleSettingChange("standardRewardTable", newTable);
+                          saveDoc(PATHS.officeMaster(), { standardRewardTable: newTable }, { merge: true }).catch(console.error);
                         };
                         const removeRow = () => {
-                          const newTable = [...settings.standardRewardTable];
+                          const newTable = [...(effectiveSettings.standardRewardTable || [])];
                           newTable.splice(idx, 1);
-                          handleSettingChange("standardRewardTable", newTable);
+                          saveDoc(PATHS.officeMaster(), { standardRewardTable: newTable }, { merge: true }).catch(console.error);
                         };
                         return (
                           <tr key={idx} className="hover:bg-slate-50">
@@ -10414,7 +10427,7 @@ const App = () => {
                   <button
                     onClick={() => {
                       const newTable = [
-                        ...(settings.standardRewardTable || []),
+                        ...(effectiveSettings.standardRewardTable || []),
                       ];
                       const lastGrade =
                         newTable.length > 0
@@ -10426,7 +10439,7 @@ const App = () => {
                         max: 0,
                         monthlyAmount: 0,
                       });
-                      handleSettingChange("standardRewardTable", newTable);
+                      saveDoc(PATHS.officeMaster(), { standardRewardTable: newTable }, { merge: true }).catch(console.error);
                     }}
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-500 flex items-center gap-1 transition-colors"
                   >
@@ -11246,7 +11259,18 @@ const App = () => {
               sorted[key] = [...(local[key] || [])].sort((a, b) => (a.startYearMonth || '').localeCompare(b.startYearMonth || ''));
             });
             setLocalRateSchedules(sorted);
-            handleSettingChange("rateSchedules", sorted);
+            // 事務所マスタ（全テナント共通）に保存
+            setSaveStatus("保存中...");
+            saveDoc(PATHS.officeMaster(), { rateSchedules: sorted }, { merge: true })
+              .then(() => {
+                setSaveStatus("完了");
+                setTimeout(() => setSaveStatus(""), 2000);
+              })
+              .catch((e) => {
+                console.error(e);
+                setSaveStatus("エラー");
+                setTimeout(() => setSaveStatus(""), 2000);
+              });
           };
 
           return (
@@ -11530,8 +11554,8 @@ const App = () => {
                       ? settings.allowanceDefinitions
                       : emp.master?.allowanceDefinitions || [];
                   const table =
-                    settings?.standardRewardTable?.length > 0
-                      ? settings.standardRewardTable
+                    effectiveSettings?.standardRewardTable?.length > 0
+                      ? effectiveSettings.standardRewardTable
                       : DEFAULT_STD_REWARD_TABLE;
 
                   const getMonthData = (m) => {

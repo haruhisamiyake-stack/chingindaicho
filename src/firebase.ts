@@ -43,6 +43,8 @@ export const PATHS = {
   // tax tables (global)
   taxTables:             ()                              => ["taxTables"],
   taxTable:              (docId)                         => ["taxTables", docId],
+  // office master (global; shared across all tenants)
+  officeMaster:          (docId = "v1")                  => ["officeMaster", docId],
   // legacy: tenant-flat (migration source v1)
   legacyTenantEmployees: (tenantId)                      => ["tenants", tenantId, "employees"],
   legacyTenantEmployee:  (tenantId, empId)               => ["tenants", tenantId, "employees", empId],

@@ -2461,12 +2461,18 @@ const App = () => {
   const [selectedListMonth, setSelectedListMonth] = useState("01");
   const [slipEmployeeId, setSlipEmployeeId] = useState(null);
   const [isBulkPrintOpen, setIsBulkPrintOpen] = useState(false); // ▼ 追加: 賃金台帳の表示モードと対象月 ▼
+  
+  const BULK_PRINT_TYPES = {
+    PAYSLIP: "payslip",
+    LEDGER: "ledger",
+  };
+
   // 一括印刷キュー方式: 単票印刷モーダルを使い、社員を順番に切り替える。
   // bulkPrintQueue が非 null の間、単票モーダルに進捗UI(N/M人目)と「次の社員へ」「完了」ボタンが出る。
   // 自動連続印刷(afterprint 経由の自動進行)は行わず、ユーザーが1人ずつ手動で印刷→次へを進める方式。
   const [bulkPrintQueue, setBulkPrintQueue] = useState(null);
   const [bulkPrintIndex, setBulkPrintIndex] = useState(0);
-  const [bulkPrintType, setBulkPrintType] = useState(null); // ★追加: "payslip" または "ledger"
+  const [bulkPrintType, setBulkPrintType] = useState(null);
 
   const [ledgerViewMode, setLedgerViewMode] = useState("annual");
   const [ledgerSelectedMonth, setLedgerSelectedMonth] = useState("01");
@@ -4274,7 +4280,7 @@ const App = () => {
   };
 
   // 一括印刷キューを開始: 在籍社員IDを並べて先頭社員を単票モーダルへ表示。
-  const startBulkPrint = (type = "payslip", monthKey = selectedListMonth) => {
+  const startBulkPrint = (type = BULK_PRINT_TYPES.PAYSLIP, monthKey = selectedListMonth) => {
     const queue = Object.entries(employees)
       .filter(([, emp]) => emp.master?.status !== "retired")
       .map(([id]) => id);
@@ -4286,12 +4292,44 @@ const App = () => {
     setBulkPrintIndex(0);
     setBulkPrintType(type);
 
-    if (type === "payslip") {
+    if (type === BULK_PRINT_TYPES.PAYSLIP) {
       openPayslipPrintPreview(queue[0], monthKey);
-    } else if (type === "ledger") {
+    } else if (type === BULK_PRINT_TYPES.LEDGER) {
       setSelectedEmployeeId(queue[0]);
       setIsLedgerPrintOpen(true);
     }
+  };
+
+  // ファイル名をつけて安全に印刷・PDF保存するための共通関数
+  const printWithTitle = (title) => {
+    const originalTitle = document.title;
+    let cleaned = false;
+    let fallbackTimer = null;
+
+    const restoreTitle = () => {
+      if (cleaned) return;
+      cleaned = true;
+
+      document.title = originalTitle;
+
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+
+      window.removeEventListener("afterprint", restoreTitle);
+    };
+
+    document.title = title;
+    window.addEventListener("afterprint", restoreTitle);
+
+    setTimeout(() => {
+      window.print();
+
+      fallbackTimer = setTimeout(() => {
+        restoreTitle();
+      }, 1000);
+    }, 0);
   };
 
   const handleMonthlyCheck = (monthKey) => {
@@ -12779,10 +12817,7 @@ const App = () => {
                           if (printDocType === "monthlySummary") {
                             const monthStr = printTargetMonth === "bonus" ? "賞与1" : printTargetMonth === "bonus2" ? "賞与2" : `${parseInt(printTargetMonth, 10)}月分`;
                             const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
-                            const originalTitle = document.title;
-                            document.title = fileName;
-                            window.print();
-                            document.title = originalTitle;
+                            printWithTitle(fileName);
                             return;
                           }
                           alert("現在この帳票のPDF出力には対応していません。");
@@ -13550,7 +13585,7 @@ const App = () => {
           <div className="print-area w-[850px] relative print:w-full">
             <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
               <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4">
-                {bulkPrintQueue && bulkPrintType === "payslip" && (
+                {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.PAYSLIP && (
                   <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1.5 rounded text-xs font-bold">
                     <span>一括印刷： {bulkPrintIndex + 1} / {bulkPrintQueue.length} 人目</span>
                     <span className="text-amber-400">|</span>
@@ -13564,29 +13599,27 @@ const App = () => {
                   onClick={() => {
                     const monthStr = selectedListMonth === "bonus" ? "賞与1" : selectedListMonth === "bonus2" ? "賞与2" : `${parseInt(selectedListMonth, 10)}月分`;
                     const fileName = `${selectedYear}年度_${monthStr}_${_emp.master?.name || "未設定"}_給与明細`;
-                    const originalTitle = document.title;
-                    document.title = fileName;
-                    window.print();
-                    document.title = originalTitle;
+                    printWithTitle(fileName);
                   }}
                   disabled={_isBlocking}
                   className={`flex items-center gap-2 ${_isBlocking ? "bg-slate-400 cursor-not-allowed opacity-60" : "bg-indigo-600 hover:bg-indigo-500"} text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors`}
                 >
                   <Printer size={16} /> 印刷する
                 </button>
-                {bulkPrintQueue && bulkPrintType === "payslip" && bulkPrintIndex < bulkPrintQueue.length - 1 && (
+                {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.PAYSLIP && bulkPrintIndex < bulkPrintQueue.length - 1 && (
                   <button
                     onClick={() => {
                       const next = bulkPrintIndex + 1;
+                      const nextEmployeeId = bulkPrintQueue[next];
                       setBulkPrintIndex(next);
-                      openPayslipPrintPreview(bulkPrintQueue[next], selectedListMonth);
+                      openPayslipPrintPreview(nextEmployeeId, selectedListMonth);
                     }}
                     className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors"
                   >
                     次の社員へ →
                   </button>
                 )}
-                {bulkPrintQueue && bulkPrintType === "payslip" && bulkPrintIndex === bulkPrintQueue.length - 1 && (
+                {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.PAYSLIP && bulkPrintIndex === bulkPrintQueue.length - 1 && (
                   <button
                     onClick={() => {
                       setBulkPrintQueue(null);
@@ -13608,7 +13641,7 @@ const App = () => {
                   }}
                   className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors"
                 >
-                  <X size={16} /> {bulkPrintQueue && bulkPrintType === "payslip" ? "キャンセル" : "閉じる"}
+                  <X size={16} /> {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.PAYSLIP ? "キャンセル" : "閉じる"}
                 </button>
               </div>
             </div>
@@ -13639,7 +13672,7 @@ const App = () => {
             <div className="print-area w-[1100px] relative print:w-full bg-white p-8 shadow-2xl">
               <div className="sticky top-0 right-0 no-print flex justify-end gap-3 mb-4 z-50">
                 <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow flex items-center gap-4 border border-slate-200">
-                  {bulkPrintQueue && bulkPrintType === "ledger" ? (
+                  {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.LEDGER ? (
                     <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1.5 rounded text-xs font-bold">
                       <span>一括印刷： {bulkPrintIndex + 1} / {bulkPrintQueue.length} 人目</span>
                       <span className="text-amber-400">|</span>
@@ -13659,29 +13692,27 @@ const App = () => {
                   <button
                     onClick={() => {
                       const fileName = `${selectedYear}年度_${master.name || "未設定"}_賃金台帳`;
-                      const originalTitle = document.title;
-                      document.title = fileName;
-                      window.print();
-                      document.title = originalTitle;
+                      printWithTitle(fileName);
                     }}
                     className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-500 transition-colors text-sm"
                   >
                     <Printer size={16} /> 印刷する
                   </button>
 
-                  {bulkPrintQueue && bulkPrintType === "ledger" && bulkPrintIndex < bulkPrintQueue.length - 1 && (
+                  {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.LEDGER && bulkPrintIndex < bulkPrintQueue.length - 1 && (
                     <button
                       onClick={() => {
                         const next = bulkPrintIndex + 1;
+                        const nextEmployeeId = bulkPrintQueue[next];
                         setBulkPrintIndex(next);
-                        setSelectedEmployeeId(bulkPrintQueue[next]);
+                        setSelectedEmployeeId(nextEmployeeId);
                       }}
                       className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-colors text-sm"
                     >
                       次の社員へ →
                     </button>
                   )}
-                  {bulkPrintQueue && bulkPrintType === "ledger" && bulkPrintIndex === bulkPrintQueue.length - 1 && (
+                  {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.LEDGER && bulkPrintIndex === bulkPrintQueue.length - 1 && (
                     <button
                       onClick={() => {
                         setBulkPrintQueue(null);
@@ -13704,7 +13735,7 @@ const App = () => {
                     }}
                     className="flex items-center gap-1 bg-slate-200 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-300 transition-colors text-sm"
                   >
-                    <X size={16} /> {bulkPrintQueue && bulkPrintType === "ledger" ? "キャンセル" : "閉じる"}
+                    <X size={16} /> {bulkPrintQueue && bulkPrintType === BULK_PRINT_TYPES.LEDGER ? "キャンセル" : "閉じる"}
                   </button>
                 </div>
               </div>

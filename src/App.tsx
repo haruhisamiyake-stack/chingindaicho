@@ -3103,6 +3103,14 @@ const App = () => {
 
   const [tenants, setTenants] = useState([]);
   const [selectedTenantId, setSelectedTenantId] = useState(null);
+  // selectedTenantId のミラー ref。
+  // 空 deps の useEffect (onAuthStateChanged コールバックなど) の中から「現在の selectedTenantId」を
+  // 参照する必要があるとき、closure に固定された古い値ではなく最新値を取れるようにするための bridge。
+  // flush-before-switch のログアウト経路で利用する。
+  const selectedTenantIdRef = useRef(null);
+  useEffect(() => {
+    selectedTenantIdRef.current = selectedTenantId;
+  }, [selectedTenantId]);
   const tenantId = selectedTenantId;
   const effectiveSettings = {
     ...settings,
@@ -3564,7 +3572,18 @@ const App = () => {
     isMonthGloballyLocked(selectedYear, m);
 
   useEffect(() => {
-    if (!selectedEmployeeId || !selectedYear || !data) return;
+    // ★ 防御的ガード:
+    //   既存の `!data` チェックでも employees[selectedEmployeeId] が undefined のときは
+    //   data も undefined になるため十分だが、tenant 切替直後の stale selectedEmployeeId を
+    //   明示的に拒否する意図をコード上で可視化するため、明示ガードを並べる。
+    //   - !selectedTenantId: tenant 切替中・初期化中
+    //   - !selectedEmployeeId / !selectedYear: 未選択
+    //   - !employees[selectedEmployeeId]: 古い ID が残ったまま新 tenant の employees に存在しない
+    //   - !data: 上記いずれかに該当する場合の最終ガード（既存）
+    if (!selectedTenantId) return;
+    if (!selectedEmployeeId || !selectedYear) return;
+    if (!employees[selectedEmployeeId]) return;
+    if (!data) return;
 
     const initKey = `${selectedEmployeeId}_${selectedYear}`;
     if (data.years?.[selectedYear]) return;
@@ -3574,7 +3593,8 @@ const App = () => {
 
     // ★ 保存入口は requestEmployeeSave に統一。builder 内で再度年度有無を確認し、
     //   既に prev に年度が存在する場合は no-op で取消（StrictMode 二重実行や snapshot 受信時の二重初期化を防ぐ）。
-    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData, currentEmp) => {
+      if (!currentEmp) return null;
       if (currentData.years?.[selectedYear]) return null;
       const newYearData = createInitialYearData(selectedYear, settings);
       return {
@@ -3645,6 +3665,11 @@ const App = () => {
       const tenantDoc = snap.docs[0];
       const tenantData = tenantDoc.data();
       setTenants(snap.docs.map(d => ({ id: d.id, name: d.data().name || "株式会社 新規テナント", clientCode: d.data().clientCode || "", prefectureType: d.data().prefectureType || null, businessType: d.data().businessType || "general" })));
+      // ★ login直後のみ。既存tenantのpending saveは存在しない前提。
+      //   ログイン中のtenant切替・再初期化では handleSelectTenant(null) を使うこと。
+      //   (現在 initTenantAndMigrate は onAuthStateChanged の user 検出時にしか呼ばれない=
+      //    selectedTenantId は既に null。将来「ログイン状態のままユーザ切替/再初期化」動線が
+      //    追加されると、ここで pending save が消失する事故になるため、その際は要見直し。)
       setSelectedTenantId(null);
       if (!tenantData.migrationDone) {
         await _migrateUserDataToTenant(uid, tenantDoc.id);
@@ -3676,6 +3701,11 @@ const App = () => {
     }
 
     setTenants([{ id: newTenantId, name: "株式会社 新規テナント", clientCode: "" }]);
+    // ★ login直後のみ。既存tenantのpending saveは存在しない前提。
+    //   ログイン中のtenant切替・再初期化では handleSelectTenant(null) を使うこと。
+    //   (現在 initTenantAndMigrate は onAuthStateChanged の user 検出時にしか呼ばれない=
+    //    selectedTenantId は既に null。将来「ログイン状態のままユーザ切替/再初期化」動線が
+    //    追加されると、ここで pending save が消失する事故になるため、その際は要見直し。)
     setSelectedTenantId(null);
   };
 
@@ -3690,6 +3720,18 @@ const App = () => {
         await initTenantAndMigrate(user.uid);
         setLoading(false);
       } else {
+        // ★ flush-before-switch (ログアウト経路)。
+        //   ここで handleSelectTenant(null) を呼びたいところだが、onAuthStateChanged は空 deps の
+        //   useEffect 内で 1 回だけ登録される。コールバック内の handleSelectTenant 参照は
+        //   初期 render の closure に固定され、その中の selectedTenantId 参照も初期値 null に
+        //   固定されているため、`null === null` で早期 return → flush が走らない。
+        //   そのため、handleSelectTenant 経由ではなく flushPendingSavesForTenant を
+        //   直接呼ぶ。selectedTenantIdRef.current で最新の selectedTenantId を取得できる。
+        //
+        //   handleLogout 経由のログアウトは既に flush 済みだが、Firebase 自動ログアウト
+        //   (トークン失効等) など他経路にも対応するためここでも flush を呼ぶ。
+        //   flush は idempotent: 既に flush 済みなら pending は空で no-op。
+        await flushPendingSavesForTenant(selectedTenantIdRef.current);
         setIsAuthReady(false);
         setUserId(null);
         setSelectedTenantId(null);
@@ -3712,6 +3754,13 @@ const App = () => {
   };
 
   const handleLogout = async () => {
+    // ★ flush-before-switch: handleSelectTenant(null) 経由で signOut 前に
+    //   現 tenant の pending save を確実に Firestore へ書き込む。
+    //   handleLogout は JSX onClick から呼ばれる通常関数なので、毎レンダーで最新クロージャに
+    //   更新される → handleSelectTenant も最新版が参照され、selectedTenantId の closure 問題はない。
+    //   (onAuthStateChanged の logout 分岐は空 deps useEffect 内で closure 固定されるため、
+    //    そちらは flushPendingSavesForTenant を直接呼ぶ別経路にしている。)
+    await handleSelectTenant(null);
     const auth = getAuth(app);
     await signOut(auth);
     setUserId(null);
@@ -4158,7 +4207,8 @@ const App = () => {
     const effectiveTenantId = tenantIdOverride || selectedTenantId;
     if (!effectiveTenantId || !empId) return false;
 
-    console.log("[handleSave]", { empId, effectiveTenantId, tenantIdOverride, hasNullTaxFlag });
+    // ★ ログキーは [handleSave executing] に統一（flush 経路 / debounce 経路 / draft bypass を時系列追跡するため）
+    console.log("[handleSave executing]", { empId, effectiveTenantId, tenantIdOverride, hasNullTaxFlag });
 
     setSaveStatus("保存中...");
     try {
@@ -4256,6 +4306,152 @@ const App = () => {
     }, 300);
 
     saveTimersRef.current.set(key, timer);
+  };
+
+  // ============================================================================
+  // ★ flush-before-switch: 現在 tenant の pending save を切替前に強制 flush する。
+  // ----------------------------------------------------------------------------
+  // 目的:
+  //   テナント切替（A社 → B社 / A社 → null ログアウト）の前に、A社の debounce 中の
+  //   保存を確実に Firestore へ反映してから切替を実行する。
+  //
+  //   tenantId pinning + debounce queue は理論上は救えるはずだが、
+  //   実害（クライアント切替時に給与データが消失）が出ているため、対症療法兼 safety net として
+  //   切替前に同期的に flush する仕組みを導入する。
+  //
+  // 仕様:
+  //   - pendingSavesRef から tenantId が一致するエントリだけを抽出（他 tenant 分は触らない）
+  //   - 該当エントリの debounce timer を clearTimeout
+  //   - saveTimersRef / pendingSavesRef から該当エントリを削除
+  //   - handleSave(empId, master, data, tenantId, hasNullTaxFlag) を Promise.all で並列実行
+  //   - 全 await 完了後に return
+  //
+  // 並列化の根拠:
+  //   - 各 save は empId 単位で独立（同一 tenant 内でも別社員は衝突しない）
+  //   - tenantId は payload に pinning 済（handleSave 側で書込先が確定）
+  //   - stale seq skip も payload 内に sequence が含まれるため衝突しない
+  //   - 逐次 await だと社員 N 人で UI ブロック N 倍。並列で短縮する。
+  //
+  // 禁止:
+  //   - pendingSavesRef.current.clear() / saveTimersRef.current.clear() の全消去
+  //     → 他 tenant 分の未保存データまで吹き飛ばすため絶対不可。
+  //
+  // tenantIdToFlush が null/undefined の場合は no-op（filter で空配列になる）。
+  // ============================================================================
+  const flushPendingSavesForTenant = async (tenantIdToFlush) => {
+    if (!tenantIdToFlush) return;
+
+    const entries = Array.from(pendingSavesRef.current.entries())
+      .filter(([, pending]) => pending.tenantId === tenantIdToFlush);
+
+    console.log("[flush pending save start]", {
+      tenantId: tenantIdToFlush,
+      count: entries.length,
+    });
+
+    if (entries.length === 0) return;
+
+    // 並列実行用に、まず timer と pending を全部キャンセル＆削除してから handleSave を Promise.all
+    // で一括 await する。同一 tenant の他 empId 分は衝突しないので並列化して安全。
+    const promises = entries.map(([key, pending]) => {
+      const timer = saveTimersRef.current.get(key);
+      if (timer) clearTimeout(timer);
+      saveTimersRef.current.delete(key);
+      pendingSavesRef.current.delete(key);
+
+      console.log("[flush pending save]", {
+        tenantId: pending.tenantId,
+        empId: pending.empId,
+        seq: pending.seq,
+      });
+
+      return handleSave(
+        pending.empId,
+        pending.master,
+        pending.data,
+        pending.tenantId,
+        pending.hasNullTaxFlag
+      ).then((ok) => {
+        console.log("[flush pending save complete]", {
+          tenantId: pending.tenantId,
+          empId: pending.empId,
+          seq: pending.seq,
+          ok,
+        });
+        return ok;
+      }).catch((e) => {
+        console.error("[flush pending save error]", {
+          tenantId: pending.tenantId,
+          empId: pending.empId,
+          seq: pending.seq,
+          error: e,
+        });
+        return false;
+      });
+    });
+
+    await Promise.all(promises);
+
+    console.log("[flush pending save done]", { tenantId: tenantIdToFlush, count: entries.length });
+  };
+
+  // ============================================================================
+  // ★ テナント切替の統一入口。pending save を flush してから selectedTenantId を変更する。
+  // ----------------------------------------------------------------------------
+  // 利用箇所:
+  //   - ポータルカード onClick (別 tenant への切替)
+  //   - 新規 tenant 登録成功時 (新 tenant への切替)
+  //   - handleLogout (null への切替 = ログアウト)
+  //
+  // null 切替も受け付ける設計:
+  //   旧仕様の `if (!nextTenantId) return;` を撤廃。null 切替時も prev tenant の
+  //   pending save を flush 対象として保護する。`nextTenantId === selectedTenantId`
+  //   のときだけ早期 return（同一切替は no-op、null→null も含む）。
+  //
+  // 順序（絶対に崩さないこと）:
+  //   1. flush 完了まで await（prev tenant の Firestore 書込確定）
+  //   2. UI 状態クリア（古い employees / 選択状態）
+  //   3. setSelectedTenantId(nextTenantId) → subscribe re-sub → next tenant snapshot 受信
+  //
+  // 「flush 成功後に selectedTenantId 変更」順序を逆転させると、subscribe re-sub が
+  // 先に走って next snapshot が来てから prev の Firestore 書込が走ることになり、
+  // 「prev に戻ったとき書込前のデータで上書き」が再発する。
+  //
+  // setLoading(!!nextTenantId):
+  //   - next が tenant: 「同期中...」表示 (subscribe 完了待ち)
+  //   - next が null (ログアウト): loading=false で login 画面表示へ移行
+  //
+  // setEditingMaster / setDraftEmployee は別 useEffect (deps=[selectedTenantId]) が
+  // selectedTenantId 変更時に自動クリアするため、ここでは触らない（責務分離）。
+  //
+  // 制限: onAuthStateChanged の logout 分岐からは呼べない（空 deps useEffect の closure
+  // 固定問題で、handleSelectTenant の参照が初期 render のものに固定される）。
+  // その経路は flushPendingSavesForTenant(selectedTenantIdRef.current) を直接呼ぶ。
+  // ============================================================================
+  const handleSelectTenant = async (nextTenantId) => {
+    if (nextTenantId === selectedTenantId) return;
+
+    const prevTenantId = selectedTenantId;
+
+    console.log("[tenant switch start]", {
+      from: prevTenantId,
+      to: nextTenantId,
+    });
+
+    await flushPendingSavesForTenant(prevTenantId);
+
+    // UI 状態クリア（next snapshot 到着までの間に prev tenant データが見えないようにする）
+    setSelectedEmployeeId(null);
+    setEditingEmployeeId(null);
+    setEmployees({});
+    setLoading(!!nextTenantId);
+
+    setSelectedTenantId(nextTenantId);
+
+    console.log("[tenant switch complete]", {
+      from: prevTenantId,
+      to: nextTenantId,
+    });
   };
 
   // ★ 保存入口を一本化する helper（save 経路の正規ルート）。
@@ -6406,8 +6602,9 @@ const App = () => {
             {filteredTenants.map(t => (
               <div
                 key={t.id}
-                onClick={() => {
-                  setSelectedTenantId(t.id);
+                onClick={async () => {
+                  // ★ flush-before-switch: 現 tenant の pending save を確実に Firestore へ書き込んでから切替。
+                  await handleSelectTenant(t.id);
                   setActiveTab("ledger");
                 }}
                 className="group bg-white rounded-xl p-3 border border-slate-200 transition-all cursor-pointer shadow-sm hover:shadow-md hover:border-blue-400 hover:-translate-y-0.5 flex flex-col justify-between min-h-[100px]"
@@ -6624,7 +6821,7 @@ const App = () => {
                       batch.set(getDocRef(...PATHS.tenant(newId)), { name: newTenantName.trim(), clientCode: newTenantClientCode.trim(), ownerUid: userId, createdAt: new Date().toISOString(), prefectureType: newTenantPrefectureType, businessType: newTenantBusinessType });
                       batch.set(getDocRef(...PATHS.settings(newId)), { ...DEFAULT_SETTINGS, companyName: newTenantName.trim(), closingDay: newTenantClosingDay, paymentDay: newTenantPaymentDay });
                       batch.commit()
-                        .then(() => {
+                        .then(async () => {
                           setNewTenantModalOpen(false);
                           setNewTenantName("");
                           setNewTenantClientCode("");
@@ -6632,7 +6829,8 @@ const App = () => {
                           setNewTenantBusinessType("general");
                           setNewTenantClosingDay("末");
                           setNewTenantPaymentDay("翌月15");
-                          setSelectedTenantId(newId);
+                          // ★ flush-before-switch: 新規 tenant 切替時にも現 tenant の pending save を flush する。
+                          await handleSelectTenant(newId);
                           setActiveTab("ledger");
                         })
                         .catch(() => alert("顧問先の追加に失敗しました"));

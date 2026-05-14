@@ -169,6 +169,159 @@ const DEFAULT_STD_REWARD_TABLE = [
 ];
 
 
+// ============================================================================
+// 標準報酬月額表 CSV 入出力ヘルパー（top-level pure functions）
+// ----------------------------------------------------------------------------
+// 仕様:
+//   - CSV 列: grade, min, max, monthlyAmount （順不同許可）
+//   - year / type 列は持たない（officeMaster.standardRewardTable は単一マスタ）
+//   - 健保表 1 本（厚年は計算時クランプ）として運用するため、type 分離は禁止
+//
+// parseStandardRewardCsv(text) → { rows, errors, warnings }
+//   - errors が空でない場合はインポート不可
+//   - warnings は確認モーダルに表示するがインポート可能
+// ============================================================================
+const parseStandardRewardCsv = (csvText) => {
+  const errors = [];
+  const warnings = [];
+  const rows = [];
+
+  if (!csvText || typeof csvText !== "string") {
+    errors.push("CSV が空です");
+    return { rows, errors, warnings };
+  }
+
+  const lines = csvText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) {
+    errors.push("データ行がありません");
+    return { rows, errors, warnings };
+  }
+
+  // ヘッダー解析（順不同許可）
+  const header = parseCSVLine(lines[0]).map((s) => s.trim().toLowerCase());
+  const required = ["grade", "min", "max", "monthlyamount"];
+  const missing = required.filter((k) => !header.includes(k));
+  if (missing.length > 0) {
+    errors.push(
+      `必須列が不足: ${missing.join(", ")}（ヘッダーは grade,min,max,monthlyAmount の4列が必要）`
+    );
+    return { rows, errors, warnings };
+  }
+  const idx = {
+    grade: header.indexOf("grade"),
+    min: header.indexOf("min"),
+    max: header.indexOf("max"),
+    monthlyAmount: header.indexOf("monthlyamount"),
+  };
+
+  // データ行解析（grade 重複検出のために Set を併用）
+  const seenGrades = new Set();
+  for (let i = 1; i < lines.length; i++) {
+    const rowNum = i + 1; // CSV 上の行番号（1-origin）
+    const cols = parseCSVLine(lines[i]);
+
+    const rawGrade = cols[idx.grade];
+    const rawMin = cols[idx.min];
+    const rawMax = cols[idx.max];
+    const rawAmount = cols[idx.monthlyAmount];
+
+    const gradeNum = Number(rawGrade);
+    const minNum = Number(rawMin);
+    const maxNum = Number(rawMax);
+    const amountNum = Number(rawAmount);
+
+    if (!Number.isInteger(gradeNum) || gradeNum < 1) {
+      errors.push(`【行 ${rowNum}】grade は 1 以上の整数である必要があります (値: ${rawGrade})`);
+      continue;
+    }
+    if (rawMin === "" || isNaN(minNum)) {
+      errors.push(`【行 ${rowNum}】min が数値ではありません (値: ${rawMin})`);
+      continue;
+    }
+    if (rawMax === "" || isNaN(maxNum)) {
+      errors.push(`【行 ${rowNum}】max が数値ではありません (値: ${rawMax})`);
+      continue;
+    }
+    if (rawAmount === "" || isNaN(amountNum)) {
+      errors.push(`【行 ${rowNum}】monthlyAmount が数値ではありません (値: ${rawAmount})`);
+      continue;
+    }
+    if (!(minNum < maxNum)) {
+      errors.push(`【行 ${rowNum}】min (${minNum}) < max (${maxNum}) になっていません`);
+      continue;
+    }
+    if (!(amountNum > 0)) {
+      errors.push(`【行 ${rowNum}】monthlyAmount は 0 より大きい必要があります (値: ${amountNum})`);
+      continue;
+    }
+    if (seenGrades.has(gradeNum)) {
+      errors.push(`【行 ${rowNum}】grade ${gradeNum} が重複しています`);
+      continue;
+    }
+    seenGrades.add(gradeNum);
+
+    rows.push({
+      grade: gradeNum,
+      min: minNum,
+      max: maxNum,
+      monthlyAmount: amountNum,
+    });
+  }
+
+  if (rows.length === 0 && errors.length === 0) {
+    errors.push("有効なデータ行がありませんでした");
+    return { rows, errors, warnings };
+  }
+
+  // エラーがあれば警告チェックを省略（インポート不可なので意味がない）
+  if (errors.length > 0) {
+    return { rows, errors, warnings };
+  }
+
+  // grade 昇順にソート（保存形式を一貫させる）
+  rows.sort((a, b) => a.grade - b.grade);
+
+  // 警告チェック (1): grade が連番か
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].grade !== rows[i - 1].grade + 1) {
+      warnings.push(
+        `grade が連番ではありません: ${rows[i - 1].grade} の次が ${rows[i].grade}`
+      );
+      break; // 1 件だけ報告（連発を避ける）
+    }
+  }
+
+  // 警告チェック (2): 前行の max と次行の min が一致しているか
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i - 1].max !== rows[i].min) {
+      warnings.push(
+        `min/max が連続していません: grade ${rows[i - 1].grade} の max=${rows[i - 1].max} ≠ grade ${rows[i].grade} の min=${rows[i].min}`
+      );
+      break;
+    }
+  }
+
+  // 警告チェック (3): 登録行数が 50 行か
+  if (rows.length !== 50) {
+    warnings.push(`等級数が ${rows.length} 行です（標準は 50 等級）`);
+  }
+
+  return { rows, errors, warnings };
+};
+
+const buildStandardRewardCsv = (rows) => {
+  const header = "grade,min,max,monthlyAmount\n";
+  const body = (rows || [])
+    .map((r) => `${r.grade},${r.min},${r.max},${r.monthlyAmount}`)
+    .join("\n");
+  return header + body + "\n";
+};
+
+
 const DEFAULT_SETTINGS = {
   companyName: "株式会社サンプル",
   companyAddress: "",
@@ -3230,6 +3383,14 @@ const App = () => {
   const [isTaxImporting, setIsTaxImporting] = useState(false);
   const [viewingTaxTableId, setViewingTaxTableId] = useState(null); // ★詳細表示用モーダルステート
 
+  // ★ 標準報酬月額表 CSV インポート用ステート（事務所マスタ）
+  //   year/type 列を持たない単一マスタなので、税額表のような (year, type) コンテキストは無い。
+  //   プレビュー方式は税額表 CSV と同様: 一旦 preview に貯めて、ユーザ確認後に Firestore へ書込。
+  const [stdRewardImportFile, setStdRewardImportFile] = useState(null);
+  const [stdRewardImportPreview, setStdRewardImportPreview] = useState(null); // { rows, errors, warnings }
+  const [stdRewardImportError, setStdRewardImportError] = useState("");
+  const [isStdRewardImporting, setIsStdRewardImporting] = useState(false);
+
   // ★月次全体ロック管理ステート
   const [monthlyLocks, setMonthlyLocks] = useState({});
   const [lockMgmtYear, setLockMgmtYear] = useState("");
@@ -3391,6 +3552,151 @@ const App = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // ============================================================================
+  // 標準報酬月額表 CSV ハンドラ群（事務所マスタ）
+  // ----------------------------------------------------------------------------
+  // 既存の手動編集 UI（officeMaster 直接 saveDoc）と共存。CSV は一括置換用、
+  // 手動編集は微調整用として併存させる。
+  //
+  // 保存先: PATHS.officeMaster() の standardRewardTable フィールド（全テナント共通）
+  // 計算ロジック・Firestore 構造は一切変更しない。
+  // ============================================================================
+
+  // YYYYMMDD 形式の日付文字列を生成（ファイル名用）
+  const _stdRewardDateStr = () => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}${mm}${dd}`;
+  };
+
+  // YYYYMMDD_HHmmss 形式のタイムスタンプ文字列を生成（バックアップファイル名用）。
+  // 例: 20260514_153012
+  // 上書き直前の自動バックアップなど、秒単位で区別したいケース用。
+  const _stdRewardTimestampStr = () => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
+  };
+
+  // 内部ヘルパー: BOM 付き UTF-8 で CSV をダウンロード
+  const _downloadStdRewardCsv = (csvContent, filename) => {
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const blob = new Blob([bom, csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // 現在の officeMaster.standardRewardTable をエクスポート
+  const handleExportStdRewardCsv = () => {
+    const rows = (effectiveSettings.standardRewardTable && effectiveSettings.standardRewardTable.length > 0)
+      ? effectiveSettings.standardRewardTable
+      : DEFAULT_STD_REWARD_TABLE;
+    const csv = buildStandardRewardCsv(rows);
+    _downloadStdRewardCsv(csv, `standard_reward_table_${_stdRewardDateStr()}.csv`);
+  };
+
+  // DEFAULT_STD_REWARD_TABLE をテンプレートとしてエクスポート
+  const handleDownloadStdRewardTemplate = () => {
+    const csv = buildStandardRewardCsv(DEFAULT_STD_REWARD_TABLE);
+    _downloadStdRewardCsv(csv, `standard_reward_table_template_${_stdRewardDateStr()}.csv`);
+  };
+
+  // CSV ファイル選択時の解析プレビュー
+  const handleStdRewardCsvChange = (e) => {
+    const file = e.target.files[0];
+    setStdRewardImportFile(file);
+    setStdRewardImportPreview(null);
+    setStdRewardImportError("");
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const result = parseStandardRewardCsv(event.target.result);
+        setStdRewardImportPreview(result);
+      } catch (err) {
+        setStdRewardImportError("CSV形式エラー: " + err.message);
+      }
+    };
+    reader.onerror = () => setStdRewardImportError("ファイルの読み込みに失敗しました");
+    reader.readAsText(file);
+  };
+
+  // インポート実行（確認ダイアログ → officeMaster 書込）
+  const handleExecuteStdRewardImport = async () => {
+    if (!stdRewardImportPreview) return;
+    if (stdRewardImportPreview.errors && stdRewardImportPreview.errors.length > 0) return;
+
+    const currentCount = (effectiveSettings.standardRewardTable || []).length;
+    const newCount = stdRewardImportPreview.rows.length;
+
+    let confirmMsg = `現在の標準報酬月額表（${currentCount}等級）を、CSVの内容（${newCount}等級）で全置換します。\n\nこの設定は全テナント共通です。すべての顧問先に影響します。\n\nよろしいですか？`;
+    if (stdRewardImportPreview.warnings && stdRewardImportPreview.warnings.length > 0) {
+      confirmMsg = `【警告あり】\n${stdRewardImportPreview.warnings.join("\n")}\n\n` + confirmMsg;
+    }
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsStdRewardImporting(true);
+    setStdRewardImportError("");
+    try {
+      if (!userId) throw new Error("ログインが必要です");
+
+      // ============================================================================
+      // ★ 自動バックアップ DL (saveDoc 直前)
+      // ----------------------------------------------------------------------------
+      // 全テナント共通設定の上書きという破壊的変更のため、誤インポート時の即時復旧手段として、
+      // 現在の standardRewardTable を CSV ファイルとして自動ダウンロードする。
+      //
+      // - ファイル名: standard_reward_table_backup_YYYYMMDD_HHmmss.csv
+      // - 内容: effectiveSettings.standardRewardTable (未設定なら DEFAULT_STD_REWARD_TABLE)
+      // - 既存 buildStandardRewardCsv / _downloadStdRewardCsv をそのまま再利用 (新規生成ロジックなし)
+      // - BOM 付き UTF-8 (既存 export と同一)
+      //
+      // 注意: ダウンロードは blob.click() 経由のため、CSV 内容は呼出時点の値で固定される
+      //       (この後の saveDoc / snapshot で state が変わってもバックアップ内容には影響しない)。
+      //       ブラウザ設定によってはダウンロードがブロックされる可能性があるが、現状仕様では
+      //       「最低限の保護」として saveDoc は続行する。
+      // ============================================================================
+      const backupRows = (effectiveSettings.standardRewardTable && effectiveSettings.standardRewardTable.length > 0)
+        ? effectiveSettings.standardRewardTable
+        : DEFAULT_STD_REWARD_TABLE;
+      const backupCsv = buildStandardRewardCsv(backupRows);
+      _downloadStdRewardCsv(
+        backupCsv,
+        `standard_reward_table_backup_${_stdRewardTimestampStr()}.csv`
+      );
+
+      // ★ 保存先は必ず officeMaster.standardRewardTable。Firestore 構造変更なし。
+      await saveDoc(
+        PATHS.officeMaster(),
+        { standardRewardTable: stdRewardImportPreview.rows },
+        { merge: true }
+      );
+      setStdRewardImportPreview(null);
+      setStdRewardImportFile(null);
+      const fileInput = document.getElementById("std-reward-csv-input");
+      if (fileInput) fileInput.value = "";
+      alert(`標準報酬月額表をインポートしました（${newCount}等級）`);
+    } catch (err) {
+      setStdRewardImportError("保存に失敗しました: " + err.message);
+    } finally {
+      setIsStdRewardImporting(false);
+    }
   };
 
   // --- 賞与算出率表（税務署形式）のUI操作ハンドラ ---
@@ -11403,6 +11709,115 @@ const App = () => {
                 <br />
                 ※【実際の標準報酬月額】に値が手入力されている場合は、そちらの金額が社会保険料の計算基礎として優先されます。
               </p>
+
+              {/* ▼▼▼ CSV インポート / エクスポートパネル ▼▼▼ */}
+              {/* 既存の手動編集 UI と併存。CSV は一括置換用、手動編集は微調整用。
+                  保存先は必ず officeMaster.standardRewardTable（全テナント共通）。 */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 mb-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    <Download size={16} /> CSV インポート / エクスポート
+                  </h3>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleExportStdRewardCsv}
+                      className="flex items-center gap-1.5 bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50 px-3 py-1.5 rounded text-xs font-bold transition-colors"
+                      title="現在の標準報酬月額表を CSV ファイルとしてダウンロード"
+                    >
+                      <Download size={14} /> 現在の表をエクスポート
+                    </button>
+                    <button
+                      onClick={handleDownloadStdRewardTemplate}
+                      className="flex items-center gap-1.5 bg-white border border-slate-300 text-slate-600 hover:bg-slate-100 px-3 py-1.5 rounded text-xs font-bold transition-colors"
+                      title="デフォルトの 50 等級表をテンプレートとしてダウンロード"
+                    >
+                      <Download size={14} /> テンプレートCSV
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded p-3">
+                  <div className="flex flex-wrap items-center gap-3 mb-2">
+                    <label className="text-xs font-bold text-slate-600">
+                      インポート CSV:
+                    </label>
+                    <input
+                      type="file"
+                      id="std-reward-csv-input"
+                      accept=".csv"
+                      onChange={handleStdRewardCsvChange}
+                      className="block flex-1 min-w-[250px] text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    CSV 列: <code className="bg-slate-100 px-1 rounded">grade,min,max,monthlyAmount</code>（順不同可）。
+                    year / type 列は不要です。健保表 1 本として運用し、厚年は計算時に自動クランプされます。
+                  </p>
+                </div>
+
+                {stdRewardImportError && (
+                  <div className="mt-3 text-red-600 text-xs font-bold bg-red-50 p-3 rounded border border-red-200">
+                    {stdRewardImportError}
+                  </div>
+                )}
+
+                {stdRewardImportPreview && (
+                  <div className="mt-3 bg-white border border-blue-200 rounded p-4">
+                    <div className="text-xs font-bold text-slate-700 mb-2">
+                      プレビュー
+                    </div>
+
+                    {/* エラー一覧 */}
+                    {stdRewardImportPreview.errors && stdRewardImportPreview.errors.length > 0 && (
+                      <div className="bg-red-50 border border-red-200 rounded p-3 mb-3">
+                        <div className="text-xs font-black text-red-700 mb-1">
+                          ❌ エラー（インポート不可）
+                        </div>
+                        <ul className="list-disc list-inside text-[11px] text-red-600 space-y-0.5">
+                          {stdRewardImportPreview.errors.map((e, i) => (
+                            <li key={i}>{e}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* 警告一覧 */}
+                    {stdRewardImportPreview.warnings && stdRewardImportPreview.warnings.length > 0 && (
+                      <div className="bg-amber-50 border border-amber-200 rounded p-3 mb-3">
+                        <div className="text-xs font-black text-amber-700 mb-1">
+                          ⚠ 警告（インポート可能、確認推奨）
+                        </div>
+                        <ul className="list-disc list-inside text-[11px] text-amber-700 space-y-0.5">
+                          {stdRewardImportPreview.warnings.map((w, i) => (
+                            <li key={i}>{w}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* 件数サマリ + 実行ボタン */}
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-black text-blue-700">
+                        {stdRewardImportPreview.rows.length} 等級が読み取られました
+                        <span className="text-xs text-slate-500 font-normal ml-2">
+                          （現在の登録: {(effectiveSettings.standardRewardTable || []).length} 等級）
+                        </span>
+                      </div>
+                      <button
+                        onClick={handleExecuteStdRewardImport}
+                        disabled={
+                          isStdRewardImporting ||
+                          (stdRewardImportPreview.errors && stdRewardImportPreview.errors.length > 0)
+                        }
+                        className="bg-blue-600 text-white px-5 py-2 rounded-lg font-bold text-xs hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {isStdRewardImporting ? "インポート中..." : "この内容で全置換する"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {/* ▲▲▲ CSV インポート / エクスポートパネル ▲▲▲ */}
 
               <div className="bg-white rounded border border-slate-200 overflow-hidden">
                 <div className="max-h-[600px] overflow-y-auto custom-scrollbar">

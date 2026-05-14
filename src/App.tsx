@@ -38,6 +38,36 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 
+// ============================================================================
+// 【保存経路 監査ルール】(save bypass audit)
+// ----------------------------------------------------------------------------
+// 従業員データ (employees) の Firestore 書き込みは原則 requestEmployeeSave を
+// 経由する。直接 handleSave を呼ぶことは禁止（要件上どうしても必要な save-then-
+// commit ケースのみ例外。各 bypass には理由コメントを必ず付けること）。
+//
+// 監査コマンド（コメント行を除外して実呼出だけ抽出する形）:
+//   grep -n -E "handleSave\\(" src/App.tsx | grep -v "^[^:]*:\\s*//"
+//
+// 想定マッチ数（上記フィルタ込み）: 3 件
+//   1. queueEmployeeSave 内部の正規呼出（debounce timer 発火時の1箇所）
+//   2. handleSaveEmployeeMaster の draft 確定 bypass（intentional）
+//   3. handleSaveEmployeeMaster の既存 master 更新 bypass（intentional）
+//
+// 4 件以上ヒットした場合は新しい save bypass が侵入した可能性が高い。
+// レビューで requestEmployeeSave 経由にできないか必ず検討すること。
+//
+// 補足:
+//   - 関数定義行 "const handleSave = async (..." は handleSave と ( の間に
+//     "= async " が入るためパターンに合致しない（定義そのものは検出対象外）。
+//   - フィルタなしの素の grep を使うとこのファイル冒頭の説明テキストも
+//     ヒットしてノイズが乗るため、上記の「grep -v "^[^:]*:\\s*//"」を併用すること。
+//
+// requestEmployeeSave / handleSave は App コンポーネントの local helper として
+// 定義しており、外部 module からは import できない（export 禁止）。
+// 保存入口を物理的に閉じることで、テストコードや他コンポーネントから保存経路が
+// 増殖することを防いでいる。
+// ============================================================================
+
 
 // 支給月ベース（1月支給〜12月支給）のキー定義
 const MONTHS = [
@@ -2937,6 +2967,105 @@ const MonthlyCloseDashboard = React.memo(({
   );
 });
 
+// ========================================================================
+// ★ pure helpers: handleSave の closure state 依存を除去するため、
+//   sanitize / hasNullTax 判定を top-level の純関数として切り出す。
+//   引数で必要な state を受け取る（closure 参照しない）ため、debounce timer 発火時に
+//   selectedTenantId や employees が別 client へ切り替わっていても影響を受けない。
+// ========================================================================
+
+// 保存前のロック保護 sanitize（pure）。
+//   data: incoming（state 側の最新 newData）
+//   existing: 既存の employees[empId].data（updater 内の prev[empId].data を渡す）
+//   monthlyLocks: 月次全体ロック state（呼び出し時点の値を渡す）
+// 戻り値: deep clone された sanitize 済みデータ。data は破壊しない。
+const sanitizeEmployeeDataForSave = (data, existing, monthlyLocks) => {
+  if (!data) return data;
+  const sanitized = JSON.parse(JSON.stringify(data));
+  const cloneRow = (row) => (row === undefined || row === null ? row : JSON.parse(JSON.stringify(row)));
+
+  if (sanitized.years) {
+    for (const yearStr of Object.keys(sanitized.years)) {
+      const yearObj = sanitized.years[yearStr];
+      const existingYear = existing?.years?.[yearStr] || {};
+
+      if (yearObj.monthly) {
+        for (const monthKey of MONTHS) {
+          if (!yearObj.monthly[monthKey]) continue;
+          const existingMonthlyRow = existingYear.monthly?.[monthKey];
+          const globalLocked = monthlyLocks?.[yearStr]?.[monthKey]?.locked === true;
+          const rowLocked = existingMonthlyRow?.isLocked === true;
+
+          if (globalLocked && existingMonthlyRow) {
+            // 全体ロック中＋既存あり：完全に既存値で戻す
+            yearObj.monthly[monthKey] = cloneRow(existingMonthlyRow);
+          } else if (rowLocked) {
+            // 個人ロック中：isLocked のトグルだけ通す（解除目的の編集を許可）
+            yearObj.monthly[monthKey] = {
+              ...cloneRow(existingMonthlyRow),
+              isLocked: yearObj.monthly[monthKey]?.isLocked,
+            };
+          }
+          // else: 既存無し or 未ロック → incoming のまま保持
+        }
+      }
+
+      if (yearObj.manualOverrides) {
+        for (const monthKey of Object.keys(yearObj.manualOverrides)) {
+          const existingMonthlyRow = existingYear.monthly?.[monthKey];
+          if (
+            (monthlyLocks?.[yearStr]?.[monthKey]?.locked === true) ||
+            existingMonthlyRow?.isLocked === true
+          ) {
+            const existingOverride = existingYear.manualOverrides?.[monthKey];
+            if (existingOverride !== undefined) {
+              yearObj.manualOverrides[monthKey] = cloneRow(existingOverride);
+            }
+          }
+        }
+      }
+
+      // bonus / bonus2 のロック判定（monthlyLocks の bonus キーは構造的対称性のため）
+      ["bonus", "bonus2"].forEach((bk) => {
+        if (yearObj[bk] && monthlyLocks?.[yearStr]?.[bk]?.locked === true) {
+          yearObj[bk] = cloneRow(existingYear[bk]) ?? yearObj[bk];
+        }
+      });
+    }
+  }
+
+  return sanitized;
+};
+
+// hasNullTax 判定（pure）。settings/effectiveSettings/taxTables は引数で受け取る。
+//   master: 社員 master
+//   data: sanitize 済みデータ
+// 戻り値: true なら計算不可項目あり（保存は続行、status 表示のみ警告）
+const checkHasNullTax = (master, data, settings, effectiveSettings, taxTables) => {
+  if (!master || !data || !data.years) return false;
+  const allowanceDefs = settings?.allowanceDefinitions || master.allowanceDefinitions || [];
+  const deductionDefs = settings?.deductionDefinitions || master.deductionDefinitions || [];
+  for (const yearStr of Object.keys(data.years)) {
+    const yearData = data.years[yearStr];
+    for (const monthKey of MONTHS) {
+      const row = yearData.monthly?.[monthKey];
+      if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+        const res = calculateMonthlyResult(master, row, effectiveSettings, monthKey, yearStr, taxTables);
+        if (res.incomeTax === null) return true;
+      }
+    }
+    if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+      const bRes = calculateBonusResult({ master, bonusRow: yearData.bonus, bonusKey: "bonus", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+      if (bRes.incomeTax === null) return true;
+    }
+    if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
+      const bRes2 = calculateBonusResult({ master, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+      if (bRes2.incomeTax === null) return true;
+    }
+  }
+  return false;
+};
+
 const App = () => {
   const [activeTab, setActiveTab] = useState("portal");
   const [userId, setUserId] = useState(null);
@@ -3443,24 +3572,21 @@ const App = () => {
 
     initializedYearsRef.current[initKey] = true;
 
-    const newYearData = createInitialYearData(selectedYear, settings);
-    const newData = {
-      ...data,
-      years: {
-        ...(data.years || {}),
-        [selectedYear]: newYearData,
-      },
-    };
-
-    setEmployees((prev) => ({
-      ...prev,
-      [selectedEmployeeId]: {
-        ...prev[selectedEmployeeId],
-        data: newData,
-      },
-    }));
-
-    handleSave(selectedEmployeeId, master, newData);
+    // ★ 保存入口は requestEmployeeSave に統一。builder 内で再度年度有無を確認し、
+    //   既に prev に年度が存在する場合は no-op で取消（StrictMode 二重実行や snapshot 受信時の二重初期化を防ぐ）。
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+      if (currentData.years?.[selectedYear]) return null;
+      const newYearData = createInitialYearData(selectedYear, settings);
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [selectedYear]: newYearData,
+          },
+        },
+      };
+    });
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEmployeeId, selectedYear, data]);
@@ -3633,7 +3759,10 @@ const App = () => {
         }
         emps[doc.id] = empData;
       });
-      console.log("[snapshot replace]", { incoming: Object.keys(emps).length });
+      console.log("[snapshot employees]", {
+        selectedTenantId,
+        count: Object.keys(emps).length,
+      });
       setEmployees(emps);
       setLoading(false);
     });
@@ -3988,137 +4117,64 @@ const App = () => {
   // 戻り値: true=Firestore保存成功 / false=スキップ・失敗（precondition NG / hasNullTax / catch）
   // 既存の fire-and-forget 呼び出し側は戻り値を見ていないため挙動は変わらない。
   // draft 確定フローだけが await して成功時のみ employees state へコミットする。
-  const handleSave = async (empId, m, d) => {
-    if (!selectedTenantId || !empId) return false;
+  // ★ pure save 化。
+  //   この関数は Firestore の saveDoc 実行と status 表示のみを担当する。
+  //   旧実装は内部で employees / monthlyLocks / settings / effectiveSettings / taxTables を
+  //   closure 参照して sanitize / hasNullTax 判定を行っていたが、debounce timer 発火時点で
+  //   別 client へ切り替わっていると古い closure を読み続ける構造的脆弱性があったため、
+  //   それらの処理は呼出し側（update 関数の updater 内）で pure helpers を使って事前に完了させ、
+  //   この関数には「保存可能な完成済みデータ」と「事前判定済みの hasNullTaxFlag」を渡す方式に変更した。
+  //
+  //   引数：
+  //     empId           : 保存対象の社員 ID
+  //     m               : master オブジェクト（pre-built）
+  //     d               : 保存データ（sanitize 済みであるべき。pure save なので追加変換は行わない）
+  //     tenantIdOverride: 保存先 tenant の固定値。未指定時のみ selectedTenantId をフォールバック使用
+  //     hasNullTaxFlag  : 事前判定済みの「計算不可項目あり」フラグ。status 表示用
+  //
+  //   closure 参照は selectedTenantId（フォールバック）と setSaveStatus（React 安定セッター）のみ。
+  //   debounce timer 経由では tenantIdOverride が必ず渡されるため、closure selectedTenantId は使われない。
+  //
+  // ============================================================================
+  // ⚠ 禁止: UI から handleSave を直接呼ばないこと
+  // ----------------------------------------------------------------------------
+  // 保存経路は必ず requestEmployeeSave を経由する。直接呼出は sanitize / hasNullTax
+  // 判定 / state と persisted の一致 / debounce 統合 / tenantId 固定 のすべてを
+  // バイパスするため、過去のデータ消失バグの主要原因になっていた。
+  //
+  // 例外（intentional bypass）：
+  //   - queueEmployeeSave 内部の debounce timer 発火 (正規ルート末端)
+  //   - handleSaveEmployeeMaster 内 2 箇所
+  //       理由: 「Firestore 保存成功を await で確認してから setEmployees」
+  //       という save-then-commit セマンティクスが必要。requestEmployeeSave は
+  //       fire-and-forget なので適さない。
+  //
+  // 新規に直接呼出を追加する前に：
+  //   1. requestEmployeeSave で代替できないか検討する
+  //   2. やむを得ない場合は intentional bypass コメントを書き、
+  //      ファイル冒頭の grep 監査ルール（想定マッチ数）も更新する
+  // ============================================================================
+  const handleSave = async (empId, m, d, tenantIdOverride, hasNullTaxFlag = false) => {
+    const effectiveTenantId = tenantIdOverride || selectedTenantId;
+    if (!effectiveTenantId || !empId) return false;
 
-    // ★ ロック月の sanitize: state 参照共有を避けるため必ず deep clone してから扱う
-    const sanitized = d ? JSON.parse(JSON.stringify(d)) : d;
-    const existingData = employees[empId]?.data || {};
-    const cloneRow = (row) => (row === undefined || row === null ? row : JSON.parse(JSON.stringify(row)));
-
-    if (sanitized && sanitized.years) {
-      for (const yearStr of Object.keys(sanitized.years)) {
-        const yearObj = sanitized.years[yearStr];
-        const existingYear = existingData.years?.[yearStr] || {};
-
-        // monthly[01..12] のロック判定
-        if (yearObj.monthly) {
-          for (const monthKey of MONTHS) {
-            if (!yearObj.monthly[monthKey]) continue;
-            // ★ 既存データの実体（undefined の可能性あり）。"|| {}" していないので、
-            //   ロック復元処理は existingMonthlyRow が存在する時のみ実行する。
-            //   新規社員追加直後や年度初期化直後は既存データが無いため、
-            //   incoming（createInitialYearData の初期値）を保持する。
-            const existingMonthlyRow = existingYear.monthly?.[monthKey];
-            const globalLocked = isMonthGloballyLocked(yearStr, monthKey);
-            // ★ row.isLocked は「コミット済み（既存）の状態」で判定する。
-            //   incoming 側で isLocked:false に偽装してきても効かないようにする。
-            //   既存無しの場合は rowLocked は false（保護対象データが存在しないため）。
-            const rowLocked = existingMonthlyRow?.isLocked === true;
-
-            if (globalLocked && existingMonthlyRow) {
-              // 全体ロック中かつ既存値あり：完全に既存値で上書き戻す
-              // （個人 isLocked のトグルすら通さない）。解除は handleUnlockMonth 経由のみ可能。
-              yearObj.monthly[monthKey] = cloneRow(existingMonthlyRow);
-            } else if (rowLocked) {
-              // rowLocked === true は existingMonthlyRow が存在する前提で成立する。
-              // 個人ロック中は isLocked のトグルだけ incoming を通す。
-              // これにより toggleMonthLock 経由のロック解除は通り、金額編集は通らない。
-              yearObj.monthly[monthKey] = {
-                ...cloneRow(existingMonthlyRow),
-                isLocked: yearObj.monthly[monthKey]?.isLocked,
-              };
-            }
-            // else (globalLocked かつ existingMonthlyRow が undefined):
-            //   既存に保護対象が存在しないため incoming のまま保持。
-            //   新規社員追加 / 年度初期化など、createInitialYearData が用意した
-            //   salaryMonthText / payDate / periodStart / periodEnd 等の初期値を消さない。
-          }
-        }
-
-        // manualOverrides[monthKey] のロック判定（ロック月分は既存値で戻す）
-        if (yearObj.manualOverrides) {
-          for (const monthKey of Object.keys(yearObj.manualOverrides)) {
-            const existingMonthlyRow = existingYear.monthly?.[monthKey];
-            if (
-              isMonthGloballyLocked(yearStr, monthKey) ||
-              existingMonthlyRow?.isLocked === true
-            ) {
-              // ロック月の manualOverrides は既存値で復元。
-              // 既存 override が無ければ incoming を保持（新規社員＋ロック月など、
-              // 戻す対象が存在しないケースでは初回入力を消さない）。
-              const existingOverride = existingYear.manualOverrides?.[monthKey];
-              if (existingOverride !== undefined) {
-                yearObj.manualOverrides[monthKey] = cloneRow(existingOverride);
-              }
-            }
-          }
-        }
-
-        // bonus / bonus2 のロック判定（monthlyLocks の bonus キーは現状未使用だが構造的対称性のため）
-        ["bonus", "bonus2"].forEach((bk) => {
-          if (yearObj[bk] && monthlyLocks?.[yearStr]?.[bk]?.locked === true) {
-            yearObj[bk] = cloneRow(existingYear[bk]) ?? yearObj[bk];
-          }
-        });
-      }
-    }
-
-    let hasNullTax = false;
-    if (sanitized && sanitized.years) {
-      const allowanceDefs = settings?.allowanceDefinitions || m.allowanceDefinitions || [];
-      const deductionDefs = settings?.deductionDefinitions || m.deductionDefinitions || [];
-      for (const yearStr of Object.keys(sanitized.years)) {
-        const yearData = sanitized.years[yearStr];
-        for (const monthKey of MONTHS) {
-          const row = yearData.monthly[monthKey];
-          if (row && (Number(row.basePay) > 0 || Object.values(row.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-            const res = calculateMonthlyResult(m, row, effectiveSettings, monthKey, yearStr, taxTables);
-            if (res.incomeTax === null) {
-              hasNullTax = true;
-              break;
-            }
-          }
-        }
-        if (hasNullTax) break;
-
-        if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes = calculateBonusResult({ master: m, bonusRow: yearData.bonus, bonusKey: "bonus", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
-           if (bRes.incomeTax === null) {
-             hasNullTax = true;
-             break;
-           }
-        }
-        if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-           const bRes2 = calculateBonusResult({ master: m, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
-           if (bRes2.incomeTax === null) {
-             hasNullTax = true;
-             break;
-           }
-        }
-      }
-    }
-
-    // ★ hasNullTax でも保存続行する。
-    //   旧実装は save を完全スキップしていたため、ローカル変更だけが存在し Firestore は古い
-    //   状態のまま → 任意のタイミングで onSnapshot が来ると古い値で setEmployees 全置換 →
-    //   入力が消える事故が頻発。今回 status 表示は残しつつ、保存自体は必ず行う方針へ変更。
-    console.log("[handleSave]", { empId, hasNullTax });
+    console.log("[handleSave]", { empId, effectiveTenantId, tenantIdOverride, hasNullTaxFlag });
 
     setSaveStatus("保存中...");
     try {
-      if (!selectedTenantId) throw new Error("tenant未選択で保存禁止");
+      const savePath = PATHS.employee(effectiveTenantId, empId);
+      console.log("[save employee path]", { tenantId: effectiveTenantId, empId, path: savePath });
       await saveDoc(
-        PATHS.employee(tenantId, empId),
+        savePath,
         {
           master: m,
-          data: sanitized,
+          data: d,
           updatedAt: new Date().toISOString(),
         },
         { merge: true }
       );
       // 計算不可項目が残っているときは警告表示、それ以外は通常の完了表示
-      if (hasNullTax) {
+      if (hasNullTaxFlag) {
         setSaveStatus("保存完了（⚠ 計算不可項目あり）");
         setTimeout(() => setSaveStatus(""), 3000);
       } else {
@@ -4136,54 +4192,176 @@ const App = () => {
   //   update 系関数の setEmployees updater から handleSave 直接呼出を分離するための
   //   debounce queue。同一社員への複数 save を最後の1件にまとめ、順序逆転は seq で検知。
   //   debounce=300ms（keystroke / Tab 移動で連発しない最小値）。
-  const queueEmployeeSave = (empId, master, data) => {
-    if (!empId) return;
+  //
+  //   ★ 第1引数 tenantId を必須化。クライアント切替時のデータ消失対策。
+  //     ・debounce 中にクライアント切替が起こると、timer 発火時の selectedTenantId が別会社に
+  //       なっている可能性がある。入力時点の tenantId を payload に含めて handleSave へ渡すことで、
+  //       保存先 path を入力時点に固定する。
+  //     ・キャッシュキーも `${tenantId}_${empId}` に変更し、別クライアントの同一 empId が衝突しない
+  //       ようにする（B案：切替後も元 tenant へ保存する）。
+  const queueEmployeeSave = (tenantId, empId, master, data, hasNullTaxFlag = false) => {
+    if (!tenantId || !empId) return;
     const seq = ++saveSeqRef.current;
+    const key = `${tenantId}_${empId}`;
 
-    pendingSavesRef.current.set(empId, { empId, master, data, seq });
-    latestSaveSeqByEmpRef.current.set(empId, seq);
+    // ★ payload には sanitize 済みデータと hasNullTaxFlag を含める。
+    //   handleSave は pure save なので、これらは queue 登録時点で確定させる必要がある。
+    pendingSavesRef.current.set(key, { tenantId, empId, master, data, hasNullTaxFlag, seq });
+    latestSaveSeqByEmpRef.current.set(key, seq);
 
-    // 同一社員に既存タイマーがあればキャンセル（最新ペイロードで上書き）
-    if (saveTimersRef.current.has(empId)) {
-      clearTimeout(saveTimersRef.current.get(empId));
+    // 同一 tenant×emp に既存タイマーがあればキャンセル（最新ペイロードで上書き）
+    if (saveTimersRef.current.has(key)) {
+      clearTimeout(saveTimersRef.current.get(key));
     }
 
-    console.log("[queueEmployeeSave]", { empId, seq });
+    console.log("[queueEmployeeSave]", { tenantId, selectedTenantId, empId, seq });
 
     const timer = setTimeout(async () => {
-      const pending = pendingSavesRef.current.get(empId);
+      const pending = pendingSavesRef.current.get(key);
       if (!pending) return;
 
       // 自分が登録された seq よりさらに新しい save が積まれている場合はスキップ
-      const latestSeq = latestSaveSeqByEmpRef.current.get(empId);
+      const latestSeq = latestSaveSeqByEmpRef.current.get(key);
       if (pending.seq !== latestSeq) {
-        console.log("[save stale skip]", { empId, seq: pending.seq, latestSeq });
-        // ペンディング自体は次の最新タイマーがクリアして上書きしているはずだが、念のため
+        console.log("[save stale skip]", { tenantId: pending.tenantId, empId, seq: pending.seq, latestSeq });
         return;
       }
 
       // タイマー発火・実行に入る前に pending を取り出して削除（再入抑止）
-      pendingSavesRef.current.delete(empId);
-      saveTimersRef.current.delete(empId);
+      pendingSavesRef.current.delete(key);
+      saveTimersRef.current.delete(key);
 
-      console.log("[save timer fire]", { empId, seq: pending.seq });
+      console.log("[save timer fire]", {
+        tenantId: pending.tenantId,
+        currentSelectedTenantId: selectedTenantId,
+        empId,
+        seq: pending.seq,
+      });
       let ok = false;
       try {
-        ok = await handleSave(pending.empId, pending.master, pending.data);
+        // ★ tenantIdOverride として pending.tenantId、hasNullTaxFlag として pending.hasNullTaxFlag を渡す。
+        //   handleSave は pure save。closure state を一切読まない。
+        ok = await handleSave(pending.empId, pending.master, pending.data, pending.tenantId, pending.hasNullTaxFlag);
       } catch (e) {
         ok = false;
       }
 
       // save 完了後にさらに新しい save が積まれていれば、ここの結果は無視扱い
-      const latestSeqAfter = latestSaveSeqByEmpRef.current.get(empId);
+      const latestSeqAfter = latestSaveSeqByEmpRef.current.get(key);
       if (pending.seq !== latestSeqAfter) {
-        console.log("[save stale skip]", { empId, seq: pending.seq, latestSeq: latestSeqAfter });
+        console.log("[save stale skip]", { tenantId: pending.tenantId, empId, seq: pending.seq, latestSeq: latestSeqAfter });
         return;
       }
-      console.log("[save complete]", { empId, seq: pending.seq, ok });
+      console.log("[save complete]", { tenantId: pending.tenantId, empId, seq: pending.seq, ok });
     }, 300);
 
-    saveTimersRef.current.set(empId, timer);
+    saveTimersRef.current.set(key, timer);
+  };
+
+  // ★ 保存入口を一本化する helper（save 経路の正規ルート）。
+  //   従来 2 系統あった保存経路（updateMonthly 系 → queueEmployeeSave / JSX inline → handleSave 直接呼出）
+  //   をすべて本 helper 経由に統一する。handleSave の直接呼出は原則禁止（await 必須の特殊ケースのみ例外）。
+  //
+  //   呼出後の流れ:
+  //     requestEmployeeSave → sanitize → queueEmployeeSave → debounce → handleSave(pure)
+  //
+  //   引数:
+  //     tenantId : 保存先 tenant を固定する（クライアント切替対策）
+  //     empId    : 保存対象社員 ID
+  //     builder  : (currentData, currentEmp) => { data?, master? } | null
+  //                state updater 内で呼ばれる純粋なビルダ関数。
+  //                返り値 null / undefined / 空オブジェクトの場合は no-op（state 更新も save もしない）。
+  //                data 省略時は currentEmp.data を維持、master 省略時は currentEmp.master を維持。
+  //
+  // ============================================================================
+  // 【builder contract】(必ず守ること)
+  // ----------------------------------------------------------------------------
+  //   1. builder は pure function であること
+  //      - 同じ引数なら同じ結果を返す
+  //      - 副作用を持たない（Firestore 書込 / state setter 呼出 / DOM 操作などは禁止）
+  //      - StrictMode で2回呼ばれても安全であること
+  //
+  //   2. closure 経由で外部 state を読まないこと
+  //      - employees / data / monthlyLocks / settings / effectiveSettings / taxTables /
+  //        selectedYear / selectedEmployeeId などを closure から参照してはならない
+  //      - 必ず引数 currentData / currentEmp の値だけを使う
+  //      - 理由: debounce 発火や StrictMode 二重実行時、closure は古い値を握ったままになるため、
+  //              「画面に見えている値」と「保存される値」がズレてデータ消失/上書きを起こす
+  //
+  //   3. 引数 currentData / currentEmp は mutate 禁止
+  //      - 必ず新しいオブジェクトを作って返す（spread / JSON.parse(JSON.stringify(...)) など）
+  //      - dev mode では builder 呼出前に Object.freeze を掛けて mutation を例外で検知する
+  //        （下記 Object.freeze ブロック参照）
+  //
+  //   4. 戻り値の data はサニタイズ前の "意図した最終形" を返す
+  //      - sanitizeEmployeeDataForSave / checkHasNullTax は本 helper 側で実行される
+  //      - builder 内で sanitize/lock チェックを再実装しないこと
+  //
+  //   挙動:
+  //     1. setEmployees の functional updater 内で builder 実行（直前に dev mode のみ freeze）
+  //     2. builder 返り値の data を sanitizeEmployeeDataForSave で sanitize
+  //     3. checkHasNullTax で hasNullTax flag 判定
+  //     4. local state を sanitized data / newMaster で更新
+  //     5. updater 外で queueEmployeeSave に payload を渡し debounce save 開始
+  //
+  //   ※ この関数は App コンポーネント内 local 定義であり export しない。
+  //     呼出経路を物理的に閉じることで bypass の混入を防いでいる。
+  // ============================================================================
+  const requestEmployeeSave = (tenantId, empId, builder) => {
+    if (!tenantId || !empId) return;
+    let savePayload = null;
+    setEmployees((prev) => {
+      const currentEmp = prev[empId];
+      if (!currentEmp) return prev;
+      const currentData = currentEmp.data || { years: {} };
+      // ----------------------------------------------------------------------
+      // dev mode 限定: builder への入力を freeze して accidental mutation を検知。
+      // ----------------------------------------------------------------------
+      // 範囲は「実害が起きる階層」に限定する（C 案）:
+      //   - currentEmp / currentData / currentData.years
+      //   - years 配下の全 yearData / monthly / bonus / bonus2 / manualOverrides
+      // builder のほとんどは years[selectedYear] を触るが、handleSaveResidentTaxBulk
+      // のように複数年度を書き換えるものもあるため、年度を絞らず全 yearData を freeze する。
+      // deep freeze は性能影響が大きいので row 単位までは freeze しない。
+      // ----------------------------------------------------------------------
+      // ※ A 案: prev[empId] / prev[empId].data そのものを freeze する。clone 経由ではない。
+      //   これは requestEmployeeSave 内の builder 監査だけでなく、他経路の隠れ mutation も
+      //   dev で表面化させる意図的な広域監査。silent corruption を許さない設計判断。
+      // ----------------------------------------------------------------------
+      if (import.meta.env.DEV) {
+        try {
+          Object.freeze(currentEmp);
+          Object.freeze(currentData);
+          if (currentData.years) {
+            Object.freeze(currentData.years);
+            for (const yearStr of Object.keys(currentData.years)) {
+              const yd = currentData.years[yearStr];
+              if (!yd) continue;
+              Object.freeze(yd);
+              if (yd.monthly) Object.freeze(yd.monthly);
+              if (yd.bonus) Object.freeze(yd.bonus);
+              if (yd.bonus2) Object.freeze(yd.bonus2);
+              if (yd.manualOverrides) Object.freeze(yd.manualOverrides);
+            }
+          }
+        } catch (e) {
+          // freeze は idempotent。StrictMode 二重実行で再 freeze されても no-op。
+          // 例外は dev 監査のための補助なので、握りつぶさず console に出すだけにする。
+          console.warn("[requestEmployeeSave] freeze warning:", e);
+        }
+      }
+      const result = builder(currentData, currentEmp);
+      if (!result) return prev;
+      const newMaster = result.master !== undefined ? result.master : currentEmp.master;
+      const newData = result.data !== undefined ? result.data : currentData;
+      const sanitized = sanitizeEmployeeDataForSave(newData, currentData, monthlyLocks);
+      const hasNullTax = checkHasNullTax(newMaster, sanitized, settings, effectiveSettings, taxTables);
+      savePayload = { tenantId, empId, master: newMaster, data: sanitized, hasNullTax };
+      return { ...prev, [empId]: { ...currentEmp, master: newMaster, data: sanitized } };
+    });
+    if (savePayload) {
+      queueEmployeeSave(savePayload.tenantId, savePayload.empId, savePayload.master, savePayload.data, savePayload.hasNullTax);
+    }
   };
 
   // ★ unmount cleanup: 残存タイマーをクリア。
@@ -4321,11 +4499,8 @@ const App = () => {
 
   const updateMasterObj = (newMaster) => {
     if (!selectedEmployeeId) return;
-    setEmployees((prev) => ({
-      ...prev,
-      [selectedEmployeeId]: { ...prev[selectedEmployeeId], master: newMaster },
-    }));
-    handleSave(selectedEmployeeId, newMaster, data);
+    // ★ 保存入口は requestEmployeeSave に統一。master のみ更新（data は維持）。
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, () => ({ master: newMaster }));
   };
 
   const handleSaveEmployeeMaster = async () => {
@@ -4338,6 +4513,13 @@ const App = () => {
       const newData = draftEmployee.data;
       let ok = false;
       try {
+        // ★ intentional bypass: handleSave 直接呼出 (#1: draft 確定)
+        //   理由: 新規社員は employees state にまだ存在しないため requestEmployeeSave の
+        //         setEmployees(prev => prev[empId] ... ) 経路が使えない（prev[empId] が undefined）。
+        //   また、save-then-commit セマンティクス（Firestore 保存成功を await で確認してから
+        //   setEmployees にコミット）が必要なため、fire-and-forget な requestEmployeeSave には
+        //   置き換え不可。失敗時に state へ未保存社員が混入するのを防ぐ。
+        //   → ファイル冒頭の grep 監査ルールの「想定マッチ数 4 件」に含まれる。
         ok = await handleSave(newId, editingMaster, newData);
       } catch (e) {
         ok = false;
@@ -4364,6 +4546,13 @@ const App = () => {
     if (!empData) return;
     let ok = false;
     try {
+      // ★ intentional bypass: handleSave 直接呼出 (#2: 既存社員の master 更新)
+      //   理由: save-then-commit セマンティクスが必要。Firestore 保存に失敗した場合、
+      //         editingMaster を state に反映してしまうと「保存されていないが画面に出ている」
+      //         不整合状態になり、別タブ・別クライアントで上書きされる。await で成功を確認して
+      //         からだけ setEmployees する必要があるため、fire-and-forget な
+      //         requestEmployeeSave には置き換え不可。
+      //   → ファイル冒頭の grep 監査ルールの「想定マッチ数 4 件」に含まれる。
       ok = await handleSave(editingEmployeeId, editingMaster, empData);
     } catch (e) {
       ok = false;
@@ -4395,12 +4584,10 @@ const App = () => {
   const handleRetireEmployee = (empId) => {
     const emp = employees[empId];
     if (!emp) return;
-    const newMaster = { ...emp.master, status: "retired" };
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], master: newMaster },
+    // ★ 保存入口は requestEmployeeSave に統一。master のみ status を更新（data は維持）。
+    requestEmployeeSave(selectedTenantId, empId, (_currentData, currentEmp) => ({
+      master: { ...currentEmp.master, status: "retired" },
     }));
-    handleSave(empId, newMaster, emp.data);
   };
 
   const handleDeleteEmployee = async (empId) => {
@@ -4488,42 +4675,21 @@ const App = () => {
     updateDataObj(selectedYear, newData);
   };
 
-  // ★ functional update 化: prev から最新 employee を取得し、master も prev 由来を使う。
-  //   save 副作用は updater 外の queueEmployeeSave 経由で実行（debounce + seq による順序保証）。
-  //   newData 自体は呼び出し元から渡されるため、本関数を直接呼ぶ legacy パス
-  //   (updateManualOverride / toggleNursingIns / copyPreviousMonth 等) は依然
-  //   呼び出し元の closure data 経由で newData を組んでいるが、commit と save は
-  //   prev ベースに統一して連続更新時の取りこぼしを防ぐ。
+  // ★ 保存入口は requestEmployeeSave に統一。本関数は newData を builder 経由で渡す
+  //   薄い wrapper。直接呼ぶ legacy パス（updateManualOverride / toggleNursingIns）も同様。
   const updateDataObj = (year, newData) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId) return;
-    const empId = selectedEmployeeId;
-    let savePayload = null;
-    setEmployees((prev) => {
-      const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
-      savePayload = { empId, master: currentEmp.master, data: newData };
-      return { ...prev, [empId]: { ...currentEmp, data: newData } };
-    });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
-    }
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, () => ({ data: newData }));
   };
 
-  // ★ functional update 化: closure の data を一切読まず、prev から最新値を取得して
-  //   newData を組み立てる。連続入力時に前の入力が「古い data ベースで上書き」される事故を防ぐ。
-  //   既存年度が無ければ明示的に createInitialYearData で生成（既存破壊しない分岐）。
-  //   save 副作用は updater 外の queueEmployeeSave 経由で実行（StrictMode/Concurrent 対応）。
+  // ★ 保存入口は requestEmployeeSave に統一。builder 内で prev の data を読み、newData を構築する。
+  //   sanitize / hasNullTax / queue / state 更新は requestEmployeeSave 側に集約。
   const updateMonthly = (year, m, field, val) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId) return;
-    const empId = selectedEmployeeId;
-    console.log("[updateMonthly]", { empId, year, month: m, field, value: val });
-    let savePayload = null;
-    setEmployees((prev) => {
-      const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
-      const currentData = currentEmp.data || { years: {} };
+    console.log("[updateMonthly]", { empId: selectedEmployeeId, year, month: m, field, value: val });
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
       // 明示分岐: 既存があれば既存、無ければ生成（既存破壊を防ぐ）
       let currentYearDataObj;
       if (currentData.years?.[year]) {
@@ -4532,9 +4698,9 @@ const App = () => {
         currentYearDataObj = createInitialYearData(year, settings);
       }
       const currentMonthData = currentYearDataObj.monthly?.[m] || {};
-      // ロック判定（isLocked 自身の切替は許可）
-      if (field !== "isLocked" && currentMonthData.isLocked) return prev;
-      if (field !== "isLocked" && isMonthGloballyLocked(year, m)) return prev;
+      // ロック判定（isLocked 自身の切替は許可）。builder が null を返すと no-op。
+      if (field !== "isLocked" && currentMonthData.isLocked) return null;
+      if (field !== "isLocked" && isMonthGloballyLocked(year, m)) return null;
       const newData = {
         ...currentData,
         years: {
@@ -4549,12 +4715,8 @@ const App = () => {
         },
       };
       console.log("[setEmployees latest]", { prevData: currentData, newData });
-      savePayload = { empId, master: currentEmp.master, data: newData };
-      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+      return { data: newData };
     });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
-    }
   };
 
   const updateManualOverride = (year, month, fieldKey, overrideObj) => {
@@ -4588,18 +4750,12 @@ const App = () => {
     updateDataObj(year, newData);
   };
 
-  // ★ functional update 化: closure の data を読まず、prev から最新値で newData を構築。
-  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
+  // ★ 保存入口は requestEmployeeSave に統一。
   const updateBonus = (year, bonusKey, field, id, val) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId) return;
-    const empId = selectedEmployeeId;
-    console.log("[updateBonus]", { empId, year, bonusKey, field, id, value: val });
-    let savePayload = null;
-    setEmployees((prev) => {
-      const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
-      const currentData = currentEmp.data || { years: {} };
+    console.log("[updateBonus]", { empId: selectedEmployeeId, year, bonusKey, field, id, value: val });
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
       // 明示分岐: 既存があれば既存、無ければ生成
       let currentYearDataObj;
       if (currentData.years?.[year]) {
@@ -4628,12 +4784,8 @@ const App = () => {
         },
       };
       console.log("[setEmployees latest]", { prevData: currentData, newData });
-      savePayload = { empId, master: currentEmp.master, data: newData };
-      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+      return { data: newData };
     });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
-    }
   };
 
   const toggleNursingIns = (year, targetMonth) => {
@@ -4699,11 +4851,6 @@ const App = () => {
       alert("コピー元の前月データが存在しません。");
       return;
     }
-    const sourceData = emp.data.years[sourceYear].monthly[sourceMonth];
-    const currentYearDataObj =
-      emp.data?.years?.[targetYear] ||
-      createInitialYearData(targetYear, settings);
-    const targetData = currentYearDataObj.monthly[targetMonth] || {};
     if (
       !window.confirm(
         `${parseInt(sourceMonth, 10)}月支給分の【金額・控除設定】を ${parseInt(
@@ -4714,50 +4861,54 @@ const App = () => {
     ) {
       return;
     }
-    const newData = {
-      ...targetData,
-      basePay: sourceData.basePay || 0,
-      residentTax: sourceData.residentTax || 0,
-      stdAmount: sourceData.stdAmount || 0,
-      hasNursingIns: sourceData.hasNursingIns || 0,
-      allowanceAmounts: sourceData.allowanceAmounts
-        ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts))
-        : {},
-      deductionAmounts: sourceData.deductionAmounts
-        ? JSON.parse(JSON.stringify(sourceData.deductionAmounts))
-        : {},
-    };
-    const updatedEmpData = {
-      ...emp.data,
-      years: {
-        ...emp.data.years,
-        [targetYear]: {
-          ...currentYearDataObj,
-          monthly: {
-            ...currentYearDataObj.monthly,
-            [targetMonth]: newData,
+    // ★ 保存入口は requestEmployeeSave に統一。builder 内で prev データを読み直す
+    //   ことで closure data 経由のデータ消失を回避する。
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
+      const sourceData = currentData?.years?.[sourceYear]?.monthly?.[sourceMonth];
+      if (!sourceData) return null;  // confirm 後にソースが消えた場合は no-op
+      let currentYearDataObj;
+      if (currentData.years?.[targetYear]) {
+        currentYearDataObj = currentData.years[targetYear];
+      } else {
+        currentYearDataObj = createInitialYearData(targetYear, settings);
+      }
+      const targetData = currentYearDataObj.monthly?.[targetMonth] || {};
+      const newMonthData = {
+        ...targetData,
+        basePay: sourceData.basePay || 0,
+        residentTax: sourceData.residentTax || 0,
+        stdAmount: sourceData.stdAmount || 0,
+        hasNursingIns: sourceData.hasNursingIns || 0,
+        allowanceAmounts: sourceData.allowanceAmounts
+          ? JSON.parse(JSON.stringify(sourceData.allowanceAmounts))
+          : {},
+        deductionAmounts: sourceData.deductionAmounts
+          ? JSON.parse(JSON.stringify(sourceData.deductionAmounts))
+          : {},
+      };
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [targetYear]: {
+              ...currentYearDataObj,
+              monthly: {
+                ...(currentYearDataObj.monthly || {}),
+                [targetMonth]: newMonthData,
+              },
+            },
           },
         },
-      },
-    };
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: updatedEmpData },
-    }));
-    handleSave(empId, emp.master, updatedEmpData);
+      };
+    });
   };
 
-  // ★ functional update 化: closure の employees[empId] を読まず、prev から最新値を取得。
-  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
+  // ★ 保存入口は requestEmployeeSave に統一。
   const updateEmployeeMonthly = (empId, year, monthKey, field, val) => {
     if (isLockedYear(year) || !year) return;
     console.log("[updateEmployeeMonthly]", { empId, year, month: monthKey, field, value: val });
-    let savePayload = null;
-    setEmployees((prev) => {
-      const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
-      const currentData = currentEmp.data || { years: {} };
-      // 明示分岐: 既存があれば既存、無ければ生成
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
       let currentYearDataObj;
       if (currentData.years?.[year]) {
         currentYearDataObj = currentData.years[year];
@@ -4765,9 +4916,8 @@ const App = () => {
         currentYearDataObj = createInitialYearData(year, settings);
       }
       const currentMonthData = currentYearDataObj.monthly?.[monthKey] || {};
-      // ロック判定（isLocked 自身の切替は許可）
-      if (field !== "isLocked" && currentMonthData.isLocked) return prev;
-      if (field !== "isLocked" && isMonthGloballyLocked(year, monthKey)) return prev;
+      if (field !== "isLocked" && currentMonthData.isLocked) return null;
+      if (field !== "isLocked" && isMonthGloballyLocked(year, monthKey)) return null;
       const newData = {
         ...currentData,
         years: {
@@ -4782,17 +4932,50 @@ const App = () => {
         },
       };
       console.log("[setEmployees latest]", { prevData: currentData, newData });
-      savePayload = { empId, master: currentEmp.master, data: newData };
-      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+      return { data: newData };
     });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
-    }
+  };
+
+  // ★ 月別ビュー（給与明細一覧表）からの賞与行更新。updateBonus の empId 版。
+  //   従来は JSX inline で handleSave 直接呼出していたが、本 helper 経由で
+  //   requestEmployeeSave に一本化する。
+  const updateEmployeeBonus = (empId, year, bonusKey, field, id, val) => {
+    if (isLockedYear(year) || !year) return;
+    console.log("[updateEmployeeBonus]", { empId, year, bonusKey, field, id, value: val });
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
+      let yearObj;
+      if (currentData.years?.[year]) {
+        yearObj = currentData.years[year];
+      } else {
+        yearObj = createInitialYearData(year, settings);
+      }
+      const currentBonus = yearObj[bonusKey] || {
+        basePay: 0,
+        allowanceAmounts: {},
+        deductionAmounts: {},
+        incomeTax: 0,
+        residentTax: 0,
+      };
+      const newBonus = { ...currentBonus };
+      if (id) newBonus[field] = { ...(newBonus[field] || {}), [id]: val };
+      else newBonus[field] = val;
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [year]: {
+              ...yearObj,
+              [bonusKey]: newBonus,
+            },
+          },
+        },
+      };
+    });
   };
 
   // 月別ビュー用の手当・控除オブジェクト更新関数
-  // ★ functional update 化: closure の employees[empId] を読まず、prev から最新値を取得。
-  //   save 副作用は updater 外の queueEmployeeSave 経由で実行。
+  // ★ 保存入口は requestEmployeeSave に統一。
   const updateEmployeeMonthlyObject = (
     empId,
     year,
@@ -4803,12 +4986,7 @@ const App = () => {
   ) => {
     if (isLockedYear(year) || !year) return;
     console.log("[updateEmployeeMonthlyObject]", { empId, year, month: monthKey, field, objKey, value: val });
-    let savePayload = null;
-    setEmployees((prev) => {
-      const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
-      const currentData = currentEmp.data || { years: {} };
-      // 明示分岐: 既存があれば既存、無ければ生成
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
       let currentYearDataObj;
       if (currentData.years?.[year]) {
         currentYearDataObj = currentData.years[year];
@@ -4816,8 +4994,8 @@ const App = () => {
         currentYearDataObj = createInitialYearData(year, settings);
       }
       const currentMonthData = currentYearDataObj.monthly?.[monthKey] || {};
-      if (currentMonthData.isLocked) return prev;
-      if (isMonthGloballyLocked(year, monthKey)) return prev;
+      if (currentMonthData.isLocked) return null;
+      if (isMonthGloballyLocked(year, monthKey)) return null;
       const currentObj = currentMonthData[field] || {};
       const newObj = { ...currentObj, [objKey]: val };
       const newData = {
@@ -4834,15 +5012,11 @@ const App = () => {
         },
       };
       console.log("[setEmployees latest]", { prevData: currentData, newData });
-      savePayload = { empId, master: currentEmp.master, data: newData };
-      return { ...prev, [empId]: { ...currentEmp, data: newData } };
+      return { data: newData };
     });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.empId, savePayload.master, savePayload.data);
-    }
   };
 
-  const handleSaveResidentTaxBulk = async (
+  const handleSaveResidentTaxBulk = (
     empId,
     startYear,
     juneAmount,
@@ -4874,48 +5048,40 @@ const App = () => {
       return;
     }
 
-    let updatedData = { ...emp.data };
-    if (!updatedData.years) updatedData.years = {};
-
-    // 1. 当年度（6月〜12月）の更新
     const currentYear = startYear;
-    if (!updatedData.years[currentYear]) {
-      updatedData.years[currentYear] = createInitialYearData(
-        currentYear,
-        settings
-      );
-    }
-
-    const monthsCurrent = ["06", "07", "08", "09", "10", "11", "12"];
-    monthsCurrent.forEach((m) => {
-      const amount = m === "06" ? juneAmount : remainingAmount;
-      updatedData.years[currentYear].monthly[m] = {
-        ...updatedData.years[currentYear].monthly[m],
-        residentTax: amount,
-      };
-    });
-
-    // 2. 翌年度（1月〜5月）の更新
     const nextYearNum = getYearNumber(startYear) + 1;
     const nextYear = `R${String(nextYearNum).padStart(2, "0")}`;
-    if (!updatedData.years[nextYear]) {
-      updatedData.years[nextYear] = createInitialYearData(nextYear, settings);
-    }
 
-    const monthsNext = ["01", "02", "03", "04", "05"];
-    monthsNext.forEach((m) => {
-      updatedData.years[nextYear].monthly[m] = {
-        ...updatedData.years[nextYear].monthly[m],
-        residentTax: remainingAmount,
-      };
+    // ★ 保存入口は requestEmployeeSave に統一。builder 内で prev データから組み立てる。
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
+      const updatedData = JSON.parse(JSON.stringify(currentData));
+      if (!updatedData.years) updatedData.years = {};
+      // 1. 当年度（6月〜12月）の更新
+      if (!updatedData.years[currentYear]) {
+        updatedData.years[currentYear] = createInitialYearData(currentYear, settings);
+      }
+      ["06", "07", "08", "09", "10", "11", "12"].forEach((m) => {
+        const amount = m === "06" ? juneAmount : remainingAmount;
+        updatedData.years[currentYear].monthly[m] = {
+          ...updatedData.years[currentYear].monthly[m],
+          residentTax: amount,
+        };
+      });
+      // 2. 翌年度（1月〜5月）の更新
+      if (!updatedData.years[nextYear]) {
+        updatedData.years[nextYear] = createInitialYearData(nextYear, settings);
+      }
+      ["01", "02", "03", "04", "05"].forEach((m) => {
+        updatedData.years[nextYear].monthly[m] = {
+          ...updatedData.years[nextYear].monthly[m],
+          residentTax: remainingAmount,
+        };
+      });
+      return { data: updatedData };
     });
 
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: updatedData },
-    }));
-
-    await handleSave(empId, emp.master, updatedData);
+    // 旧実装は await handleSave の後に alert を出していたが、debounce queue 化により
+    // alert は即時表示する。実保存は最大 300ms 以内にバックグラウンドで完了する。
     alert(
       `${currentYear}年6月〜${nextYear}年5月分の住民税を一括更新しました。`
     );
@@ -4985,29 +5151,23 @@ const App = () => {
       return;
     }
 
-    let updatedData = JSON.parse(JSON.stringify(emp.data));
-
-    if (!updatedData.years[currentYear])
-      updatedData.years[currentYear] = createInitialYearData(
-        currentYear,
-        settings
-      );
-    updatedData.years[currentYear].monthly[currentMonth].residentTax = totalRem;
-
-    monthsToClear.forEach((target) => {
-      if (
-        updatedData.years[target.y] &&
-        updatedData.years[target.y].monthly[target.m]
-      ) {
-        updatedData.years[target.y].monthly[target.m].residentTax = 0;
+    // ★ 保存入口は requestEmployeeSave に統一。builder 内で prev データから組み立てる。
+    requestEmployeeSave(selectedTenantId, empId, (currentData) => {
+      const updatedData = JSON.parse(JSON.stringify(currentData));
+      if (!updatedData.years) updatedData.years = {};
+      if (!updatedData.years[currentYear]) {
+        updatedData.years[currentYear] = createInitialYearData(currentYear, settings);
       }
+      if (updatedData.years[currentYear].monthly?.[currentMonth]) {
+        updatedData.years[currentYear].monthly[currentMonth].residentTax = totalRem;
+      }
+      monthsToClear.forEach((target) => {
+        if (updatedData.years[target.y] && updatedData.years[target.y].monthly[target.m]) {
+          updatedData.years[target.y].monthly[target.m].residentTax = 0;
+        }
+      });
+      return { data: updatedData };
     });
-
-    setEmployees((prev) => ({
-      ...prev,
-      [empId]: { ...prev[empId], data: updatedData },
-    }));
-    handleSave(empId, emp.master, updatedData);
   };
 
   // 給与明細単票モーダルを開く入口を一本化する共通関数。
@@ -9883,28 +10043,8 @@ const App = () => {
                               value={rowData.payDate || ""}
                               onChange={(e) => {
                                 if (isBonusList) {
-                                  const currentBonusData =
-                                    emp.data.years[selectedYear][
-                                      selectedListMonth
-                                    ] || {};
-                                  const newData = {
-                                    ...emp.data,
-                                    years: {
-                                      ...emp.data.years,
-                                      [selectedYear]: {
-                                        ...currentYearDataObj,
-                                        [selectedListMonth]: {
-                                          ...currentBonusData,
-                                          payDate: e.target.value,
-                                        },
-                                      },
-                                    },
-                                  };
-                                  setEmployees((prev) => ({
-                                    ...prev,
-                                    [empId]: { ...prev[empId], data: newData },
-                                  }));
-                                  handleSave(empId, emp.master, newData);
+                                  // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
+                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "payDate", null, e.target.value);
                                 } else {
                                   updateEmployeeMonthly(
                                     empId,
@@ -9929,28 +10069,8 @@ const App = () => {
                               value={rowData.basePay || ""}
                               onChange={(e) => {
                                 if (isBonusList) {
-                                  const currentBonusData =
-                                    emp.data.years[selectedYear][
-                                      selectedListMonth
-                                    ] || {};
-                                  const newData = {
-                                    ...emp.data,
-                                    years: {
-                                      ...emp.data.years,
-                                      [selectedYear]: {
-                                        ...currentYearDataObj,
-                                        [selectedListMonth]: {
-                                          ...currentBonusData,
-                                          basePay: Number(e.target.value),
-                                        },
-                                      },
-                                    },
-                                  };
-                                  setEmployees((prev) => ({
-                                    ...prev,
-                                    [empId]: { ...prev[empId], data: newData },
-                                  }));
-                                  handleSave(empId, emp.master, newData);
+                                  // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
+                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "basePay", null, Number(e.target.value));
                                 } else {
                                   updateEmployeeMonthly(
                                     empId,
@@ -9983,36 +10103,8 @@ const App = () => {
                                   }
                                   onChange={(e) => {
                                     if (isBonusList) {
-                                      const currentBonusData =
-                                        emp.data.years[selectedYear][
-                                          selectedListMonth
-                                        ] || {};
-                                      const newAllowances = {
-                                        ...(currentBonusData.allowanceAmounts ||
-                                          {}),
-                                        [def.id]: Number(e.target.value),
-                                      };
-                                      const newData = {
-                                        ...emp.data,
-                                        years: {
-                                          ...emp.data.years,
-                                          [selectedYear]: {
-                                            ...currentYearDataObj,
-                                            [selectedListMonth]: {
-                                              ...currentBonusData,
-                                              allowanceAmounts: newAllowances,
-                                            },
-                                          },
-                                        },
-                                      };
-                                      setEmployees((prev) => ({
-                                        ...prev,
-                                        [empId]: {
-                                          ...prev[empId],
-                                          data: newData,
-                                        },
-                                      }));
-                                      handleSave(empId, emp.master, newData);
+                                      // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
+                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "allowanceAmounts", def.id, Number(e.target.value));
                                     } else {
                                       updateEmployeeMonthlyObject(
                                         empId,
@@ -10082,28 +10174,8 @@ const App = () => {
                               value={rowData.residentTax || ""}
                               onChange={(e) => {
                                 if (isBonusList) {
-                                  const currentBonusData =
-                                    emp.data.years[selectedYear][
-                                      selectedListMonth
-                                    ] || {};
-                                  const newData = {
-                                    ...emp.data,
-                                    years: {
-                                      ...emp.data.years,
-                                      [selectedYear]: {
-                                        ...currentYearDataObj,
-                                        [selectedListMonth]: {
-                                          ...currentBonusData,
-                                          residentTax: Number(e.target.value),
-                                        },
-                                      },
-                                    },
-                                  };
-                                  setEmployees((prev) => ({
-                                    ...prev,
-                                    [empId]: { ...prev[empId], data: newData },
-                                  }));
-                                  handleSave(empId, emp.master, newData);
+                                  // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
+                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "residentTax", null, Number(e.target.value));
                                 } else {
                                   updateEmployeeMonthly(
                                     empId,
@@ -10151,42 +10223,14 @@ const App = () => {
                                   }
                                   onChange={(e) => {
                                     if (isBonusList) {
-                                      const currentBonusData =
-                                        emp.data.years[selectedYear][
-                                          selectedListMonth
-                                        ] || {};
-                                      const newDeductions = {
-                                        ...(currentBonusData.deductionAmounts ||
-                                          {}),
-                                        [def.id]: Number(e.target.value),
-                                      };
-                                      const newData = {
-                                        ...emp.data,
-                                        years: {
-                                          ...emp.data.years,
-                                          [selectedYear]: {
-                                            ...currentYearDataObj,
-                                            [selectedListMonth]: {
-                                              ...currentBonusData,
-                                              deductionAmounts: newDeductions,
-                                            },
-                                          },
-                                        },
-                                      };
-                                      setEmployees((prev) => ({
-                                        ...prev,
-                                        [empId]: {
-                                          ...prev[empId],
-                                          data: newData,
-                                        },
-                                      }));
-                                      handleSave(empId, emp.master, newData);
+                                      // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
+                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "deductionAmounts", def.id, Number(e.target.value));
                                     } else {
                                       updateEmployeeMonthlyObject(
                                         empId,
                                         selectedYear,
                                         selectedListMonth,
-                                        "deductionAmounts", // ★修正：ここを【deductionAmounts】に直しました
+                                        "deductionAmounts",
                                         def.id,
                                         Number(e.target.value)
                                       );

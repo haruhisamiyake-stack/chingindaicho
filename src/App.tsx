@@ -1392,11 +1392,14 @@ const calculateBonusIncomeTax = (
   };
 };
 
-// 月次給与の社会保険料計算。健保系(健康保険/介護保険)と厚年系(厚生年金/子ども子育て支援金)で
+// 月次給与の社会保険料計算。健保系(健康保険/介護保険/子ども子育て支援金)と厚年系(厚生年金)で
 // 標準報酬月額(等級・上下限)が異なるため、それぞれ別の amount を受け取る設計とした。
-// healthAmount: 健保用標準報酬月額(健康保険料・介護保険料のベース)
-// pensionAmount: 厚年用標準報酬月額(厚生年金保険料・子ども子育て支援金のベース)
+// healthAmount: 健保用標準報酬月額(健康保険料・介護保険料・子ども子育て支援金のベース)
+// pensionAmount: 厚年用標準報酬月額(厚生年金保険料のベース)
 // 各 amount が 0/null/未入力の場合はその系統だけ 0 を返す(片側未入力で片側だけ計算するケースに対応)。
+//
+// ※ 子ども・子育て支援金 (新制度 2026年4月施行) は健康保険料に上乗せ徴収される性質のため、
+//   ベースは健保標準報酬月額。旧制度の「子ども・子育て拠出金」(厚年ベース、事業主全額負担) とは別。
 const calculateSocialIns = (
   healthAmount,
   pensionAmount,
@@ -1414,7 +1417,8 @@ const calculateSocialIns = (
     health: ha > 0 ? Math.floor(ha * (Number(hRate) / 100)) : 0,
     pension: pa > 0 ? Math.floor(pa * (Number(pRate) / 100)) : 0,
     nursing: hasNursing && ha > 0 ? Math.floor(ha * (Number(nRate) / 100)) : 0,
-    childCare: pa > 0 ? Math.floor(pa * (Number(cRate) / 100)) : 0,
+    // ★ childCare のベースは健保 (ha)。新制度「子ども・子育て支援金」は健保料に上乗せ徴収されるため。
+    childCare: ha > 0 ? Math.floor(ha * (Number(cRate) / 100)) : 0,
   };
 };
 
@@ -1438,8 +1442,8 @@ const calculateMonthlyCore = ({
   flags: { hasHealth, hasPension, hasEmployment, hasNursing, isDoubleSocialIns },
   tax: { dependents, isOtsu, taxCalcMethod, taxTables, yearStr },
   // 健保用 / 厚年用の標準報酬月額を別フィールドで受け取る。
-  // stdAmountHealth: 健康保険・介護保険のベース
-  // stdAmountPension: 厚生年金保険・子ども子育て支援金のベース
+  // stdAmountHealth: 健康保険・介護保険・子ども子育て支援金 (新制度) のベース
+  // stdAmountPension: 厚生年金保険のベース
   // 入力済み数値なら Number、未入力(null)は計算不可扱い。
   std: { stdAmountHealth, stdAmountPension, standardRewardTable },
 }) => {
@@ -1562,8 +1566,8 @@ const calculateMonthlyCore = ({
   const insMultiplier = isDoubleSocialIns ? 2 : 1;
 
   // calculateSocialIns に「健保系の amount」と「厚年系の amount」を別個に渡す。
-  // 健保非加入 / stdAmountHealth 未入力 → healthAmtForIns=0 で健保・介護を 0 にする
-  // 厚年非加入 / stdAmountPension 未入力 → pensionAmtForIns=0 で厚年・子ども子育てを 0 にする
+  // 健保非加入 / stdAmountHealth 未入力 → healthAmtForIns=0 で健保・介護・子ども子育て支援金を 0 にする
+  // 厚年非加入 / stdAmountPension 未入力 → pensionAmtForIns=0 で厚年を 0 にする
   const healthAmtForIns = (hasHealth && stdAmountHealth !== null && Number(stdAmountHealth) > 0) ? Number(stdAmountHealth) : 0;
   const pensionAmtForIns = (hasPension && stdAmountPension !== null && Number(stdAmountPension) > 0) ? Number(stdAmountPension) : 0;
 
@@ -1580,13 +1584,15 @@ const calculateMonthlyCore = ({
 
   // 退職時等 2ヶ月分徴収倍率(未入力側は倍率対象外)
   if (insMultiplier > 1) {
-    if (!isMissingHealthStd) { ins.health *= insMultiplier; ins.nursing *= insMultiplier; }
-    if (!isMissingPensionStd) { ins.pension *= insMultiplier; ins.childCare *= insMultiplier; }
+    // ★ childCare は健保系 (新制度「子ども・子育て支援金」は健保料に上乗せ徴収) のため、nursing と同じく health グループ。
+    if (!isMissingHealthStd) { ins.health *= insMultiplier; ins.nursing *= insMultiplier; ins.childCare *= insMultiplier; }
+    if (!isMissingPensionStd) { ins.pension *= insMultiplier; }
   }
 
   // B案: 未入力側は 0 ではなく null にして「計算不可」を明示する(徐収 0 円と区別)。
-  if (isMissingHealthStd) { ins.health = null; ins.nursing = null; }
-  if (isMissingPensionStd) { ins.pension = null; ins.childCare = null; }
+  // ★ childCare は health 系として扱う (新制度「子ども・子育て支援金」は健保料に上乗せ徴収のため)。
+  if (isMissingHealthStd) { ins.health = null; ins.nursing = null; ins.childCare = null; }
+  if (isMissingPensionStd) { ins.pension = null; }
 
   // 片方でも標準報酬月額が未入力なら、所得税・控除合計・差引支給額は計算不可。
   // result: null を返し calculateMonthlyResult 側の coreResult === null 分岐で
@@ -1778,9 +1784,11 @@ const pushSocialInsLogs = ({
       calcLog.push(`  -> 介護保険料: ${formatCurrency(logIns.nursing)}円`);
     }
   }
-  if (hasPension) {
-    if (!_pSet) {
-      calcLog.push(`  -> 子ども・子育て支援金: 計算不可（厚年標準報酬月額未設定）`);
+  // ★ 子ども・子育て支援金 (新制度) は健保料に上乗せ徴収されるため、hasHealth ゲート + 健保 std セット判定。
+  //   ベース計算は calculateSocialIns で healthAmount を使用済み。
+  if (hasHealth) {
+    if (!_hSet) {
+      calcLog.push(`  -> 子ども・子育て支援金: 計算不可（健保標準報酬月額未設定）`);
     } else if (logIns.childCare === null) {
       calcLog.push(`  -> 子ども・子育て支援金: 計算不可`);
     } else if ((logIns.childCare ?? 0) > 0) {
@@ -1804,7 +1812,7 @@ const formatSocialInsCell = ({
   stdAmtSet,
   // 健保用 / 厚年用 別々のフラグ。健保用 stdAmount が設定済みなら stdAmtHealthSet=true、
   // 厚年用 stdAmount が設定済みなら stdAmtPensionSet=true。
-  // health/nursing → stdAmtHealthSet、 pension/childCare → stdAmtPensionSet を見る。
+  // health/nursing/childCare → stdAmtHealthSet、 pension → stdAmtPensionSet を見る。
   stdAmtHealthSet,
   stdAmtPensionSet,
 }) => {
@@ -1835,8 +1843,9 @@ const formatSocialInsCell = ({
     return amount(value);
   }
   if (kind === "childCare") {
-    if (!hasPension) return exempt;
-    if (!_pSet) return uncalc;
+    // ★ 子ども・子育て支援金 (新制度) は健保料に上乗せ徴収されるため、health ゲート + 健保 std セット判定。
+    if (!hasHealth) return exempt;
+    if (!_hSet) return uncalc;
     if (value === null) return uncalc;
     return amount(value);
   }
@@ -2010,13 +2019,14 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
     calcLog.push(`- 適用標準報酬月額: 対象外（健保・厚年とも未加入）`);
   } else {
     // 健保・厚年それぞれについて、加入有りでも未設定なら「⚠ 未設定」と明示する。
+    // ★ 子ども・子育て支援金は健保系 (新制度) のため、健保 std 未設定で計算不可、厚年 std 未設定では計算可。
     if (hasHealth && !_stdAmtHealthSet) {
-      calcLog.push(`- 適用標準報酬月額(健保): ⚠ 未設定（健保料・介護保険料は計算不可）`);
+      calcLog.push(`- 適用標準報酬月額(健保): ⚠ 未設定（健保料・介護保険料・子ども子育て支援金は計算不可）`);
     } else if (hasHealth) {
       calcLog.push(`- 適用標準報酬月額(健保): ${formatCurrency(debug.stdAmountHealth ?? 0)}円`);
     }
     if (hasPension && !_stdAmtPensionSet) {
-      calcLog.push(`- 適用標準報酬月額(厚年): ⚠ 未設定（厚生年金料・子ども子育て支援金は計算不可）`);
+      calcLog.push(`- 適用標準報酬月額(厚年): ⚠ 未設定（厚生年金料は計算不可）`);
     } else if (hasPension) {
       calcLog.push(`- 適用標準報酬月額(厚年): ${formatCurrency(debug.stdAmountPension ?? 0)}円`);
     }
@@ -2033,9 +2043,11 @@ const calculateMonthlyResult = (master, row, settings, monthKey, yearStr, taxTab
       if (_mh && _mp) {
         calcLog.push(`⚠ 健保・厚年とも標準報酬月額が未入力です。所得税・控除合計・差引支給額を計算不可とします。`);
       } else if (_mh) {
-        calcLog.push(`⚠ 健保の標準報酬月額が未入力です。健康保険料・介護保険料はもちろん、所得税・控除合計・差引支給額も計算不可とします。`);
+        // ★ 子ども子育て支援金は健保系のため、健保 std 未入力時に同時に計算不可。
+        calcLog.push(`⚠ 健保の標準報酬月額が未入力です。健康保険料・介護保険料・子ども子育て支援金はもちろん、所得税・控除合計・差引支給額も計算不可とします。`);
       } else if (_mp) {
-        calcLog.push(`⚠ 厚年の標準報酬月額が未入力です。厚生年金料・子ども子育て支援金はもちろん、所得税・控除合計・差引支給額も計算不可とします。`);
+        // ★ 子ども子育て支援金は health 系へ移行済み (厚年 std 未入力では計算可能)。
+        calcLog.push(`⚠ 厚年の標準報酬月額が未入力です。厚生年金料はもちろん、所得税・控除合計・差引支給額も計算不可とします。`);
       } else {
         calcLog.push(`⚠ 標準報酬月額が未入力です。社会保険料・所得税の計算を中断します。`);
       }
@@ -2160,7 +2172,10 @@ const calculateBonusIns = ({
   const health = hasHealth ? Math.floor(healthBonusStd * (hRate / 100)) : 0;
   const nursing = hasNursing ? Math.floor(healthBonusStd * (nRate / 100)) : 0;
   const pension = hasPension ? Math.floor(pensionBonusStd * (pRate / 100)) : 0;
-  const childCare = hasPension ? Math.floor(pensionBonusStd * (cRate / 100)) : 0;
+  // ★ childCare のベースは健保 (healthBonusStd, 年累計 573 万円上限)。
+  //   新制度「子ども・子育て支援金」は健保料に上乗せ徴収されるため、賞与上限も健保ルール準拠。
+  //   ゲートも hasHealth (健康保険加入者から徴収)。
+  const childCare = hasHealth ? Math.floor(healthBonusStd * (cRate / 100)) : 0;
   const employment = hasEmployment ? roundEmploymentInsurance(grossPay * (eRate / 1000)) : 0;
   const socialTotal = health + pension + nursing + childCare + employment;
   return { health, pension, nursing, childCare, employment, socialTotal };
@@ -6362,7 +6377,7 @@ const App = () => {
   const _slipHasEmployment = emp.master.employmentIns === 1;
   const _slipHasNursingIns = !isBonus && rowData.hasNursingIns === 1;
   // 健保用 / 厚年用 / legacy stdAmount をそれぞれ判定。賞与時は標準報酬月額に依存しないため両方 true。
-  // health/nursing → stdAmtHealthSet、 pension/childCare → stdAmtPensionSet を参照する。
+  // health/nursing/childCare → stdAmtHealthSet、 pension → stdAmtPensionSet を参照する。
   // legacy stdAmount のみ入力された旧データもフォールバックで認識する。
   // 支給なし月(calcResult.noIncome=true) は全控除が 0 確定のため、stdAmount 未入力でも「計算不可」ではなく「0」を表示。
   const _slipStdAmtHealthSet = isBonus
@@ -6699,7 +6714,7 @@ const App = () => {
         const _hasEmployment = m.employmentIns === 1;
         const _hasNursingIns = !isBonus && row.hasNursingIns === 1;
         // 賞与は標準報酬月額に依存しないため両方 true 扱いで実額表示にする。
-        // 健保用 stdAmount は health/nursing、 厚年用 stdAmount は pension/childCare の判定に使う。
+        // 健保用 stdAmount は health/nursing/childCare、 厚年用 stdAmount は pension の判定に使う。
         // legacy stdAmount のみのデータもフォールバック認識する。
         // 支給なし月(calc.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
         const _stdAmtHealthSet = isBonus
@@ -9028,7 +9043,7 @@ const App = () => {
                                 </td>
                                 {MONTHS.map((m) => {
                                   // calcRaw が明示的 null のときは「計算不可」(0 円徴収と区別)。
-                                  // 健保未入力時の health/nursing、厚年未入力時の pension/childCare に null が来る。
+                                  // 健保未入力時の health/nursing/childCare、厚年未入力時の pension に null が来る。
                                   // employment は常に数値(null にならない)。
                                   const calcRaw = results.monthlyResults[m]?.[key];
                                   const isUncalc = calcRaw === null;

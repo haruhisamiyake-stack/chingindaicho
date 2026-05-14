@@ -3406,6 +3406,31 @@ const App = () => {
   const [stdRewardImportError, setStdRewardImportError] = useState("");
   const [isStdRewardImporting, setIsStdRewardImporting] = useState(false);
 
+  // ★ 事務所設定バックアップ・復元用ステート
+  //   officeMaster (rateSchedules, standardRewardTable) と taxTables のみが対象。
+  //   settings / employees / monthlyLocks など個別テナント配下のデータは一切対象外。
+  const [ofcMasterBackupFile, setOfcMasterBackupFile] = useState(null);
+  const [ofcMasterBackupPreview, setOfcMasterBackupPreview] = useState(null); // { backupType, backupVersion, createdAt, officeMasterFields, taxTableIds, rawData }
+  const [ofcMasterBackupError, setOfcMasterBackupError] = useState("");
+  const [isOfcMasterBackupImporting, setIsOfcMasterBackupImporting] = useState(false);
+
+  // ★ アプリ全体バックアップ用ステート（エクスポートのみ実装。復元は別フェーズで設計）
+  const [isFullAppBackupExporting, setIsFullAppBackupExporting] = useState(false);
+  const [fullAppBackupError, setFullAppBackupError] = useState("");
+  const [fullAppBackupLastInfo, setFullAppBackupLastInfo] = useState(null); // { tenantCount, employeeCount, taxTableCount, fileName }
+
+  // ★ アプリ全体バックアップ「読み取り専用プレビュー」用ステート（復元なし／Firestore 書込なし）
+  //   - fullAppBackupPreview: { ok, json, summary, fileName, fileSize } | null
+  //   - fullAppBackupPreviewError: string
+  const [fullAppBackupPreview, setFullAppBackupPreview] = useState(null);
+  const [fullAppBackupPreviewError, setFullAppBackupPreviewError] = useState("");
+
+  // ★ アプリ全体バックアップ「復元シミュレーション (Dry Run)」用ステート
+  //    実復元は行わない。Firestore 書込は一切なし。読込のみで件数・docId 差分を可視化。
+  const [isFullAppDryRunRunning, setIsFullAppDryRunRunning] = useState(false);
+  const [fullAppDryRunReport, setFullAppDryRunReport] = useState(null);
+  const [fullAppDryRunError, setFullAppDryRunError] = useState("");
+
   // ★月次全体ロック管理ステート
   const [monthlyLocks, setMonthlyLocks] = useState({});
   const [lockMgmtYear, setLockMgmtYear] = useState("");
@@ -3711,6 +3736,915 @@ const App = () => {
       setStdRewardImportError("保存に失敗しました: " + err.message);
     } finally {
       setIsStdRewardImporting(false);
+    }
+  };
+
+  // ============================================================================
+  // 事務所設定バックアップ・復元（全テナント共通マスタの JSON 形式バックアップ）
+  // ----------------------------------------------------------------------------
+  // 対象: officeMaster/v1 (rateSchedules, standardRewardTable) と taxTables collection。
+  // 対象外: settings / employees / monthlyLocks / tenants など個別テナント配下のデータ。
+  //
+  // 仕様:
+  //   - backupType: "payroll-office-master-settings" 固定
+  //   - backupVersion: 1
+  //   - 復元時、officeMaster は merge:true、taxTables は doc-by-doc saveDoc で
+  //     追加・上書きのみ実施（バックアップに存在しない既存 docId の削除はしない）。
+  //   - 復元実行直前に現在状態を自動バックアップ JSON としてダウンロード。
+  // ============================================================================
+
+  // バックアップ JSON 構造を組み立てる（pure）。
+  const buildOfficeMasterBackupJson = (officeMasterArg, taxTablesArg) => {
+    const ofc = officeMasterArg || {};
+    const officeMasterOut = {};
+    if (ofc.rateSchedules !== undefined) officeMasterOut.rateSchedules = ofc.rateSchedules;
+    if (ofc.standardRewardTable !== undefined) officeMasterOut.standardRewardTable = ofc.standardRewardTable;
+
+    const taxTablesOut = {};
+    Object.entries(taxTablesArg || {}).forEach(([docId, t]) => {
+      if (!t) return;
+      taxTablesOut[docId] = {
+        year: t.year,
+        type: t.type,
+        importedAt: t.importedAt || null,
+        rows: Array.isArray(t.rows) ? t.rows : [],
+      };
+    });
+
+    return {
+      backupType: "payroll-office-master-settings",
+      backupVersion: 1,
+      appId: "payroll-ledger-app",
+      createdAt: new Date().toISOString(),
+      data: {
+        officeMaster: officeMasterOut,
+        taxTables: taxTablesOut,
+      },
+    };
+  };
+
+  // バックアップ JSON のパース＆検証（pure）。
+  // 失敗時は { error: string } を返す。成功時は { ok: true, json, summary } を返す。
+  const parseOfficeMasterBackupJson = (text) => {
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return { error: "JSON 形式エラー: " + e.message };
+    }
+    if (!json || typeof json !== "object") return { error: "ファイルの内容が不正です" };
+    if (json.backupType !== "payroll-office-master-settings") {
+      return { error: `バックアップ種別が一致しません（期待: payroll-office-master-settings, 実際: ${json.backupType || "なし"}）` };
+    }
+    if (json.backupVersion !== 1) {
+      return { error: `未対応のバックアップバージョンです（${json.backupVersion}）` };
+    }
+    if (!json.data || typeof json.data !== "object") return { error: "data フィールドが見つかりません" };
+
+    const ofc = json.data.officeMaster || {};
+    const tax = json.data.taxTables || {};
+    if (typeof ofc !== "object") return { error: "data.officeMaster が不正です" };
+    if (typeof tax !== "object") return { error: "data.taxTables が不正です" };
+
+    const officeMasterFields = [];
+    if (ofc.rateSchedules !== undefined) officeMasterFields.push("rateSchedules");
+    if (ofc.standardRewardTable !== undefined) {
+      if (!Array.isArray(ofc.standardRewardTable)) return { error: "data.officeMaster.standardRewardTable は配列である必要があります" };
+      officeMasterFields.push(`standardRewardTable (${ofc.standardRewardTable.length} 等級)`);
+    }
+
+    const taxTableIds = [];
+    for (const [docId, t] of Object.entries(tax)) {
+      if (!t || typeof t !== "object") return { error: `data.taxTables.${docId} が不正です` };
+      if (!Array.isArray(t.rows)) return { error: `data.taxTables.${docId}.rows は配列である必要があります` };
+      taxTableIds.push(`${docId} (${t.rows.length} 行)`);
+    }
+
+    return {
+      ok: true,
+      json,
+      summary: {
+        createdAt: json.createdAt || "不明",
+        officeMasterFields,
+        taxTableIds,
+      },
+    };
+  };
+
+  // 内部ヘルパー: JSON をファイルとしてダウンロード
+  const _downloadOfficeMasterBackupJson = (json, filename) => {
+    const text = JSON.stringify(json, null, 2);
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // 事務所設定バックアップ JSON をエクスポート（手動）
+  const handleExportOfficeMasterBackup = () => {
+    const json = buildOfficeMasterBackupJson(officeMaster, taxTables);
+    _downloadOfficeMasterBackupJson(
+      json,
+      `payroll_office_master_backup_${_stdRewardTimestampStr()}.json`
+    );
+  };
+
+  // ファイル選択時の解析・プレビュー
+  const handleOfficeMasterBackupFileChange = (e) => {
+    const file = e.target.files[0];
+    setOfcMasterBackupFile(file);
+    setOfcMasterBackupPreview(null);
+    setOfcMasterBackupError("");
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = parseOfficeMasterBackupJson(event.target.result);
+      if (result.error) {
+        setOfcMasterBackupError(result.error);
+        return;
+      }
+      setOfcMasterBackupPreview(result);
+    };
+    reader.onerror = () => setOfcMasterBackupError("ファイルの読み込みに失敗しました");
+    reader.readAsText(file);
+  };
+
+  // 復元実行（確認ダイアログ → 自動バックアップ DL → Firestore 書込）
+  const handleExecuteOfficeMasterRestore = async () => {
+    if (!ofcMasterBackupPreview || !ofcMasterBackupPreview.ok) return;
+    const restoreJson = ofcMasterBackupPreview.json;
+    const ofc = restoreJson.data.officeMaster || {};
+    const tax = restoreJson.data.taxTables || {};
+
+    const ofcFieldCount = ofcMasterBackupPreview.summary.officeMasterFields.length;
+    const taxIdCount = ofcMasterBackupPreview.summary.taxTableIds.length;
+
+    const confirmMsg =
+      `事務所設定バックアップから復元します。\n\n` +
+      `- officeMaster: ${ofcFieldCount} 項目を merge 書込\n` +
+      `- taxTables: ${taxIdCount} 個の表を追加・上書き（既存 doc の削除はしません）\n\n` +
+      `※ 個別の顧問先設定（settings）・社員データ（employees）は一切変更されません。\n` +
+      `※ 復元実行前に、現在の状態を自動バックアップ JSON としてダウンロードします。\n\n` +
+      `よろしいですか？`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsOfcMasterBackupImporting(true);
+    setOfcMasterBackupError("");
+    try {
+      if (!userId) throw new Error("ログインが必要です");
+
+      // 自動バックアップ DL (saveDoc 直前)
+      const beforeJson = buildOfficeMasterBackupJson(officeMaster, taxTables);
+      _downloadOfficeMasterBackupJson(
+        beforeJson,
+        `payroll_office_master_before_restore_${_stdRewardTimestampStr()}.json`
+      );
+
+      // officeMaster は merge:true で書込（バックアップに含まれないフィールドは保持）
+      const ofcPayload = {};
+      if (ofc.rateSchedules !== undefined) ofcPayload.rateSchedules = ofc.rateSchedules;
+      if (ofc.standardRewardTable !== undefined) ofcPayload.standardRewardTable = ofc.standardRewardTable;
+      if (Object.keys(ofcPayload).length > 0) {
+        await saveDoc(PATHS.officeMaster(), ofcPayload, { merge: true });
+      }
+
+      // taxTables は doc-by-doc に saveDoc。既存 doc の削除は行わない。
+      for (const [docId, t] of Object.entries(tax)) {
+        await saveDoc(PATHS.taxTable(docId), {
+          year: t.year,
+          type: t.type,
+          rows: t.rows || [],
+          importedAt: t.importedAt || new Date().toISOString(),
+        });
+      }
+
+      setOfcMasterBackupPreview(null);
+      setOfcMasterBackupFile(null);
+      const fileInput = document.getElementById("ofc-master-backup-input");
+      if (fileInput) fileInput.value = "";
+      alert(`事務所設定バックアップから復元しました。\nofficeMaster: ${ofcFieldCount} 項目 / taxTables: ${taxIdCount} 表`);
+    } catch (err) {
+      setOfcMasterBackupError("復元に失敗しました: " + err.message);
+    } finally {
+      setIsOfcMasterBackupImporting(false);
+    }
+  };
+
+  // ============================================================================
+  // アプリ全体バックアップ（エクスポートのみ。復元は今回は実装しない）
+  // ----------------------------------------------------------------------------
+  // 対象:
+  //   - /officeMaster/* (全 doc)
+  //   - /taxTables/* (全 doc)
+  //   - /tenants/{tid} (ownerUid == 現ユーザに限定)
+  //   - /tenants/{tid}/settings/* (全 doc)
+  //   - /tenants/{tid}/monthlyLocks/* (全 doc)
+  //   - /tenants/{tid}/employees/* (全 doc。給与データ data.years.* は doc 内なので自動的に含まれる)
+  //
+  // 対象外:
+  //   - legacy パス (/tenants/{tid}/users/{uid}/payroll* など)
+  //   - 他ユーザの tenants（ownerUid フィルタ）
+  //
+  // 注意: 復元機能は危険度が高いため別フェーズで設計する。今回は import 系のロジックなし。
+  // ============================================================================
+
+  // Firestore から現在の「全データスナップショット」を並列取得する pure-ish helper。
+  // 戻り値の形は backup JSON の `data` フィールドと完全に同一:
+  //   { officeMaster, taxTables, tenants[tid] = { tenant, settings, monthlyLocks, employees } }
+  // この helper はバックアップ JSON 組立と Dry Run（現在データ取得）の両方で再利用される。
+  const fetchCurrentFullAppSnapshot = async (uid) => {
+    // 1) officeMaster コレクション全体
+    const ofcSnap = await fetchDocs(getCol("officeMaster"));
+    const officeMasterOut = {};
+    ofcSnap.forEach((d) => { officeMasterOut[d.id] = d.data(); });
+
+    // 2) taxTables コレクション全体
+    const taxSnap = await fetchDocs(getCol(...PATHS.taxTables()));
+    const taxTablesOut = {};
+    taxSnap.forEach((d) => { taxTablesOut[d.id] = d.data(); });
+
+    // 3) tenants（ownerUid フィルタ）
+    const tenantsQuery = queryCol(getCol(...PATHS.tenants()), whereEq("ownerUid", "==", uid));
+    const tenantsSnap = await fetchDocs(tenantsQuery);
+
+    // 4) 各 tenant のサブコレクション（settings / monthlyLocks / employees）を並列取得
+    const tenantsOut = {};
+    const tenantPromises = tenantsSnap.docs.map(async (tDoc) => {
+      const tid = tDoc.id;
+      const [settingsSnap, locksSnap, empsSnap] = await Promise.all([
+        fetchDocs(getCol("tenants", tid, "settings")),
+        fetchDocs(getCol("tenants", tid, "monthlyLocks")),
+        fetchDocs(getCol(...PATHS.employees(tid))),
+      ]);
+      const settingsOut = {};
+      settingsSnap.forEach((d) => { settingsOut[d.id] = d.data(); });
+      const locksOut = {};
+      locksSnap.forEach((d) => { locksOut[d.id] = d.data(); });
+      const employeesOut = {};
+      empsSnap.forEach((d) => { employeesOut[d.id] = d.data(); });
+      tenantsOut[tid] = {
+        tenant: tDoc.data(),
+        settings: settingsOut,
+        monthlyLocks: locksOut,
+        employees: employeesOut,
+      };
+    });
+    await Promise.all(tenantPromises);
+
+    return {
+      officeMaster: officeMasterOut,
+      taxTables: taxTablesOut,
+      tenants: tenantsOut,
+    };
+  };
+
+  // Firestore から全データを並列に取得してバックアップ JSON を組み立てる
+  // (取得ロジックは fetchCurrentFullAppSnapshot に共通化。ここではメタ情報を付与するだけ)
+  const buildFullAppBackup = async (uid) => {
+    const data = await fetchCurrentFullAppSnapshot(uid);
+    return {
+      backupType: "payroll-full-app-backup",
+      backupVersion: 1,
+      appId: "payroll-ledger-app",
+      createdAt: new Date().toISOString(),
+      data,
+    };
+  };
+
+  // バイト数を人間可読な単位ラベルに整形 (12.4 MB, 320 KB, 1.8 GB, ...)
+  // 仕様:
+  //   - B / KB は整数表記
+  //   - MB / GB は小数1桁表記
+  //   - null / NaN は "-"
+  const _formatByteSizeLabel = (bytes) => {
+    if (bytes == null || isNaN(bytes)) return "-";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  };
+
+  // ============================================================================
+  // バックアップ検証サマリ生成 (pure function)
+  // ----------------------------------------------------------------------------
+  // 入力: backup JSON (buildFullAppBackup の戻り値と同じ形) と stringify 済バイト数
+  // 出力: 件数集計 + サイズ情報
+  //
+  // 純関数: Firestore を読まず、外部 state も参照しない。
+  // 将来の restore 機能で「インポート JSON のプレビュー」にも再利用できる構造。
+  //
+  // summary shape:
+  //   officeMasterCount, taxTablesCount, tenantsCount,
+  //   settingsCount, monthlyLocksCount, employeesCount,
+  //   yearsCount, monthlyRowsCount, bonusRowsCount,
+  //   jsonSizeBytes, jsonSizeLabel
+  // ============================================================================
+  const buildBackupSummary = (json, jsonSizeBytes) => {
+    const data = (json && json.data) || {};
+    const officeMaster = data.officeMaster || {};
+    const taxTables = data.taxTables || {};
+    const tenants = data.tenants || {};
+
+    const officeMasterCount = Object.keys(officeMaster).length;
+    const taxTablesCount = Object.keys(taxTables).length;
+    const tenantsCount = Object.keys(tenants).length;
+
+    let settingsCount = 0;
+    let monthlyLocksCount = 0;
+    let employeesCount = 0;
+    let yearsCount = 0;
+    let monthlyRowsCount = 0;
+    let bonusRowsCount = 0;
+
+    for (const tid of Object.keys(tenants)) {
+      const t = tenants[tid] || {};
+      settingsCount += Object.keys(t.settings || {}).length;
+      monthlyLocksCount += Object.keys(t.monthlyLocks || {}).length;
+      const emps = t.employees || {};
+      const empIds = Object.keys(emps);
+      employeesCount += empIds.length;
+      for (const eid of empIds) {
+        const emp = emps[eid] || {};
+        const years = (emp.data && emp.data.years) || {};
+        for (const yKey of Object.keys(years)) {
+          yearsCount += 1;
+          const yData = years[yKey] || {};
+          const monthly = yData.monthly;
+          if (Array.isArray(monthly)) {
+            monthlyRowsCount += monthly.length;
+          } else if (monthly && typeof monthly === "object") {
+            monthlyRowsCount += Object.keys(monthly).length;
+          }
+          if (yData.bonus) bonusRowsCount += 1;
+          if (yData.bonus2) bonusRowsCount += 1;
+        }
+      }
+    }
+
+    const safeBytes = (typeof jsonSizeBytes === "number" && !isNaN(jsonSizeBytes))
+      ? jsonSizeBytes
+      : 0;
+    return {
+      officeMasterCount,
+      taxTablesCount,
+      tenantsCount,
+      settingsCount,
+      monthlyLocksCount,
+      employeesCount,
+      yearsCount,
+      monthlyRowsCount,
+      bonusRowsCount,
+      jsonSizeBytes: safeBytes,
+      jsonSizeLabel: _formatByteSizeLabel(safeBytes),
+    };
+  };
+
+  // アプリ全体バックアップのエクスポート実行
+  const handleExportFullAppBackup = async () => {
+    if (!userId) {
+      setFullAppBackupError("ログインが必要です");
+      return;
+    }
+    if (isFullAppBackupExporting) return;
+
+    const confirmMsg =
+      `アプリ全体のデータを JSON ファイルとしてダウンロードします。\n\n` +
+      `対象:\n` +
+      `- 事務所マスタ (officeMaster)\n` +
+      `- 源泉徴収税額表 (taxTables)\n` +
+      `- 顧問先一覧 (自分の tenants のみ)\n` +
+      `- 各顧問先の会社設定 (settings)\n` +
+      `- 各顧問先の月次ロック (monthlyLocks)\n` +
+      `- 各顧問先の社員データ・賃金台帳 (employees + 給与データ)\n\n` +
+      `※ 復元機能は今回は実装されていません（別フェーズで設計予定）。\n` +
+      `※ 顧問先・社員数によってはダウンロードに数秒以上かかります。\n\n` +
+      `実行しますか？`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsFullAppBackupExporting(true);
+    setFullAppBackupError("");
+    console.time("[full backup export]");
+    try {
+      const json = await buildFullAppBackup(userId);
+      const fileName = `payroll_full_app_backup_${_stdRewardTimestampStr()}.json`;
+
+      // ★ JSON.stringify 失敗ガード（循環参照・シリアライズ不能値などの保護）。
+      //   失敗時は alert / console.error のみで、state 更新もダウンロードも行わない。
+      let jsonString;
+      try {
+        jsonString = JSON.stringify(json, null, 2);
+      } catch (e) {
+        console.error("[full backup export] JSON.stringify failed", e);
+        alert(
+          "バックアップ JSON の文字列化に失敗しました。\n" +
+          "データに循環参照やシリアライズ不能な値が含まれている可能性があります。\n\n" +
+          "詳細: " + ((e && e.message) || e)
+        );
+        return; // state 更新・ダウンロード共にスキップ
+      }
+
+      // stringify は 1 回だけ。Blob を download にもサイズ算定にも流用。
+      const blob = new Blob([jsonString], { type: "application/json" });
+      const jsonSizeBytes = blob.size;
+
+      // ダウンロード実行
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // pure helper で summary を生成（restore 実装時にも再利用予定）
+      const summary = buildBackupSummary(json, jsonSizeBytes);
+      const report = {
+        ...summary,
+        fileName,
+        createdAt: json.createdAt,
+      };
+      console.log("[full backup export]", {
+        officeMasterCount: summary.officeMasterCount,
+        taxTablesCount: summary.taxTablesCount,
+        tenantsCount: summary.tenantsCount,
+        settingsCount: summary.settingsCount,
+        monthlyLocksCount: summary.monthlyLocksCount,
+        employeesCount: summary.employeesCount,
+        yearsCount: summary.yearsCount,
+        monthlyRowsCount: summary.monthlyRowsCount,
+        bonusRowsCount: summary.bonusRowsCount,
+        jsonSizeBytes: summary.jsonSizeBytes,
+        jsonSizeLabel: summary.jsonSizeLabel,
+        fileName,
+      });
+      setFullAppBackupLastInfo(report);
+    } catch (err) {
+      setFullAppBackupError("バックアップに失敗しました: " + err.message);
+    } finally {
+      console.timeEnd("[full backup export]");
+      setIsFullAppBackupExporting(false);
+    }
+  };
+
+  // ============================================================================
+  // アプリ全体バックアップ JSON 読み取り専用プレビュー
+  // ----------------------------------------------------------------------------
+  // ダウンロード済みのアプリ全体バックアップ JSON を画面上で確認するためだけの
+  // 機能。Firestore への書込は一切行わない。復元機能ではない。
+  // ============================================================================
+
+  // バックアップ JSON のパース＆検証（pure）。
+  // 失敗時は { error: string } を返す。成功時は { ok: true, json } を返す。
+  const parseFullAppBackupJson = (text) => {
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return { error: "JSON 形式エラー: " + (e && e.message ? e.message : e) };
+    }
+    if (!json || typeof json !== "object") return { error: "ファイルの内容が不正です" };
+    // 事務所共通設定バックアップを誤って読ませた場合の専用メッセージ
+    if (json.backupType === "payroll-office-master-settings") {
+      return { error: "これはアプリ全体バックアップではありません（事務所共通設定バックアップです）。" };
+    }
+    if (json.backupType !== "payroll-full-app-backup") {
+      return { error: `バックアップ種別が一致しません（期待: payroll-full-app-backup, 実際: ${json.backupType || "なし"}）` };
+    }
+    if (json.backupVersion !== 1) {
+      return { error: `未対応のバックアップバージョンです（${json.backupVersion}）` };
+    }
+    if (!json.data || typeof json.data !== "object") return { error: "data フィールドが見つかりません" };
+    if (!json.data.officeMaster || typeof json.data.officeMaster !== "object") return { error: "data.officeMaster が不正です" };
+    if (!json.data.taxTables || typeof json.data.taxTables !== "object") return { error: "data.taxTables が不正です" };
+    if (!json.data.tenants || typeof json.data.tenants !== "object") return { error: "data.tenants が不正です" };
+    return { ok: true, json };
+  };
+
+  // ファイル選択時の解析・プレビュー（読み取り専用。Firestore 書込なし）
+  const handleFullAppBackupPreviewFileChange = (e) => {
+    const file = e.target.files && e.target.files[0];
+    // 同じファイルを再選択できるよう input をリセット
+    if (e.target) e.target.value = "";
+    setFullAppBackupPreview(null);
+    setFullAppBackupPreviewError("");
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target && event.target.result;
+      const result = parseFullAppBackupJson(text);
+      if (result.error) {
+        setFullAppBackupPreviewError(result.error);
+        return;
+      }
+      // 既存の pure helper を再利用。サイズはファイル実バイト数を使用。
+      const summary = buildBackupSummary(result.json, file.size);
+      const preview = {
+        ok: true,
+        json: result.json,
+        summary,
+        fileName: file.name,
+        fileSize: file.size,
+      };
+      console.log("[full backup preview]", {
+        fileName: file.name,
+        fileSize: file.size,
+        backupType: result.json.backupType,
+        backupVersion: result.json.backupVersion,
+        appId: result.json.appId,
+        createdAt: result.json.createdAt,
+        ...summary,
+      });
+      setFullAppBackupPreview(preview);
+    };
+    reader.onerror = () => setFullAppBackupPreviewError("ファイルの読み込みに失敗しました");
+    reader.readAsText(file);
+  };
+
+  // ============================================================================
+  // アプリ全体バックアップ 復元シミュレーション (Dry Run)
+  // ----------------------------------------------------------------------------
+  // ※ 今回は実復元しない。Firestore への書き込みは一切行わない。
+  //    backup JSON と現在の Firestore スナップショットを docId 単位で比較し、
+  //    「追加候補 / 上書き候補 / 現在のみ存在」doc 数を集計して可視化する。
+  // ============================================================================
+
+  // オブジェクトのキー順を正規化して JSON 文字列化する pure helper。
+  //   - object のキーをソート（深い階層も再帰的に）
+  //   - undefined は null に正規化（JSON.stringify では本来 drop されるが、明示的に null にして両端を揃える）
+  //   - 配列は順序保持（順序自体が意味を持つため）
+  //
+  // ★ 本プロジェクトは Firestore Timestamp / Date オブジェクトを保存していない（すべて ISO 文字列）。
+  //   したがって Timestamp 正規化処理は不要。コードベース全体で確認済み。
+  //   もし将来 Timestamp 系を保存し始める場合は、この helper に正規化を追加する必要がある。
+  const _stableStringify = (value) => {
+    return JSON.stringify(value, (_key, v) => {
+      if (v === undefined) return null;
+      if (
+        v !== null &&
+        typeof v === "object" &&
+        !Array.isArray(v) &&
+        (v.constructor === Object || v.constructor === undefined)
+      ) {
+        const sorted = {};
+        for (const k of Object.keys(v).sort()) sorted[k] = v[k];
+        return sorted;
+      }
+      return v;
+    });
+  };
+
+  // 同一 docId のドキュメント内容が等しいかを判定（pure）。
+  // 完全フィールド diff は出さず、stableStringify 一致のみで真偽を返す。
+  const _isDocContentEqual = (a, b) => {
+    try {
+      return _stableStringify(a) === _stableStringify(b);
+    } catch (e) {
+      // 循環参照などで stringify が失敗した場合は安全側に「差分あり」扱い
+      console.warn("[full app dry run] stableStringify failed; treating as changed", e);
+      return false;
+    }
+  };
+
+  // 2 つの docId マップ (バックアップ側 / 現在側) から差分を計算する内部ヘルパー (pure)。
+  //   返り値:
+  //     addOnly:    backup にあるが current にない docId 一覧（復元時に「追加」候補）
+  //     overwrite:  両方に存在する docId 一覧（復元時に「上書き」候補）
+  //     currentOnly: current にあるが backup にない docId 一覧（完全復元方式なら削除リスク）
+  const _diffDocIdMaps = (backupMap, currentMap) => {
+    const b = backupMap || {};
+    const c = currentMap || {};
+    const bKeys = Object.keys(b);
+    const cKeys = Object.keys(c);
+    const cSet = new Set(cKeys);
+    const bSet = new Set(bKeys);
+    const addOnly = bKeys.filter((k) => !cSet.has(k));
+    const overwrite = bKeys.filter((k) => cSet.has(k));
+    const currentOnly = cKeys.filter((k) => !bSet.has(k));
+    return { addOnly, overwrite, currentOnly };
+  };
+
+  // 入力:
+  //   backupData    = backup JSON の data フィールド { officeMaster, taxTables, tenants }
+  //   currentData   = fetchCurrentFullAppSnapshot の戻り値（同じ shape）
+  //   currentUid    = ログイン中ユーザの uid（ownerUid 整合チェックに使用）
+  //   backupCreatedAt = 表示用メタ（任意）
+  // 出力:
+  //   { runAt, backupCreatedAt, totals, officeMaster, taxTables, tenants, perTenant[],
+  //     totalAddOnly, totalOverwrite, totalCurrentOnly, classification, warnings,
+  //     hasFirestoreWrites: false }
+  //
+  // ★ Pure: Firestore 非依存。state も参照しない。同じ入力に対して同じ結果を返す。
+  const buildFullAppDryRunReport = (backupData, currentData, currentUid, backupCreatedAt) => {
+    const bData = backupData || {};
+    const cData = currentData || {};
+    const bOfc = bData.officeMaster || {};
+    const cOfc = cData.officeMaster || {};
+    const bTax = bData.taxTables || {};
+    const cTax = cData.taxTables || {};
+    const bTenants = bData.tenants || {};
+    const cTenants = cData.tenants || {};
+
+    // 全体レベル: officeMaster / taxTables / tenants
+    const ofcDiff = _diffDocIdMaps(bOfc, cOfc);
+    const taxDiff = _diffDocIdMaps(bTax, cTax);
+    const tenantDiff = _diffDocIdMaps(bTenants, cTenants);
+
+    // tenant 単位の差分（settings / monthlyLocks / employees）
+    // 比較対象 tenantId = backup と current の union
+    const tenantIdUnion = Array.from(new Set([...Object.keys(bTenants), ...Object.keys(cTenants)]));
+    const perTenant = [];
+    let employeesBackupTotal = 0;
+    let employeesCurrentTotal = 0;
+    let settingsBackupTotal = 0;
+    let settingsCurrentTotal = 0;
+    let monthlyLocksBackupTotal = 0;
+    let monthlyLocksCurrentTotal = 0;
+    const warnings = [];
+
+    for (const tid of tenantIdUnion) {
+      const bT = bTenants[tid] || null;
+      const cT = cTenants[tid] || null;
+      const bEmps = (bT && bT.employees) || {};
+      const cEmps = (cT && cT.employees) || {};
+      const bSettings = (bT && bT.settings) || {};
+      const cSettings = (cT && cT.settings) || {};
+      const bLocks = (bT && bT.monthlyLocks) || {};
+      const cLocks = (cT && cT.monthlyLocks) || {};
+
+      const empDiff = _diffDocIdMaps(bEmps, cEmps);
+      const setDiff = _diffDocIdMaps(bSettings, cSettings);
+      const lockDiff = _diffDocIdMaps(bLocks, cLocks);
+
+      employeesBackupTotal += Object.keys(bEmps).length;
+      employeesCurrentTotal += Object.keys(cEmps).length;
+      settingsBackupTotal += Object.keys(bSettings).length;
+      settingsCurrentTotal += Object.keys(cSettings).length;
+      monthlyLocksBackupTotal += Object.keys(bLocks).length;
+      monthlyLocksCurrentTotal += Object.keys(cLocks).length;
+
+      // ownerUid 整合性: backup 側 tenant.ownerUid が current ユーザと不一致なら警告
+      const bOwnerUid = bT && bT.tenant ? bT.tenant.ownerUid : null;
+      const ownerUidMismatch = bT && currentUid != null && bOwnerUid != null && bOwnerUid !== currentUid;
+      if (ownerUidMismatch) {
+        warnings.push(
+          `tenant "${tid}" の ownerUid (${bOwnerUid}) がログイン中ユーザ (${currentUid}) と異なります。別アカウントのバックアップの可能性があります。`
+        );
+      }
+
+      perTenant.push({
+        tenantId: tid,
+        inBackup: !!bT,
+        inCurrent: !!cT,
+        ownerUidMismatch: !!ownerUidMismatch,
+        backupOwnerUid: bOwnerUid,
+        employees: { ...empDiff, backupCount: Object.keys(bEmps).length, currentCount: Object.keys(cEmps).length },
+        settings: { ...setDiff, backupCount: Object.keys(bSettings).length, currentCount: Object.keys(cSettings).length },
+        monthlyLocks: { ...lockDiff, backupCount: Object.keys(bLocks).length, currentCount: Object.keys(cLocks).length },
+      });
+    }
+
+    // 合計件数 (追加候補 / 上書き候補 / 現在のみ存在)
+    let totalAddOnly =
+      ofcDiff.addOnly.length + taxDiff.addOnly.length + tenantDiff.addOnly.length;
+    let totalOverwrite =
+      ofcDiff.overwrite.length + taxDiff.overwrite.length + tenantDiff.overwrite.length;
+    let totalCurrentOnly =
+      ofcDiff.currentOnly.length + taxDiff.currentOnly.length + tenantDiff.currentOnly.length;
+    for (const pt of perTenant) {
+      totalAddOnly += pt.employees.addOnly.length + pt.settings.addOnly.length + pt.monthlyLocks.addOnly.length;
+      totalOverwrite += pt.employees.overwrite.length + pt.settings.overwrite.length + pt.monthlyLocks.overwrite.length;
+      totalCurrentOnly += pt.employees.currentOnly.length + pt.settings.currentOnly.length + pt.monthlyLocks.currentOnly.length;
+    }
+
+    // 警告メッセージ生成
+    if (totalCurrentOnly > 0) {
+      warnings.push(
+        `バックアップに存在しない現在データが ${totalCurrentOnly} 件あります。完全復元方式を採用すると削除リスクがあります。`
+      );
+    }
+    if (totalOverwrite > 0) {
+      warnings.push(
+        `同じ docId が ${totalOverwrite} 件存在するため、実復元では上書き対象になります。`
+      );
+    }
+    if (totalAddOnly > 0) {
+      warnings.push(
+        `バックアップ側にあって現在に存在しないデータが ${totalAddOnly} 件あります。復元すると追加対象になります。`
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // 内容差分集計 (同一 docId のドキュメント単位比較)
+    //   - 各 area の overwrite (両方に存在する docId) だけを対象
+    //   - 比較は stableStringify による正規化比較のみ。
+    //   - フィールド単位の詳細 diff は今フェーズでは実装しない（次フェーズ）。
+    //   - changed preview は最大 20 件まで（重い UI を避けるため）
+    // -----------------------------------------------------------------------
+    const CHANGED_PREVIEW_MAX = 20;
+    const changedPreview = [];
+    let changedOverflow = 0;
+    const byArea = {
+      officeMaster: { same: 0, changed: 0, unchanged: 0 },
+      taxTables: { same: 0, changed: 0, unchanged: 0 },
+      tenants: { same: 0, changed: 0, unchanged: 0 },
+      settings: { same: 0, changed: 0, unchanged: 0 },
+      monthlyLocks: { same: 0, changed: 0, unchanged: 0 },
+      employees: { same: 0, changed: 0, unchanged: 0 },
+    };
+    const _pushChanged = (item) => {
+      if (changedPreview.length < CHANGED_PREVIEW_MAX) changedPreview.push(item);
+      else changedOverflow += 1;
+    };
+    const _tally = (areaKey, isEqual) => {
+      byArea[areaKey].same += 1;
+      if (isEqual) byArea[areaKey].unchanged += 1;
+      else byArea[areaKey].changed += 1;
+    };
+
+    // officeMaster: top-level docId
+    for (const docId of ofcDiff.overwrite) {
+      const eq = _isDocContentEqual(bOfc[docId], cOfc[docId]);
+      _tally("officeMaster", eq);
+      if (!eq) _pushChanged({ area: "officeMaster", tenantId: null, docId, label: "事務所マスタ", reason: "同一docIdだが内容差分あり" });
+    }
+    // taxTables: top-level docId
+    for (const docId of taxDiff.overwrite) {
+      const eq = _isDocContentEqual(bTax[docId], cTax[docId]);
+      _tally("taxTables", eq);
+      if (!eq) _pushChanged({ area: "taxTables", tenantId: null, docId, label: "税額表", reason: "同一docIdだが内容差分あり" });
+    }
+    // tenants: tenant ドキュメント本体（tenants[tid].tenant フィールド）
+    for (const tid of tenantDiff.overwrite) {
+      const bTenantDoc = (bTenants[tid] && bTenants[tid].tenant) || null;
+      const cTenantDoc = (cTenants[tid] && cTenants[tid].tenant) || null;
+      const eq = _isDocContentEqual(bTenantDoc, cTenantDoc);
+      _tally("tenants", eq);
+      if (!eq) _pushChanged({ area: "tenants", tenantId: tid, docId: tid, label: "顧問先", reason: "同一docIdだが内容差分あり" });
+    }
+    // tenant 配下: settings / monthlyLocks / employees
+    for (const pt of perTenant) {
+      if (!pt.inBackup || !pt.inCurrent) continue;
+      const bT = bTenants[pt.tenantId];
+      const cT = cTenants[pt.tenantId];
+      for (const docId of pt.settings.overwrite) {
+        const eq = _isDocContentEqual(bT.settings[docId], cT.settings[docId]);
+        _tally("settings", eq);
+        if (!eq) _pushChanged({ area: "settings", tenantId: pt.tenantId, docId, label: "会社別設定", reason: "同一docIdだが内容差分あり" });
+      }
+      for (const docId of pt.monthlyLocks.overwrite) {
+        const eq = _isDocContentEqual(bT.monthlyLocks[docId], cT.monthlyLocks[docId]);
+        _tally("monthlyLocks", eq);
+        if (!eq) _pushChanged({ area: "monthlyLocks", tenantId: pt.tenantId, docId, label: "月次ロック", reason: "同一docIdだが内容差分あり" });
+      }
+      for (const docId of pt.employees.overwrite) {
+        const eq = _isDocContentEqual(bT.employees[docId], cT.employees[docId]);
+        _tally("employees", eq);
+        if (!eq) _pushChanged({ area: "employees", tenantId: pt.tenantId, docId, label: "社員データ", reason: "同一docIdだが内容差分あり" });
+      }
+    }
+
+    const sameDocIdCount =
+      byArea.officeMaster.same + byArea.taxTables.same + byArea.tenants.same +
+      byArea.settings.same + byArea.monthlyLocks.same + byArea.employees.same;
+    const changedDocCount =
+      byArea.officeMaster.changed + byArea.taxTables.changed + byArea.tenants.changed +
+      byArea.settings.changed + byArea.monthlyLocks.changed + byArea.employees.changed;
+    const unchangedDocCount = sameDocIdCount - changedDocCount;
+
+    if (changedDocCount > 0) {
+      warnings.push(
+        `同一 docId のうち、内容差分のあるドキュメントが ${changedDocCount} 件あります（ドキュメント単位比較。フィールド単位は未比較）。`
+      );
+    }
+
+    warnings.push("現在 Firestore への書き込みは行っていません。");
+
+    // 分類
+    // ※ 本 Dry Run は docId 単位の存在比較 + 同一 docId のドキュメント単位内容比較を行う。
+    //    フィールド単位の詳細 diff は未実装。文言はその実装範囲に合わせて表現する。
+    const _docIdDiffExists = totalAddOnly > 0 || totalCurrentOnly > 0;
+    let classification;
+    if (!_docIdDiffExists && changedDocCount === 0) {
+      // ケースA: docId構成も内容も一致（empty vs empty を含む）
+      classification = "docId構成・ドキュメント内容ともに一致";
+    } else if (!_docIdDiffExists && changedDocCount > 0) {
+      // ケースB: docId構成は一致するがドキュメント内容に差分あり
+      classification = "docId構成は一致・ドキュメント内容に差分あり";
+    } else if (totalAddOnly > 0 && totalCurrentOnly === 0) {
+      classification = changedDocCount > 0
+        ? "追加あり（現在側に欠落あり）／同一docIdに内容差分も検出"
+        : "追加あり（現在側に欠落あり）";
+    } else if (totalAddOnly === 0 && totalCurrentOnly > 0) {
+      classification = changedDocCount > 0
+        ? "現在のみ存在あり（バックアップに欠落あり）／同一docIdに内容差分も検出"
+        : "現在のみ存在あり（バックアップに欠落あり）";
+    } else {
+      classification = changedDocCount > 0
+        ? "追加・上書き・現在のみ存在が混在／同一docIdに内容差分も検出"
+        : "追加・上書き・現在のみ存在が混在";
+    }
+
+    return {
+      runAt: new Date().toISOString(),
+      backupCreatedAt: backupCreatedAt || "-",
+      totals: {
+        officeMaster: { backup: Object.keys(bOfc).length, current: Object.keys(cOfc).length },
+        taxTables: { backup: Object.keys(bTax).length, current: Object.keys(cTax).length },
+        tenants: { backup: Object.keys(bTenants).length, current: Object.keys(cTenants).length },
+        employees: { backup: employeesBackupTotal, current: employeesCurrentTotal },
+        settings: { backup: settingsBackupTotal, current: settingsCurrentTotal },
+        monthlyLocks: { backup: monthlyLocksBackupTotal, current: monthlyLocksCurrentTotal },
+      },
+      officeMaster: ofcDiff,
+      taxTables: taxDiff,
+      tenants: tenantDiff,
+      perTenant,
+      totalAddOnly,
+      totalOverwrite,
+      totalCurrentOnly,
+      classification,
+      warnings,
+      hasFirestoreWrites: false,
+      // ★ 内容差分（同一 docId のドキュメント単位比較）
+      contentDiff: {
+        sameDocIdCount,        // 比較対象（両方に存在する docId 数 = overwrite 合計）
+        changedDocCount,
+        unchangedDocCount,
+        changedPreview,        // 最大 20 件の軽量情報リスト
+        changedPreviewMax: CHANGED_PREVIEW_MAX,
+        changedPreviewOverflow: changedOverflow,
+        byArea,                // area ごとの { same, changed, unchanged }
+      },
+    };
+  };
+
+  // Dry Run 実行 (preview 済 JSON がある時のみ呼び出される)
+  // - 現在の Firestore スナップショットを取得
+  // - pure helper で差分レポートを生成
+  // - state に保存（書き込みは一切しない）
+  const handleRunFullAppRestoreDryRun = async () => {
+    if (!userId) {
+      setFullAppDryRunError("ログインが必要です");
+      return;
+    }
+    if (!fullAppBackupPreview || !fullAppBackupPreview.ok) {
+      setFullAppDryRunError("プレビュー済みのバックアップ JSON がありません");
+      return;
+    }
+    if (isFullAppDryRunRunning) return;
+
+    const confirmMsg =
+      `復元シミュレーション (Dry Run) を実行します。\n\n` +
+      `・現在の Firestore データを読み込みます（顧問先・社員数によっては時間がかかります）。\n` +
+      `・Firestore への書き込みは一切行いません。\n` +
+      `・読み取り結果と backup JSON を比較し、件数・docId 差分のみを表示します。\n\n` +
+      `実行しますか？`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsFullAppDryRunRunning(true);
+    setFullAppDryRunError("");
+    setFullAppDryRunReport(null);
+    console.time("[full app dry run]");
+    try {
+      const currentSnapshot = await fetchCurrentFullAppSnapshot(userId);
+      const backupJson = fullAppBackupPreview.json;
+      const report = buildFullAppDryRunReport(
+        backupJson.data,
+        currentSnapshot,
+        userId,
+        backupJson.createdAt
+      );
+      console.log("[full app dry run]", {
+        runAt: report.runAt,
+        backupCreatedAt: report.backupCreatedAt,
+        classification: report.classification,
+        totals: report.totals,
+        totalAddOnly: report.totalAddOnly,
+        totalOverwrite: report.totalOverwrite,
+        totalCurrentOnly: report.totalCurrentOnly,
+        sameDocIdCount: report.contentDiff.sameDocIdCount,
+        changedDocCount: report.contentDiff.changedDocCount,
+        unchangedDocCount: report.contentDiff.unchangedDocCount,
+        changedPreviewCount: report.contentDiff.changedPreview.length,
+        changedPreviewOverflow: report.contentDiff.changedPreviewOverflow,
+        byArea: report.contentDiff.byArea,
+        warnings: report.warnings,
+        hasFirestoreWrites: report.hasFirestoreWrites,
+      });
+      setFullAppDryRunReport(report);
+    } catch (err) {
+      setFullAppDryRunError("Dry Run 中にエラーが発生しました: " + (err && err.message ? err.message : err));
+    } finally {
+      console.timeEnd("[full app dry run]");
+      setIsFullAppDryRunRunning(false);
     }
   };
 
@@ -6924,6 +7858,12 @@ const App = () => {
                   >
                     <Percent size={14} /> 社会保険料率マスタ
                   </button>
+                  <button
+                    onClick={() => { setActiveTab("officeMasterBackup"); setSettingsMenuOpen(false); }}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-slate-300 hover:bg-slate-700 hover:text-white text-xs font-bold transition-colors border-t border-slate-700"
+                  >
+                    <Save size={14} /> バックアップ・復元
+                  </button>
                 </div>
               )}
             </div>
@@ -7322,7 +8262,7 @@ const App = () => {
   // ▲▲▲ ここまで追加 ▲▲▲
 
   // ▼追加：マスタ管理画面かどうかを判定する▼
-  const isMasterMode = activeTab === "taxTable" || activeTab === "stdRewardTable" || activeTab === "rateTable";
+  const isMasterMode = activeTab === "taxTable" || activeTab === "stdRewardTable" || activeTab === "rateTable" || activeTab === "officeMasterBackup";
 
   return (
     <div className="flex h-screen bg-[#F0F2F5] font-sans text-sm overflow-hidden">
@@ -11690,6 +12630,588 @@ const App = () => {
                 左メニューの「月次締め」から、月次チェック・帳票印刷・全体ロック管理をまとめて行えます。
               </p>
             </section>
+          </div>
+        )}
+
+        {/* --- 事務所設定バックアップ・復元 独立画面 --- */}
+        {activeTab === "officeMasterBackup" && (
+          <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 max-w-4xl mx-auto mt-4 mb-20">
+              <div className="flex justify-between items-center border-b-2 border-slate-100 pb-4 mb-6">
+                <div className="flex items-center gap-6">
+                  <button
+                    onClick={() => setActiveTab("portal")}
+                    className="p-2 rounded-full hover:bg-slate-100 text-slate-500 transition-colors"
+                    title="ポータルへ戻る"
+                  >
+                    <X size={24} />
+                  </button>
+                  <div>
+                    <h2 className="text-xl font-black text-slate-800 flex items-center gap-2">
+                      <Save className="text-indigo-500" size={24} />{" "}
+                      バックアップ・復元
+                    </h2>
+                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">
+                      Backup / Restore
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* ============================================================ */}
+              {/* セクション1: 事務所共通設定バックアップ・復元                  */}
+              {/* （officeMaster + taxTables のみ。エクスポート + 復元あり）     */}
+              {/* ============================================================ */}
+              <section className="mb-10">
+                <div className="flex items-center gap-2 mb-3 pb-2 border-b-2 border-indigo-100">
+                  <Database className="text-indigo-500" size={18} />
+                  <h3 className="text-base font-black text-slate-800">
+                    セクション1: 事務所共通設定バックアップ・復元
+                  </h3>
+                  <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-100 font-black text-[10px]">
+                    全顧問先共通
+                  </span>
+                </div>
+
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-5 text-xs text-amber-800 leading-relaxed">
+                  <div className="font-bold mb-1 flex items-center gap-1.5">
+                    <AlertTriangle size={14} /> 対象範囲について
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    <li>対象: <b>事務所マスタ（社会保険料率・標準報酬月額表）</b> と <b>源泉徴収税額表</b> のみ。</li>
+                    <li>対象外: 顧問先個別設定（会社情報・手当控除定義など）・社員データ・賃金台帳の入力値。</li>
+                    <li>復元は <b>追加・上書きのみ</b>。バックアップに含まれない既存の税額表 doc は削除しません。</li>
+                    <li>復元実行直前に、現在の状態を自動バックアップ JSON としてダウンロードします。</li>
+                  </ul>
+                </div>
+
+                {/* エクスポートパネル */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 mb-5">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <Download size={16} /> エクスポート（バックアップ作成）
+                  </h4>
+                  <div className="bg-white border border-slate-200 rounded p-3 flex flex-wrap items-center gap-3">
+                    <div className="text-xs text-slate-600 flex-1 min-w-[280px]">
+                      現在の事務所マスタと源泉徴収税額表を 1 つの JSON ファイルとしてダウンロードします。
+                    </div>
+                    <button
+                      onClick={handleExportOfficeMasterBackup}
+                      className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-xs font-bold transition-colors"
+                      title="事務所設定バックアップ JSON をダウンロード"
+                    >
+                      <Download size={14} /> 事務所設定をエクスポート
+                    </button>
+                  </div>
+                  <div className="mt-2 text-[10px] text-slate-400">
+                    ファイル名: <code className="bg-slate-100 px-1 rounded">payroll_office_master_backup_YYYYMMDD_HHmmss.json</code>
+                  </div>
+                </div>
+
+                {/* インポート（復元）パネル */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <Database size={16} /> 事務所設定を復元（インポート）
+                  </h4>
+
+                  <div className="bg-white border border-slate-200 rounded p-3">
+                    <div className="flex flex-wrap items-center gap-3 mb-2">
+                      <label className="text-xs font-bold text-slate-600">
+                        バックアップ JSON:
+                      </label>
+                      <input
+                        type="file"
+                        id="ofc-master-backup-input"
+                        accept=".json,application/json"
+                        onChange={handleOfficeMasterBackupFileChange}
+                        className="block flex-1 min-w-[250px] text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-400">
+                      <code className="bg-slate-100 px-1 rounded">backupType: payroll-office-master-settings</code> 形式の JSON のみ受け付けます。
+                    </p>
+                  </div>
+
+                  {ofcMasterBackupError && (
+                    <div className="mt-3 text-red-600 text-xs font-bold bg-red-50 p-3 rounded border border-red-200">
+                      {ofcMasterBackupError}
+                    </div>
+                  )}
+
+                  {ofcMasterBackupPreview && ofcMasterBackupPreview.ok && (
+                    <div className="mt-3 bg-white border border-blue-200 rounded p-4">
+                      <div className="text-xs font-bold text-slate-700 mb-2">
+                        プレビュー
+                      </div>
+                      <div className="text-[11px] text-slate-600 space-y-1 mb-3">
+                        <div>
+                          <span className="font-bold text-slate-500">作成日時:</span>{" "}
+                          <span className="font-mono">{ofcMasterBackupPreview.summary.createdAt}</span>
+                        </div>
+                        <div>
+                          <span className="font-bold text-slate-500">事務所マスタ:</span>{" "}
+                          {ofcMasterBackupPreview.summary.officeMasterFields.length > 0
+                            ? ofcMasterBackupPreview.summary.officeMasterFields.join(" / ")
+                            : "（なし）"}
+                        </div>
+                        <div>
+                          <span className="font-bold text-slate-500">源泉徴収税額表:</span>{" "}
+                          {ofcMasterBackupPreview.summary.taxTableIds.length > 0
+                            ? ofcMasterBackupPreview.summary.taxTableIds.join(" / ")
+                            : "（なし）"}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] text-slate-500">
+                          実行直前に現在の状態を自動バックアップします。
+                        </div>
+                        <button
+                          onClick={handleExecuteOfficeMasterRestore}
+                          disabled={isOfcMasterBackupImporting}
+                          className="bg-blue-600 text-white px-5 py-2 rounded-lg font-bold text-xs hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {isOfcMasterBackupImporting ? "復元中..." : "この内容で復元する"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* ============================================================ */}
+              {/* セクション2: アプリ全体バックアップ                            */}
+              {/* （officeMaster + taxTables + tenants + settings + monthlyLocks */}
+              {/*  + employees。エクスポートのみ。復元は未実装）                */}
+              {/* ============================================================ */}
+              <section>
+                <div className="flex items-center gap-2 mb-3 pb-2 border-b-2 border-rose-100">
+                  <Database className="text-rose-500" size={18} />
+                  <h3 className="text-base font-black text-slate-800">
+                    セクション2: アプリ全体バックアップ
+                  </h3>
+                  <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded border border-rose-100 font-black text-[10px]">
+                    エクスポートのみ
+                  </span>
+                </div>
+
+                <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 mb-5 text-xs text-rose-800 leading-relaxed">
+                  <div className="font-bold mb-1 flex items-center gap-1.5">
+                    <AlertTriangle size={14} /> 重要事項
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    <li>対象: <b>事務所マスタ・源泉徴収税額表・全顧問先（自分が所有するもの）・各顧問先の会社設定・月次ロック・社員データ（給与データを含む）</b>。</li>
+                    <li>対象外: 他ユーザの顧問先、legacy パス（v0 移行元）。</li>
+                    <li><b>復元機能は今回は実装されていません。</b>万一に備えた JSON 取得のみが可能です。復元は危険度が高いため別フェーズで設計します。</li>
+                    <li>顧問先・社員数によってはダウンロードに数秒～数十秒かかります。</li>
+                  </ul>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <Download size={16} /> エクスポート（バックアップ作成）
+                  </h4>
+                  <div className="bg-white border border-slate-200 rounded p-3 flex flex-wrap items-center gap-3">
+                    <div className="text-xs text-slate-600 flex-1 min-w-[280px]">
+                      Firestore から全データを取得して 1 つの JSON ファイルとしてダウンロードします。
+                    </div>
+                    <button
+                      onClick={handleExportFullAppBackup}
+                      disabled={isFullAppBackupExporting || !userId}
+                      className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="アプリ全体バックアップ JSON をダウンロード"
+                    >
+                      <Download size={14} /> {isFullAppBackupExporting ? "取得中..." : "アプリ全体をバックアップ"}
+                    </button>
+                  </div>
+                  <div className="mt-2 text-[10px] text-slate-400">
+                    ファイル名: <code className="bg-slate-100 px-1 rounded">payroll_full_app_backup_YYYYMMDD_HHmmss.json</code>
+                    {" / "}
+                    <code className="bg-slate-100 px-1 rounded">backupType: payroll-full-app-backup</code>
+                  </div>
+
+                  {fullAppBackupError && (
+                    <div className="mt-3 text-red-600 text-xs font-bold bg-red-50 p-3 rounded border border-red-200">
+                      {fullAppBackupError}
+                    </div>
+                  )}
+
+                  {fullAppBackupLastInfo && (
+                    <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded p-3 text-[11px] text-emerald-800">
+                      <div className="font-bold mb-2 text-[12px]">直近のバックアップ結果</div>
+
+                      {/* ▼ サイズ警告（カード上部に表示） ▼ */}
+                      {fullAppBackupLastInfo.jsonSizeBytes >= 100 * 1024 * 1024 ? (
+                        <div className="mb-2 bg-rose-200 border-2 border-rose-500 text-rose-900 rounded p-2 text-[11px] font-black">
+                          🛑 バックアップJSONが 100MB を超えています。ブラウザや復元処理が不安定になる可能性があります。分割バックアップ運用を強く検討してください。
+                        </div>
+                      ) : fullAppBackupLastInfo.jsonSizeBytes >= 50 * 1024 * 1024 ? (
+                        <div className="mb-2 bg-red-100 border border-red-300 text-red-800 rounded p-2 text-[11px] font-bold">
+                          ⚠ バックアップJSONが非常に大きいため、復元時やブラウザ処理に負荷がかかる可能性があります。
+                        </div>
+                      ) : fullAppBackupLastInfo.jsonSizeBytes >= 20 * 1024 * 1024 ? (
+                        <div className="mb-2 bg-amber-100 border border-amber-300 text-amber-800 rounded p-2 text-[11px] font-bold">
+                          ⚠ バックアップJSONが大きくなっています。将来的に分割バックアップを検討してください。
+                        </div>
+                      ) : null}
+
+                      {/* ▼ 主要 3 項目（fileName / createdAt / jsonSizeLabel）を強調表示 ▼ */}
+                      <div className="bg-white border border-emerald-300 rounded p-2 mb-2 space-y-1">
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Size</span>
+                          <span className="text-[15px] font-black text-emerald-900 font-mono">{fullAppBackupLastInfo.jsonSizeLabel}</span>
+                          <span className="text-[10px] text-emerald-600 font-mono">({fullAppBackupLastInfo.jsonSizeBytes.toLocaleString()} bytes)</span>
+                        </div>
+                        <div className="text-[11px] truncate">
+                          <span className="font-bold text-emerald-600 mr-1">File:</span>
+                          <span className="font-mono font-bold text-slate-800">{fullAppBackupLastInfo.fileName}</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <span className="font-bold text-emerald-600 mr-1">Created:</span>
+                          <span className="font-mono font-bold text-slate-800">{fullAppBackupLastInfo.createdAt}</span>
+                        </div>
+                      </div>
+
+                      {/* ▼ 件数一覧 ▼ */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5">
+                        <div><span className="font-bold">事務所マスタ:</span> {fullAppBackupLastInfo.officeMasterCount} 件</div>
+                        <div><span className="font-bold">税額表:</span> {fullAppBackupLastInfo.taxTablesCount} 件</div>
+                        <div><span className="font-bold">クライアント数:</span> {fullAppBackupLastInfo.tenantsCount} 件</div>
+                        <div><span className="font-bold">会社別設定:</span> {fullAppBackupLastInfo.settingsCount} 件</div>
+                        <div><span className="font-bold">月次ロック:</span> {fullAppBackupLastInfo.monthlyLocksCount} 件</div>
+                        <div><span className="font-bold">社員数:</span> {fullAppBackupLastInfo.employeesCount} 名</div>
+                        <div><span className="font-bold">年度データ数:</span> {fullAppBackupLastInfo.yearsCount} 件</div>
+                        <div><span className="font-bold">月次データ数:</span> {fullAppBackupLastInfo.monthlyRowsCount} 件</div>
+                        <div className="sm:col-span-2"><span className="font-bold">賞与データ数:</span> {fullAppBackupLastInfo.bonusRowsCount} 件</div>
+                      </div>
+
+                      <div className="mt-2 text-[10px] text-emerald-700 italic">
+                        このバックアップはエクスポート専用です。復元機能はまだ実装されていません。
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ============================================================ */}
+                {/* バックアップ JSON 読み取り専用プレビュー                       */}
+                {/*  - Firestore 書込なし／復元なし。                              */}
+                {/*  - 既存の buildBackupSummary を再利用して件数を表示。           */}
+                {/* ============================================================ */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 mt-4">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <FileText size={16} /> バックアップ JSON を確認（読み取り専用）
+                  </h4>
+                  <div className="text-xs text-slate-600 mb-3">
+                    ダウンロード済みのアプリ全体バックアップ JSON を読み取り専用で確認できます。<span className="font-bold text-rose-600">復元は行いません。</span>
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded p-3 flex flex-wrap items-center gap-3">
+                    <label className="inline-flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded text-xs font-bold transition-colors cursor-pointer">
+                      <FileText size={14} /> バックアップ JSON を選択
+                      <input
+                        type="file"
+                        accept="application/json,.json"
+                        onChange={handleFullAppBackupPreviewFileChange}
+                        className="hidden"
+                      />
+                    </label>
+                    <div className="text-[11px] text-slate-500 flex-1 min-w-[200px]">
+                      <code className="bg-slate-100 px-1 rounded">backupType: payroll-full-app-backup</code> 形式の JSON のみ受け付けます。
+                    </div>
+                  </div>
+
+                  {fullAppBackupPreviewError && (
+                    <div className="mt-3 text-red-600 text-xs font-bold bg-red-50 p-3 rounded border border-red-200">
+                      {fullAppBackupPreviewError}
+                    </div>
+                  )}
+
+                  {fullAppBackupPreview && fullAppBackupPreview.ok && (
+                    <div className="mt-3 bg-sky-50 border border-sky-200 rounded p-3 text-[11px] text-sky-900">
+                      <div className="font-bold mb-2 text-[12px] flex items-center gap-1.5">
+                        <Search size={13} /> 読み取り結果
+                      </div>
+
+                      {/* ▼ 復元しない旨の注意書き（最上部） ▼ */}
+                      <div className="mb-2 bg-amber-50 border border-amber-300 text-amber-800 rounded p-2 text-[11px] font-bold">
+                        ※ これは読み取り専用プレビューです。復元は実行されません。
+                      </div>
+
+                      {/* ▼ ファイル / メタ情報 ▼ */}
+                      <div className="bg-white border border-sky-300 rounded p-2 mb-2 space-y-1">
+                        <div className="text-[11px] truncate">
+                          <span className="font-bold text-sky-600 mr-1">File:</span>
+                          <span className="font-mono font-bold text-slate-800">{fullAppBackupPreview.fileName}</span>
+                        </div>
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className="text-[10px] font-bold text-sky-600 uppercase tracking-widest">Size</span>
+                          <span className="text-[15px] font-black text-sky-900 font-mono">{fullAppBackupPreview.summary.jsonSizeLabel}</span>
+                          <span className="text-[10px] text-sky-600 font-mono">({fullAppBackupPreview.fileSize.toLocaleString()} bytes)</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <span className="font-bold text-sky-600 mr-1">Created:</span>
+                          <span className="font-mono font-bold text-slate-800">{fullAppBackupPreview.json.createdAt || "-"}</span>
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-mono">
+                          backupType: {fullAppBackupPreview.json.backupType}
+                          {" / "}
+                          backupVersion: {String(fullAppBackupPreview.json.backupVersion)}
+                          {" / "}
+                          appId: {fullAppBackupPreview.json.appId || "-"}
+                        </div>
+                      </div>
+
+                      {/* ▼ 件数一覧 ▼ */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5">
+                        <div><span className="font-bold">事務所マスタ:</span> {fullAppBackupPreview.summary.officeMasterCount} 件</div>
+                        <div><span className="font-bold">税額表:</span> {fullAppBackupPreview.summary.taxTablesCount} 件</div>
+                        <div><span className="font-bold">クライアント数:</span> {fullAppBackupPreview.summary.tenantsCount} 件</div>
+                        <div><span className="font-bold">会社別設定:</span> {fullAppBackupPreview.summary.settingsCount} 件</div>
+                        <div><span className="font-bold">月次ロック:</span> {fullAppBackupPreview.summary.monthlyLocksCount} 件</div>
+                        <div><span className="font-bold">社員数:</span> {fullAppBackupPreview.summary.employeesCount} 名</div>
+                        <div><span className="font-bold">年度データ数:</span> {fullAppBackupPreview.summary.yearsCount} 件</div>
+                        <div><span className="font-bold">月次データ数:</span> {fullAppBackupPreview.summary.monthlyRowsCount} 件</div>
+                        <div className="sm:col-span-2"><span className="font-bold">賞与データ数:</span> {fullAppBackupPreview.summary.bonusRowsCount} 件</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ============================================================ */}
+                {/* 復元シミュレーション (Dry Run)                                  */}
+                {/*  - 実復元は行わない。Firestore 書込は 0 件。                     */}
+                {/*  - preview 済みの backup JSON がある時のみボタン有効。           */}
+                {/* ============================================================ */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 mt-4">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <ShieldCheck size={16} /> 復元シミュレーション（Dry Run）
+                  </h4>
+                  <div className="text-xs text-slate-600 mb-3">
+                    プレビュー済みのバックアップ JSON を「現在の Firestore に復元したら何が起きるか」を可視化します。<span className="font-bold text-rose-600">Firestore への書き込みは一切行いません。</span>
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded p-3 flex flex-wrap items-center gap-3">
+                    <div className="text-[11px] text-slate-500 flex-1 min-w-[200px]">
+                      {fullAppBackupPreview && fullAppBackupPreview.ok
+                        ? <>対象: <span className="font-mono font-bold">{fullAppBackupPreview.fileName}</span></>
+                        : "まず上の「バックアップ JSON を選択」でプレビューを読み込んでください。"}
+                    </div>
+                    <button
+                      onClick={handleRunFullAppRestoreDryRun}
+                      disabled={
+                        isFullAppDryRunRunning ||
+                        !userId ||
+                        !fullAppBackupPreview ||
+                        !fullAppBackupPreview.ok
+                      }
+                      className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="バックアップ JSON と現在 Firestore の差分シミュレーション（書込なし）"
+                    >
+                      <ShieldCheck size={14} /> {isFullAppDryRunRunning ? "実行中..." : "復元シミュレーションを実行"}
+                    </button>
+                  </div>
+
+                  {fullAppDryRunError && (
+                    <div className="mt-3 text-red-600 text-xs font-bold bg-red-50 p-3 rounded border border-red-200">
+                      {fullAppDryRunError}
+                    </div>
+                  )}
+
+                  {fullAppDryRunReport && (
+                    <div className="mt-3 bg-indigo-50 border border-indigo-200 rounded p-3 text-[11px] text-indigo-900">
+                      <div className="font-bold mb-2 text-[12px] flex items-center gap-1.5">
+                        <ShieldCheck size={13} /> 復元シミュレーション結果（Dry Run）
+                      </div>
+
+                      {/* ▼ Firestore 書込なし明示 ▼ */}
+                      <div className="mb-2 bg-amber-50 border border-amber-300 text-amber-800 rounded p-2 text-[11px] font-bold">
+                        ※ これはシミュレーションです。Firestore には一切書き込んでいません。
+                      </div>
+
+                      {/* ▼ 比較範囲の注意書き ▼ */}
+                      <div className="mb-2 bg-slate-100 border border-slate-300 text-slate-700 rounded p-2 text-[11px]">
+                        ※ このシミュレーションはdocId単位の存在比較と、同一docIdのドキュメント単位内容比較です。フィールド単位の詳細差分はまだ表示していません。
+                      </div>
+
+                      {/* ▼ 分類 + メタ ▼ */}
+                      <div className="bg-white border border-indigo-300 rounded p-2 mb-2 space-y-1">
+                        <div className="text-[12px]">
+                          <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest mr-1">Classification</span>
+                          <span className="font-black text-indigo-900">{fullAppDryRunReport.classification}</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <span className="font-bold text-indigo-600 mr-1">実行日時:</span>
+                          <span className="font-mono text-slate-800">{fullAppDryRunReport.runAt}</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <span className="font-bold text-indigo-600 mr-1">backup 作成日時:</span>
+                          <span className="font-mono text-slate-800">{fullAppDryRunReport.backupCreatedAt}</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <span className="font-bold text-indigo-600 mr-1">比較対象クライアント数 (union):</span>
+                          <span className="font-mono font-bold text-slate-800">{fullAppDryRunReport.perTenant.length}</span>
+                        </div>
+                      </div>
+
+                      {/* ▼ 件数比較表 (backup vs current) ▼ */}
+                      <div className="bg-white border border-indigo-200 rounded p-2 mb-2">
+                        <div className="text-[11px] font-bold text-indigo-700 mb-1">件数比較（backup ／ 現在）</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5 font-mono">
+                          <div><span className="font-bold">事務所マスタ:</span> {fullAppDryRunReport.totals.officeMaster.backup} / {fullAppDryRunReport.totals.officeMaster.current}</div>
+                          <div><span className="font-bold">税額表:</span> {fullAppDryRunReport.totals.taxTables.backup} / {fullAppDryRunReport.totals.taxTables.current}</div>
+                          <div><span className="font-bold">クライアント:</span> {fullAppDryRunReport.totals.tenants.backup} / {fullAppDryRunReport.totals.tenants.current}</div>
+                          <div><span className="font-bold">会社別設定:</span> {fullAppDryRunReport.totals.settings.backup} / {fullAppDryRunReport.totals.settings.current}</div>
+                          <div><span className="font-bold">月次ロック:</span> {fullAppDryRunReport.totals.monthlyLocks.backup} / {fullAppDryRunReport.totals.monthlyLocks.current}</div>
+                          <div><span className="font-bold">社員数:</span> {fullAppDryRunReport.totals.employees.backup} / {fullAppDryRunReport.totals.employees.current}</div>
+                        </div>
+                      </div>
+
+                      {/* ▼ 差分サマリ ▼ */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+                        <div className="bg-emerald-50 border border-emerald-300 rounded p-2">
+                          <div className="text-[10px] font-bold text-emerald-700 uppercase">追加候補</div>
+                          <div className="text-[18px] font-black text-emerald-900 font-mono">{fullAppDryRunReport.totalAddOnly}</div>
+                          <div className="text-[10px] text-emerald-700">backup のみに存在</div>
+                        </div>
+                        <div className="bg-amber-50 border border-amber-300 rounded p-2">
+                          <div className="text-[10px] font-bold text-amber-700 uppercase">上書き候補</div>
+                          <div className="text-[18px] font-black text-amber-900 font-mono">{fullAppDryRunReport.totalOverwrite}</div>
+                          <div className="text-[10px] text-amber-700">両方に同じ docId</div>
+                        </div>
+                        <div className="bg-rose-50 border border-rose-300 rounded p-2">
+                          <div className="text-[10px] font-bold text-rose-700 uppercase">現在のみ存在</div>
+                          <div className="text-[18px] font-black text-rose-900 font-mono">{fullAppDryRunReport.totalCurrentOnly}</div>
+                          <div className="text-[10px] text-rose-700">完全復元なら削除リスク</div>
+                        </div>
+                      </div>
+
+                      {/* ▼ 内容差分（同一 docId のドキュメント単位比較） ▼ */}
+                      {fullAppDryRunReport.contentDiff && (
+                        <div className="bg-white border border-indigo-200 rounded p-2 mb-2">
+                          <div className="text-[11px] font-bold text-indigo-700 mb-1">
+                            内容差分（同一 docId）
+                          </div>
+
+                          {/* 集計 */}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+                            <div className="bg-slate-50 border border-slate-300 rounded p-2 text-center">
+                              <div className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">同一 docId 数</div>
+                              <div className="text-[16px] font-black text-slate-800 font-mono">{fullAppDryRunReport.contentDiff.sameDocIdCount}</div>
+                              <div className="text-[9px] text-slate-500">比較対象</div>
+                            </div>
+                            <div className="bg-emerald-50 border border-emerald-300 rounded p-2 text-center">
+                              <div className="text-[9px] font-bold text-emerald-700 uppercase tracking-wider">内容一致</div>
+                              <div className="text-[16px] font-black text-emerald-800 font-mono">{fullAppDryRunReport.contentDiff.unchangedDocCount}</div>
+                              <div className="text-[9px] text-emerald-600">変更なし</div>
+                            </div>
+                            <div className="bg-rose-50 border border-rose-300 rounded p-2 text-center">
+                              <div className="text-[9px] font-bold text-rose-700 uppercase tracking-wider">内容差分</div>
+                              <div className="text-[16px] font-black text-rose-800 font-mono">{fullAppDryRunReport.contentDiff.changedDocCount}</div>
+                              <div className="text-[9px] text-rose-600">変更あり</div>
+                            </div>
+                          </div>
+
+                          {/* area 別内訳（差分 > 0 のものだけ表示） */}
+                          {(() => {
+                            const byArea = fullAppDryRunReport.contentDiff.byArea || {};
+                            const areaLabels = {
+                              officeMaster: "事務所マスタ",
+                              taxTables: "税額表",
+                              tenants: "顧問先",
+                              settings: "会社別設定",
+                              monthlyLocks: "月次ロック",
+                              employees: "社員",
+                            };
+                            const rows = Object.keys(areaLabels)
+                              .filter((k) => byArea[k] && byArea[k].changed > 0);
+                            if (rows.length === 0) return null;
+                            return (
+                              <div className="mb-2 text-[10px] font-mono">
+                                <span className="text-indigo-700 font-bold mr-1">差分あり領域:</span>
+                                {rows.map((k) => (
+                                  <span key={k} className="inline-block mr-2 text-rose-700">
+                                    {areaLabels[k]} {byArea[k].changed} 件
+                                  </span>
+                                ))}
+                              </div>
+                            );
+                          })()}
+
+                          {/* 内容差分プレビュー（最大 20 件） */}
+                          {fullAppDryRunReport.contentDiff.changedPreview.length > 0 && (
+                            <div className="bg-slate-50 border border-slate-200 rounded p-1.5">
+                              <div className="text-[10px] font-bold text-slate-600 mb-1">
+                                内容差分プレビュー（最大 {fullAppDryRunReport.contentDiff.changedPreviewMax} 件）
+                              </div>
+                              <ul className="space-y-0.5 max-h-[180px] overflow-y-auto text-[10px] font-mono">
+                                {fullAppDryRunReport.contentDiff.changedPreview.map((c, i) => (
+                                  <li key={i} className="text-slate-700 truncate">
+                                    <span className="inline-block w-[78px] text-indigo-700 font-bold">{c.label}</span>
+                                    {c.tenantId ? <span className="text-slate-500">[{c.tenantId}] </span> : null}
+                                    <span className="text-slate-800">{c.docId}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                              {fullAppDryRunReport.contentDiff.changedPreviewOverflow > 0 && (
+                                <div className="mt-1 text-[10px] text-rose-700 italic">
+                                  ほか {fullAppDryRunReport.contentDiff.changedPreviewOverflow} 件の内容差分があります
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* 注意書き: フィールド単位 diff 未実装 */}
+                          <div className="mt-2 bg-amber-50 border border-amber-200 text-amber-800 rounded p-1.5 text-[10px]">
+                            ※ 内容差分はドキュメント単位の比較です。フィールド単位の詳細差分はまだ表示していません。
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ▼ 警告 ▼ */}
+                      {fullAppDryRunReport.warnings && fullAppDryRunReport.warnings.length > 0 && (
+                        <div className="bg-white border border-amber-300 rounded p-2 mb-2">
+                          <div className="text-[11px] font-bold text-amber-800 mb-1">⚠ 警告</div>
+                          <ul className="list-disc list-inside text-[10px] text-amber-900 space-y-0.5">
+                            {fullAppDryRunReport.warnings.map((w, i) => (
+                              <li key={i}>{w}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* ▼ tenant ごとの内訳（折りたたみなし、件数のみ） ▼ */}
+                      {fullAppDryRunReport.perTenant.length > 0 && (
+                        <details className="bg-white border border-indigo-200 rounded p-2">
+                          <summary className="text-[11px] font-bold text-indigo-700 cursor-pointer">
+                            tenant ごとの内訳（{fullAppDryRunReport.perTenant.length} 件）
+                          </summary>
+                          <div className="mt-2 space-y-1 text-[10px]">
+                            {fullAppDryRunReport.perTenant.map((pt) => (
+                              <div key={pt.tenantId} className={`p-1.5 rounded border ${pt.ownerUidMismatch ? "border-rose-300 bg-rose-50" : "border-slate-200 bg-slate-50"}`}>
+                                <div className="font-mono font-bold text-slate-800 truncate">
+                                  {pt.tenantId}
+                                  {!pt.inBackup && <span className="ml-2 text-rose-600 font-bold">(現在のみ)</span>}
+                                  {!pt.inCurrent && <span className="ml-2 text-emerald-600 font-bold">(backup のみ)</span>}
+                                  {pt.ownerUidMismatch && <span className="ml-2 text-rose-600 font-bold">⚠ ownerUid 不一致</span>}
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 font-mono text-slate-600">
+                                  <div>社員: 追加 {pt.employees.addOnly.length} / 上書 {pt.employees.overwrite.length} / 現在のみ {pt.employees.currentOnly.length}</div>
+                                  <div>設定: 追加 {pt.settings.addOnly.length} / 上書 {pt.settings.overwrite.length} / 現在のみ {pt.settings.currentOnly.length}</div>
+                                  <div>ロック: 追加 {pt.monthlyLocks.addOnly.length} / 上書 {pt.monthlyLocks.overwrite.length} / 現在のみ {pt.monthlyLocks.currentOnly.length}</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+
+                      <div className="mt-2 text-[10px] text-indigo-700 italic">
+                        hasFirestoreWrites: <span className="font-mono font-bold">{String(fullAppDryRunReport.hasFirestoreWrites)}</span>（実復元は別フェーズで設計予定）
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
           </div>
         )}
 

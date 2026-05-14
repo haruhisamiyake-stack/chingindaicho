@@ -6412,8 +6412,10 @@ const App = () => {
     // 健保加入かつ介護対象なら、std未設定/null でも「計算不可」を見せたいので _slipHasNursingIns ベースで表示判定する。
     ...(_slipHasNursingIns ? [{ label: "介護保険料", value: <SocialInsCell kind="nursing" value={dispNursingCell} {..._slipInsFlags} /> }] : []),
     { label: "雇用保険料", value: <SocialInsCell kind="employment" value={dispEmployment} {..._slipInsFlags} /> },
-    // 子ども子育て: 厚年加入なら無条件で表示(従来の「> 0 で非表示」を撤廃)。SocialInsCell が「計算不可/0/数値」を正しく出し分ける。
-    ...(_slipHasPension ? [{ label: "子ども・子育て", value: <SocialInsCell kind="childCare" value={dispChildCareCell} {..._slipInsFlags} /> }] : []),
+    // ★ 子ども子育て: 健保加入なら無条件で表示(新制度「子ども・子育て支援金」は健保料に上乗せ徴収のため)。
+    //   SocialInsCell が「計算不可/0/数値」を正しく出し分ける。
+    //   70〜74歳の被用者(厚年喪失/健保継続)も給与明細に行が出るようになる。
+    ...(_slipHasHealth ? [{ label: "子ども・子育て", value: <SocialInsCell kind="childCare" value={dispChildCareCell} {..._slipInsFlags} /> }] : []),
     // 所得税: null は「計算不可」と明示表示する(¥0 表示の誤認を防ぐ)。
     { label: "所得税", value: _slipIncomeTaxIsUncalc ? <span className="text-rose-600 font-black">計算不可</span> : formatCurrency(dispIncomeTax) },
     { label: "住民税", value: formatCurrency(dispResidentTax) },
@@ -7843,7 +7845,7 @@ const App = () => {
                           const isDisabled = isYearLocked || isMonthLocked || isMonthGloballyLocked(selectedYear, ledgerSelectedMonth);
 
                           // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。
-                          // 健保用 stdAmount (健保・介護)、 厚年用 stdAmount (厚年・子ども子育て) を別々に判定。
+                          // 健保用 stdAmount (健保・介護・子ども子育て支援金)、 厚年用 stdAmount (厚年) を別々に判定。
                           // legacy stdAmount のみのデータもフォールバック認識する。
                           // 支給なし月(calcResult.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
                           const _ic_stdAmtHealthSet = calcResult.noIncome === true
@@ -10519,7 +10521,7 @@ const App = () => {
                       }
                       const isDisabled = isYearLocked || isMonthLocked || (!isBonusList && isMonthGloballyLocked(selectedYear, selectedListMonth));
                       // 社会保険料セルの加入区分・標準報酬月額未設定を 0円表示と混同しないためのフラグ。賞与時は両方 true で実額表示に倒す。
-                      // 健保用 stdAmount は健保・介護、 厚年用 stdAmount は厚年・子ども子育ての判定に使う。legacy stdAmount もフォールバック認識する。
+                      // 健保用 stdAmount は健保・介護・子ども子育て支援金、 厚年用 stdAmount は厚年の判定に使う。legacy stdAmount もフォールバック認識する。
                       // 支給なし月(calcResult.noIncome=true) は全控除 0 確定のため、stdAmount 未入力でも「0」表示にする。
                       const _pl_stdAmtHealthSet = isBonusList
                         || calcResult.noIncome === true

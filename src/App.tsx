@@ -4504,11 +4504,21 @@ const App = () => {
   //     呼出経路を物理的に閉じることで bypass の混入を防いでいる。
   // ============================================================================
   const requestEmployeeSave = (tenantId, empId, builder) => {
-    if (!tenantId || !empId) return;
-    let savePayload = null;
+    // 経路追跡ログ (常設)
+    console.log("[requestEmployeeSave entry]", { tenantId, empId });
+    if (!tenantId || !empId) {
+      console.warn("[requestEmployeeSave abort: missing id]", { tenantId, empId });
+      return;
+    }
     setEmployees((prev) => {
       const currentEmp = prev[empId];
-      if (!currentEmp) return prev;
+      if (!currentEmp) {
+        console.warn("[requestEmployeeSave abort: no emp]", {
+          empId,
+          knownIds: Object.keys(prev || {}),
+        });
+        return prev;
+      }
       const currentData = currentEmp.data || { years: {} };
       // ----------------------------------------------------------------------
       // dev mode 限定: builder への入力を freeze して accidental mutation を検知。
@@ -4547,17 +4557,52 @@ const App = () => {
         }
       }
       const result = builder(currentData, currentEmp);
-      if (!result) return prev;
+      if (!result) {
+        console.warn("[requestEmployeeSave abort: builder null]", { empId });
+        return prev;
+      }
       const newMaster = result.master !== undefined ? result.master : currentEmp.master;
       const newData = result.data !== undefined ? result.data : currentData;
       const sanitized = sanitizeEmployeeDataForSave(newData, currentData, monthlyLocks);
       const hasNullTax = checkHasNullTax(newMaster, sanitized, settings, effectiveSettings, taxTables);
-      savePayload = { tenantId, empId, master: newMaster, data: sanitized, hasNullTax };
+
+      // ============================================================================
+      // ★ React 18 concurrent rendering 対応 (Option 2: updater 内 queue 呼出)
+      // ----------------------------------------------------------------------------
+      // 旧設計：
+      //   let savePayload = null;
+      //   setEmployees(prev => { savePayload = ...; return ...; });
+      //   if (savePayload) queueEmployeeSave(...);
+      //
+      // この設計は React 16/17 の eager state evaluation を前提としていたが、React 18 +
+      // createRoot + StrictMode 下では updater が deferred 実行されるケースが頻発する。
+      // 実機ログで以下の順序が観測された：
+      //   [requestEmployeeSave entry]
+      //   [requestEmployeeSave post-updater] { hasPayload: false }   ← updater 未実行
+      //   [setEmployees latest]                                        ← その後に updater
+      //   [setEmployees latest]                                        ← StrictMode 二重
+      //
+      // → savePayload は updater 内でしか set されないが、その時点で if (savePayload)
+      //   は既に評価済 → 常に false → queueEmployeeSave に到達しない。これが
+      //   「ユーザ入力後に B 社へ切替えると pending count: 0」の根本原因。
+      //
+      // 対処：updater 内から queueEmployeeSave を直接呼ぶ。
+      //
+      // StrictMode 二重実行への耐性 (idempotent 性の根拠)：
+      //   - queueEmployeeSave は key = `${tenantId}_${empId}` で pendingSavesRef を上書き
+      //   - 二度呼ばれても最新の seq が勝つ (古い seq は stale skip でドロップ)
+      //   - 既存 timer は clearTimeout で破棄され新 timer が立つ
+      //   - builder は pure (frozen input + spread のみで mutation 禁止) なので、二度実行
+      //     しても同じ sanitized payload になる
+      //   → updater 内 side effect であっても、結果は idempotent。
+      //
+      // setEmployees 外での savePayload 読出し / queueEmployeeSave 呼出しは廃止。
+      // (post-updater / queue call の診断ログも同時削除。)
+      // ============================================================================
+      queueEmployeeSave(tenantId, empId, newMaster, sanitized, hasNullTax);
+
       return { ...prev, [empId]: { ...currentEmp, master: newMaster, data: sanitized } };
     });
-    if (savePayload) {
-      queueEmployeeSave(savePayload.tenantId, savePayload.empId, savePayload.master, savePayload.data, savePayload.hasNullTax);
-    }
   };
 
   // ★ unmount cleanup: 残存タイマーをクリア。

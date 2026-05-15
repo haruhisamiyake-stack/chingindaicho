@@ -9,6 +9,9 @@ import {
   onSnapshot,
   query,
   where,
+  orderBy,
+  limit,
+  getDoc,
   getDocs,
   writeBatch,
   setLogLevel,
@@ -54,6 +57,9 @@ export const PATHS = {
   legacyEmployees:       (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "payrollEmployees"],
   legacySettings:        (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "payrollSettings"],
   legacyLocks:           (tenantId, uid)                 => ["tenants", tenantId, "users", uid, "monthlyLocks"],
+  // restore audit log (Phase A 以降、append-only。delete 完全禁止)
+  restoreLogsCol:        ()                              => ["restoreLogs"],
+  restoreLog:            (logId)                         => ["restoreLogs", logId],
 };
 
 export const getCol = (...path) => collection(db, ...path);
@@ -66,6 +72,10 @@ export const subscribe = (ref, cb) => onSnapshot(ref, cb);
 
 export const queryCol = (baseRef, ...constraints) => query(baseRef, ...constraints);
 export const whereEq = (field, op, value) => where(field, op, value);
+export const orderByField = (field, dir = "asc") => orderBy(field, dir);
+export const limitN = (n) => limit(n);
 export const fetchDocs = (queryRef) => getDocs(queryRef);
+// 単一 doc one-shot 読込（restore の read-back verify 用）。subscribe ではなく明示 fetch。
+export const getDocOnce = (...path) => getDoc(getDocRef(...path));
 export const createBatch = () => writeBatch(db);
 export const setFirestoreLogLevel = (level) => setLogLevel(level);

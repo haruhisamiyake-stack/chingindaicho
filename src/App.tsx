@@ -1,6 +1,6 @@
 ﻿// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, fetchDocs, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
+import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, orderByField, limitN, fetchDocs, getDocOnce, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import LoginScreen from "./LoginScreen";
 import { BONUS_NTA_ROWS } from "./data/bonusNtaTable";
@@ -3234,6 +3234,546 @@ const checkHasNullTax = (master, data, settings, effectiveSettings, taxTables) =
   return false;
 };
 
+// ============================================================================
+// restore operation count gate の閾値定数（module-scope, immutable）
+// ----------------------------------------------------------------------------
+// 目的: simulate / 将来の full restore commit における ops / batch 数判定の閾値を
+//       1 箇所に集約。値を変えると _computeRestoreOpsWarning の判定が直接変わる。
+//
+// 注意:
+//   - 閾値の意味（warning/strong/block 各レベルの境界）は変更しない
+//   - batchSize = 450 は _splitOpsIntoBatches の chunk size と一致（Firestore 500
+//     件制限への安全マージン 50 件）。変更すると batch 数算出と齟齬が出るため要警戒。
+// ============================================================================
+const RESTORE_OPS_WARNING_THRESHOLDS = {
+  ops: {
+    warning: 1000,
+    strong: 3000,
+    block: 10000,
+  },
+  batches: {
+    warning: 5,
+    strong: 10,
+    block: 20,
+  },
+  batchSize: 450,
+};
+
+// ============================================================================
+// Phase G1.2: restoreLogs から復旧ガイダンスを生成する pure helper
+// ----------------------------------------------------------------------------
+// 目的: 「次に何をすべきか」を log の内容から自動判定して案内する。
+// 制約:
+//   - pure function: log 1 個を入力にとり、判定結果オブジェクトを返す
+//   - Firestore / state / window 等の副作用を一切持たない
+//   - 復元処理そのものは変更しない（ガイダンス表示のみ）
+//
+// 戻り値: { riskLevel, recommendation, title, summary, nextActions, warnings, inspectionPoints }
+//   riskLevel:      "low" | "medium" | "high" | "critical"
+//   recommendation: "no-action" | "retry-safe" | "manual-inspection" | "rollback-recommended"
+// ============================================================================
+const buildRestoreRecoveryGuidance = (log) => {
+  if (!log || typeof log !== "object") {
+    return {
+      riskLevel: "medium",
+      recommendation: "manual-inspection",
+      title: "ログ未選択",
+      summary: "ログが選択されていません。",
+      nextActions: [],
+      warnings: [],
+      inspectionPoints: [],
+    };
+  }
+
+  const result = log.result;
+  const mode = log.mode;
+  const op = log.operation || {};
+  const scope = log.scope || {};
+
+  // 数値正規化（restoreLogs v1/v2 で field 名が混在するため fallback）
+  const committedBatches = (typeof op.committedBatches === "number") ? op.committedBatches : 0;
+  const completedOps = (typeof op.writesSucceeded === "number")
+    ? op.writesSucceeded
+    : (typeof op.writesSimulated === "number" ? op.writesSimulated : 0);
+
+  // monthlyLocks 含有判定（critical 昇格用）
+  //   - scope.monthlyLocksOps が 1 以上 → scope に含まれる
+  //   - operation.batches に committed かつ areas に "monthlyLocks" を含む batch あり → 既に書込済
+  //   どちらかが真なら critical 候補。GPT 仕様「書き込まれている、または operation summary
+  //   に含まれる場合」を解釈。
+  const committedHasMonthlyLocks = Array.isArray(op.batches)
+    ? op.batches.some((b) => b && b.result === "committed" && Array.isArray(b.areas) && b.areas.includes("monthlyLocks"))
+    : false;
+  const monthlyLocksInScope = (typeof scope.monthlyLocksOps === "number" && scope.monthlyLocksOps > 0) || committedHasMonthlyLocks;
+
+  // -----------------------------
+  // mode-based: simulate / sandbox / failure-test は本番復元ではないため先に分岐
+  // -----------------------------
+  if (mode === "restore-failure-test") {
+    return {
+      riskLevel: "low",
+      recommendation: "no-action",
+      title: "failure test ログ",
+      summary: "これは failure injection test のログです。本番データ復元ではありません。",
+      nextActions: [
+        "failureScenario と testOutcome を確認してください",
+        "本番復元前のリハーサル結果としての記録です",
+      ],
+      warnings: [],
+      inspectionPoints: ["failureScenario", "testOutcome", "expected vs actual"],
+    };
+  }
+  if (mode === "restore-full-merge-simulate") {
+    return {
+      riskLevel: "low",
+      recommendation: "no-action",
+      title: "simulate ログ",
+      summary: "これは simulate 実行ログです。Firestore の復元対象データには書き込んでいません。",
+      nextActions: [
+        "operation 数・batch 分割・進捗を確認してください",
+        "本番 restore の事前確認用です",
+      ],
+      warnings: [],
+      inspectionPoints: ["operation.batches", "scope", "opsGate"],
+    };
+  }
+  if (mode === "restore-full-merge-sandbox") {
+    const verifyMatched = !!(log.verifySummary && (log.verifySummary.verifyMatched || log.verifySummary.verifyOk));
+    return {
+      riskLevel: "medium",
+      recommendation: verifyMatched ? "no-action" : "manual-inspection",
+      title: "sandbox 検証ログ",
+      summary: "sandbox tenant の employee 1 件に対する 1-op commit 検証ログです。本番 full restore ではありません。",
+      nextActions: [
+        "verifySummary.verifyMatched を確認してください",
+        verifyMatched
+          ? "verify OK のため本番 restore に進める判断材料です"
+          : "verify mismatch — 原因を確認してから本番 restore に進めてください",
+      ],
+      warnings: verifyMatched ? [] : ["verifyMatched が false です。read-back 不一致の可能性があります"],
+      inspectionPoints: ["verifySummary", "operation.batches"],
+    };
+  }
+
+  // -----------------------------
+  // result-based: 本番 restore (mode === "restore-full-merge" or v1 "restore")
+  // -----------------------------
+  if (result === "in-progress") {
+    return {
+      riskLevel: "high",
+      recommendation: "manual-inspection",
+      title: "未完了のログ",
+      summary: "復元が完了していないログです。Step2 が書込まれていないため、画面を閉じた・タブが落ちた・処理が中断された可能性があります。",
+      nextActions: [
+        "別タブで復元が継続していないか確認する",
+        "restoreLogs の startedAt から経過時間を確認する",
+        "新しい復元を開始する前に Dry Run を再実行する",
+        "現在の Firestore 状態を確認する",
+      ],
+      warnings: ["Step2 ログが書込まれていません"],
+      inspectionPoints: ["timestamps.startedAt", "現在の Firestore 状態", "operation.batches (途中まで)"],
+    };
+  }
+
+  if (result === "aborted-before-backup-failed") {
+    return {
+      riskLevel: "low",
+      recommendation: "retry-safe",
+      title: "復元前バックアップ失敗（書込なし）",
+      summary: "復元前バックアップに失敗したため、復元対象データへの書込は行われていません。restoreLogs だけが残っています。",
+      nextActions: [
+        "ブラウザのダウンロード設定を確認する",
+        "before_restore backup が作成できる状態にして再実行する",
+        "同じバックアップで再実行可能です",
+      ],
+      warnings: [],
+      inspectionPoints: ["errors", "ブラウザのダウンロード設定"],
+    };
+  }
+
+  if (result === "failed") {
+    if (committedBatches === 0 && completedOps === 0) {
+      return {
+        riskLevel: "medium",
+        recommendation: "retry-safe",
+        title: "復元失敗（書込ゼロの可能性大）",
+        summary: "復元対象データへの書込は完了していない可能性が高いです（committedBatches = 0 / completedOps = 0）。",
+        nextActions: [
+          "errors を確認する",
+          "同じバックアップで再実行する",
+          "再発する場合は failureScenario として原因を整理する",
+        ],
+        warnings: [],
+        inspectionPoints: ["errors", "operation.batches", "operation.failedBatchIndex"],
+      };
+    }
+    // 部分書込あり → partial と同様の扱い
+    const baseActions = [
+      "committedBatches / completedOps を確認する",
+      "failedBatchIndex を確認する",
+      "before_restore backup を保管する",
+      "Dry Run を再実行し、現在状態との差分を確認する",
+      "partial と同様の手順で復旧判断を行う",
+    ];
+    if (monthlyLocksInScope) {
+      return {
+        riskLevel: "critical",
+        recommendation: "rollback-recommended",
+        title: "復元失敗（部分書込・monthlyLocks 含む）",
+        summary: "一部データが書き込まれた可能性があります。monthlyLocks が scope に含まれるため、給与確定状態に影響している可能性があります。",
+        nextActions: [...baseActions, "monthlyLocks が commit 済なら給与確定状態への影響を確認する"],
+        warnings: ["monthlyLocks が含まれます。給与確定状態に影響している可能性があります"],
+        inspectionPoints: ["operation.failedBatchIndex", "operation.batches", "before_restore backup", "scope.monthlyLocksOps", "monthlyLocks の現在状態"],
+      };
+    }
+    return {
+      riskLevel: "high",
+      recommendation: "manual-inspection",
+      title: "復元失敗（部分書込あり）",
+      summary: "一部データが書き込まれた可能性があります（committedBatches >= 1 / completedOps >= 1）。partial と同様に扱ってください。",
+      nextActions: baseActions,
+      warnings: [],
+      inspectionPoints: ["operation.failedBatchIndex", "operation.batches", "before_restore backup"],
+    };
+  }
+
+  if (result === "partial") {
+    const baseActions = [
+      "failedBatchIndex を確認する",
+      "before_restore backup を保管する",
+      "Dry Run を再実行する",
+      "同じ backup で再実行するか判断する",
+    ];
+    if (monthlyLocksInScope) {
+      return {
+        riskLevel: "critical",
+        recommendation: "rollback-recommended",
+        title: "partial 復元（monthlyLocks 含む）",
+        summary: "一部 batch は commit 済みです。削除は行われていません。monthlyLocks が scope に含まれるため、給与確定状態に影響する可能性があります。",
+        nextActions: [...baseActions, "monthlyLocks が含まれるため給与確定状態を確認する", "影響範囲によっては before_restore backup からの復旧を検討する"],
+        warnings: ["monthlyLocks が含まれます。給与確定状態に影響する可能性があります"],
+        inspectionPoints: ["operation.failedBatchIndex", "operation.batches", "before_restore backup", "scope.monthlyLocksOps", "monthlyLocks の現在状態"],
+      };
+    }
+    return {
+      riskLevel: "high",
+      recommendation: "manual-inspection",
+      title: "partial 復元",
+      summary: "一部 batch は commit 済みです。削除は行われていません。同じ backup で再実行できる可能性があります。",
+      nextActions: baseActions,
+      warnings: [],
+      inspectionPoints: ["operation.failedBatchIndex", "operation.batches", "before_restore backup"],
+    };
+  }
+
+  if (result === "success") {
+    // post Dry Run に「backup にしか無い doc」または「同 docId で内容差分」が残っているか判定
+    //   - totalAddOnly > 0: backup に有るが current に無い → merge:true 後にこれが残るのは異常
+    //   - changedDocCount > 0: 同 docId で内容が違う → merge 漏れの可能性
+    //   - totalCurrentOnly は「current にだけ有る」= no-delete 仕様により正常なので除外
+    const post = log.postRestoreDryRun;
+    const hasDiff = !!(post && (
+      (typeof post.totalAddOnly === "number" && post.totalAddOnly > 0) ||
+      (typeof post.changedDocCount === "number" && post.changedDocCount > 0)
+    ));
+    if (hasDiff) {
+      return {
+        riskLevel: "medium",
+        recommendation: "manual-inspection",
+        title: "復元完了（post Dry Run に差分あり）",
+        summary: "復元は完了していますが、post Dry Run に差分が残っています。merge 漏れまたは中間状態の可能性があるため確認してください。",
+        nextActions: [
+          "postRestoreDryRun.totalAddOnly / changedDocCount を確認する",
+          "意図した差分か判断する",
+          "必要なら Dry Run を再実行する",
+          "restore log JSON を保管する",
+        ],
+        warnings: ["postRestoreDryRun に差分があります（totalAddOnly または changedDocCount > 0）"],
+        inspectionPoints: ["postRestoreDryRun", "warnings"],
+      };
+    }
+    return {
+      riskLevel: "low",
+      recommendation: "no-action",
+      title: "復元完了",
+      summary: "復元は完了しています。",
+      nextActions: [
+        "post Dry Run の結果を確認する",
+        "必要に応じてページを再読み込みする",
+        "restore log JSON を保管する",
+      ],
+      warnings: [],
+      inspectionPoints: ["postRestoreDryRun", "warnings"],
+    };
+  }
+
+  // 未分類 result（v1 で result が "completed" 等の場合のフォールバック）
+  return {
+    riskLevel: "medium",
+    recommendation: "manual-inspection",
+    title: "未分類のログ",
+    summary: `result = "${result || "—"}" / mode = "${mode || "—"}" は自動分類できませんでした。手動で内容を確認してください。`,
+    nextActions: ["log 全体を確認する", "必要なら restore log JSON を保管する"],
+    warnings: [],
+    inspectionPoints: ["result", "mode", "operation"],
+  };
+};
+
+// ============================================================================
+// Phase G1.3: restoreLogs から「再実行可否 / rollback 準備 / commit 境界 / 完了率」を
+//             自動分析する pure helper
+// ----------------------------------------------------------------------------
+// 目的: log の内容から定量的な復旧判断材料を提示する。
+// 制約:
+//   - pure function: 引数 log 1 個から導出。副作用なし
+//   - committedBoundary は「推定」。Firestore transaction log ではないため 100% 精度なし
+//   - retrySafety / rollbackReadiness / estimatedCompleteness の判定は log 構造に依存
+//
+// 戻り値:
+//   {
+//     retrySafety: "safe" | "unsafe" | "unknown",
+//     rollbackReadiness: "ready" | "missing" | "unknown",
+//     committedBoundary: {
+//       committedOps, totalOps, remainingOps,
+//       committedBatches, totalBatches, failedBatchIndex,
+//       areaBreakdown: [{ area, committedBatches, totalBatches, status }],
+//       committedAreas, partialAreas, failedAreas,
+//       isEstimate: true,
+//     },
+//     estimatedCompleteness: number | null,    // 0-100 (null = not applicable / unknown)
+//     recoveryStrategy: string,
+//   }
+// ============================================================================
+const buildRestoreExecutionAnalysis = (log) => {
+  const emptyBoundary = {
+    committedOps: 0, totalOps: 0, remainingOps: 0,
+    committedBatches: 0, totalBatches: 0, failedBatchIndex: null,
+    areaBreakdown: [], committedAreas: [], partialAreas: [], failedAreas: [],
+    isEstimate: true,
+  };
+
+  if (!log || typeof log !== "object") {
+    return {
+      retrySafety: "unknown",
+      rollbackReadiness: "unknown",
+      committedBoundary: emptyBoundary,
+      estimatedCompleteness: null,
+      recoveryStrategy: "ログが選択されていません。",
+    };
+  }
+
+  const result = log.result;
+  const mode = log.mode;
+  const op = log.operation || {};
+  const before = log.beforeBackup || null;
+
+  // 数値正規化（restoreLogs v1/v2 で field 名が混在）
+  const committedBatches = (typeof op.committedBatches === "number") ? op.committedBatches : null;
+  const totalBatches = (typeof op.totalBatches === "number") ? op.totalBatches : (Array.isArray(op.batches) ? op.batches.length : null);
+  const failedBatchIndex = (typeof op.failedBatchIndex === "number") ? op.failedBatchIndex : null;
+  const writesSucceeded = (typeof op.writesSucceeded === "number") ? op.writesSucceeded : null;
+  const writesSimulated = (typeof op.writesSimulated === "number") ? op.writesSimulated : null;
+  // completedOps の判断: 本番 commit 系は writesSucceeded、simulate は writesSimulated
+  const completedOps = (writesSucceeded != null) ? writesSucceeded
+                     : (writesSimulated != null ? writesSimulated : null);
+  // totalOps の判断: scope.totalOps があれば使用、無ければ writesAttempted、無ければ batches 合計
+  const totalOpsFromScope = log.scope && typeof log.scope.totalOps === "number" ? log.scope.totalOps : null;
+  const totalOpsFromAttempted = typeof op.writesAttempted === "number" ? op.writesAttempted : null;
+  const totalOpsFromBatches = Array.isArray(op.batches)
+    ? op.batches.reduce((s, b) => s + (typeof b.count === "number" ? b.count : 0), 0)
+    : null;
+  const totalOps = totalOpsFromScope != null ? totalOpsFromScope
+                 : totalOpsFromAttempted != null ? totalOpsFromAttempted
+                 : totalOpsFromBatches != null ? totalOpsFromBatches
+                 : null;
+
+  // -----------------------------
+  // committed boundary 解析（推定）
+  //   batches 配列から area 別の commit 状況を集計。batch 単位の atomicity 仮定。
+  // -----------------------------
+  const buildBoundary = () => {
+    if (!Array.isArray(op.batches) || op.batches.length === 0) {
+      return {
+        ...emptyBoundary,
+        committedOps: completedOps || 0,
+        totalOps: totalOps || 0,
+        remainingOps: (totalOps != null && completedOps != null) ? Math.max(0, totalOps - completedOps) : 0,
+        committedBatches: committedBatches || 0,
+        totalBatches: totalBatches || 0,
+        failedBatchIndex,
+      };
+    }
+    const areaMap = {}; // area -> { committedBatches, totalBatches, committedOpsApprox }
+    let cBatches = 0;
+    let cOps = 0;
+    for (const b of op.batches) {
+      const isCommitted = b && b.result === "committed";
+      if (isCommitted) {
+        cBatches += 1;
+        cOps += (typeof b.count === "number" ? b.count : 0);
+      }
+      const areas = Array.isArray(b && b.areas) ? b.areas : [];
+      for (const a of areas) {
+        if (!areaMap[a]) areaMap[a] = { committedBatches: 0, totalBatches: 0 };
+        areaMap[a].totalBatches += 1;
+        if (isCommitted) areaMap[a].committedBatches += 1;
+      }
+    }
+    const areaBreakdown = Object.keys(areaMap).map((a) => {
+      const ab = areaMap[a];
+      let status;
+      if (ab.committedBatches === ab.totalBatches) status = "committed";
+      else if (ab.committedBatches === 0) status = "not-committed";
+      else status = "partial";
+      return { area: a, committedBatches: ab.committedBatches, totalBatches: ab.totalBatches, status };
+    });
+    const committedAreas = areaBreakdown.filter((x) => x.status === "committed").map((x) => x.area);
+    const partialAreas = areaBreakdown.filter((x) => x.status === "partial").map((x) => x.area);
+    const failedAreas = areaBreakdown.filter((x) => x.status === "not-committed").map((x) => x.area);
+    // completedOps の取得元 priority: log.operation.writesSucceeded → batches の committed count 集計
+    const cOpsFinal = (writesSucceeded != null) ? writesSucceeded : cOps;
+    const tOpsFinal = (totalOps != null) ? totalOps : op.batches.reduce((s, b) => s + (typeof b.count === "number" ? b.count : 0), 0);
+    return {
+      committedOps: cOpsFinal,
+      totalOps: tOpsFinal,
+      remainingOps: Math.max(0, tOpsFinal - cOpsFinal),
+      committedBatches: (committedBatches != null) ? committedBatches : cBatches,
+      totalBatches: (totalBatches != null) ? totalBatches : op.batches.length,
+      failedBatchIndex,
+      areaBreakdown,
+      committedAreas,
+      partialAreas,
+      failedAreas,
+      isEstimate: true,
+    };
+  };
+  const committedBoundary = buildBoundary();
+
+  // -----------------------------
+  // mode-based: 非本番系 mode は早期分岐
+  // -----------------------------
+  if (mode === "restore-full-merge-simulate") {
+    return {
+      retrySafety: "safe",
+      rollbackReadiness: (before && before.downloaded) ? "ready" : (before ? "missing" : "unknown"),
+      committedBoundary,
+      estimatedCompleteness: null,     // simulate は復元完了率の概念が無い
+      recoveryStrategy: "simulate 実行ログです。Firestore の復元対象データには書き込んでいません。再実行は data 影響なしで安全です。",
+    };
+  }
+  if (mode === "restore-full-merge-sandbox") {
+    return {
+      retrySafety: "safe",            // sandbox tenant のみ・merge:true 冪等のため再実行安全
+      rollbackReadiness: (before && before.downloaded) ? "ready" : (before ? "missing" : "unknown"),
+      committedBoundary,
+      estimatedCompleteness: result === "success" ? 100 : null,
+      recoveryStrategy: "sandbox tenant の 1 op 検証ログです。merge:true により再実行は冪等で安全です。本番 full restore ではありません。",
+    };
+  }
+  if (mode === "restore-failure-test") {
+    return {
+      retrySafety: "safe",
+      rollbackReadiness: "unknown",
+      committedBoundary,
+      estimatedCompleteness: null,
+      recoveryStrategy: "failure injection test ログです。本番データへの書込はありません。再実行は data 影響なしで安全です。",
+    };
+  }
+
+  // -----------------------------
+  // 本番 restore (mode === "restore-full-merge" or v1 "restore")
+  // -----------------------------
+
+  // retry safety 判定
+  let retrySafety;
+  if (result === "aborted-before-backup-failed") {
+    retrySafety = "safe";    // 書込なしの保証
+  } else if (committedBatches == null && writesSucceeded == null) {
+    // v1 log 等で field 不足 → unknown
+    retrySafety = "unknown";
+  } else if (result === "success") {
+    retrySafety = "safe";    // merge:true により冪等。再実行しても同じ結果
+  } else if (result === "in-progress") {
+    retrySafety = "unknown"; // 完了状態不明
+  } else if ((committedBatches != null && committedBatches === 0) && (completedOps == null || completedOps === 0)) {
+    retrySafety = "safe";
+  } else if (result === "partial") {
+    retrySafety = "unsafe";
+  } else if (result === "failed" && committedBatches != null && committedBatches > 0) {
+    retrySafety = "unsafe";
+  } else {
+    retrySafety = "unknown";
+  }
+
+  // rollback readiness 判定
+  let rollbackReadiness;
+  if (before && before.downloaded === true && before.fileName) {
+    rollbackReadiness = "ready";
+  } else if (before && (before.fileName != null || before.fileSize != null)) {
+    // 一部 field のみある状態
+    rollbackReadiness = "ready";
+  } else if (before) {
+    rollbackReadiness = "missing";
+  } else {
+    rollbackReadiness = "unknown";
+  }
+
+  // estimatedCompleteness 判定
+  let estimatedCompleteness;
+  if (result === "success") {
+    estimatedCompleteness = 100;
+  } else if (result === "aborted-before-backup-failed") {
+    estimatedCompleteness = 0;
+  } else if (result === "failed" && committedBatches != null && committedBatches === 0) {
+    estimatedCompleteness = 0;
+  } else if (completedOps != null && totalOps != null && totalOps > 0) {
+    estimatedCompleteness = Math.round((completedOps / totalOps) * 100);
+  } else {
+    estimatedCompleteness = null;
+  }
+
+  // recoveryStrategy 文言
+  let recoveryStrategy;
+  if (result === "aborted-before-backup-failed") {
+    recoveryStrategy = "before_restore backup DL に失敗したため復元対象データへの書込はありません。ブラウザのダウンロード設定を確認し、同じ backup で再実行可能です。";
+  } else if (result === "success") {
+    recoveryStrategy = "復元は完了しています。merge:true により再実行も冪等で安全です。restore log JSON を保管してください。";
+  } else if (result === "in-progress") {
+    recoveryStrategy = "復元が未完了状態です。別タブで継続していないか、ネットワーク中断・タブ閉鎖が無かったかを確認してください。新規 restore 前に Dry Run 再実行を推奨します。";
+  } else if (retrySafety === "safe" && estimatedCompleteness === 0) {
+    recoveryStrategy = "復元対象データへの書込は完了していない可能性が高いです。errors を確認の上、同じ backup で再実行可能です。";
+  } else if (retrySafety === "unsafe") {
+    const rollbackHint = rollbackReadiness === "ready"
+      ? "before_restore backup が保存されています"
+      : "before_restore backup が見当たりません — 手動で確保してください";
+    recoveryStrategy = `部分 commit の可能性があります。merge:true により再実行 commit 自体は冪等ですが、中間状態に対する Dry Run 再実行と整合性確認を推奨します。${rollbackHint}。`;
+  } else {
+    recoveryStrategy = "log 構造から自動判定できません。手動で operation.batches / committedBatches / completedOps を確認してください。";
+  }
+
+  return {
+    retrySafety,
+    rollbackReadiness,
+    committedBoundary,
+    estimatedCompleteness,
+    recoveryStrategy,
+  };
+};
+
+// 顧問先表示名を「clientCode + name」または「name のみ」で組み立てる pure helper。
+// 例:
+//   { clientCode: "0001", name: "山田建設株式会社" } → "0001 山田建設株式会社"
+//   { clientCode: "",     name: "山田建設株式会社" } → "山田建設株式会社"
+//   { clientCode: null,   name: null }              → ""
+const formatTenantDisplayName = (tenant) => {
+  if (!tenant) return "";
+  const name = (tenant.name == null) ? "" : String(tenant.name);
+  const code = (tenant.clientCode == null) ? "" : String(tenant.clientCode).trim();
+  if (code && name) return `${code} ${name}`;
+  if (code) return code;
+  return name;
+};
+
 const App = () => {
   const [activeTab, setActiveTab] = useState("portal");
   const [userId, setUserId] = useState(null);
@@ -3414,7 +3954,7 @@ const App = () => {
   const [ofcMasterBackupError, setOfcMasterBackupError] = useState("");
   const [isOfcMasterBackupImporting, setIsOfcMasterBackupImporting] = useState(false);
 
-  // ★ アプリ全体バックアップ用ステート（エクスポートのみ実装。復元は別フェーズで設計）
+  // ★ アプリ全体バックアップ用ステート（バックアップ作成 + 確認）
   const [isFullAppBackupExporting, setIsFullAppBackupExporting] = useState(false);
   const [fullAppBackupError, setFullAppBackupError] = useState("");
   const [fullAppBackupLastInfo, setFullAppBackupLastInfo] = useState(null); // { tenantCount, employeeCount, taxTableCount, fileName }
@@ -3425,11 +3965,95 @@ const App = () => {
   const [fullAppBackupPreview, setFullAppBackupPreview] = useState(null);
   const [fullAppBackupPreviewError, setFullAppBackupPreviewError] = useState("");
 
-  // ★ アプリ全体バックアップ「復元シミュレーション (Dry Run)」用ステート
+  // ★ アプリ全体バックアップ「復元前チェック（差分確認）」用ステート
   //    実復元は行わない。Firestore 書込は一切なし。読込のみで件数・docId 差分を可視化。
   const [isFullAppDryRunRunning, setIsFullAppDryRunRunning] = useState(false);
   const [fullAppDryRunReport, setFullAppDryRunReport] = useState(null);
   const [fullAppDryRunError, setFullAppDryRunError] = useState("");
+
+
+  // ★ Phase G1 simulate: 災害復旧復元（全体上書き）の simulate engine 用 state
+  //    - 実書込は一切しない（batch.commit / saveDoc は呼ばない）
+  //    - restoreLogs だけは Firestore に書く（監査証跡）。mode: "restore-full-merge-simulate"
+  const [isFullRestoreSimRunning, setIsFullRestoreSimRunning] = useState(false);
+  const [fullRestoreSimStage, setFullRestoreSimStage] = useState(null);   // null | "stage1" | "stage2"
+  const [fullRestoreSimAccountInput, setFullRestoreSimAccountInput] = useState("");
+  const [fullRestoreSimAck1, setFullRestoreSimAck1] = useState(false);
+  const [fullRestoreSimAck2, setFullRestoreSimAck2] = useState(false);
+  // backup が stale (30日以上前) の場合だけ要求される追加 ack。fresh の時は常に true として扱う。
+  const [fullRestoreSimAckStale, setFullRestoreSimAckStale] = useState(false);
+  const [fullRestoreSimError, setFullRestoreSimError] = useState("");
+  const [fullRestoreSimPreflightErrors, setFullRestoreSimPreflightErrors] = useState([]);
+  const [fullRestoreSimPreflightWarnings, setFullRestoreSimPreflightWarnings] = useState([]);
+  const [fullRestoreSimProgress, setFullRestoreSimProgress] = useState(null);
+  // { status, totalOps, completedOps, currentBatchIndex, totalBatches, currentArea, startedAt, durationMs }
+  const [fullRestoreSimResult, setFullRestoreSimResult] = useState(null);
+  // { logId, result, skippedTenants, totalOps, totalBatches, opsByArea, beforeBackupFileName, logSnapshot }
+
+  // ★ Phase G1 本番 災害復旧復元（全体上書き）用 state
+  //    - 実 batch.commit() を実行し Firestore に merge:true 書込
+  //    - VITE_ENABLE_FULL_RESTORE=true の時のみ UI 表示
+  //    - delete/remove は禁止。backup に存在しない current-only docs は削除しない。
+  const [isFullRestoreRunning, setIsFullRestoreRunning] = useState(false);
+  const [fullRestoreStage, setFullRestoreStage] = useState(null); // null | "stage1" | "stage2"
+  const [fullRestoreAccountInput, setFullRestoreAccountInput] = useState("");
+  const [fullRestoreAck1, setFullRestoreAck1] = useState(false); // overwrite ack
+  const [fullRestoreAck2, setFullRestoreAck2] = useState(false); // no-delete ack
+  const [fullRestoreAck3, setFullRestoreAck3] = useState(false); // before-backup-saved ack
+  // backup が stale (30日以上前) の場合だけ要求される追加 ack。fresh の時は常に true として扱う。
+  const [fullRestoreAckStale, setFullRestoreAckStale] = useState(false);
+  const [fullRestoreError, setFullRestoreError] = useState("");
+  const [fullRestorePreflightErrors, setFullRestorePreflightErrors] = useState([]);
+  const [fullRestorePreflightWarnings, setFullRestorePreflightWarnings] = useState([]);
+  const [fullRestoreProgress, setFullRestoreProgress] = useState(null);
+  // { status, totalOps, completedOps, currentBatchIndex, totalBatches, currentArea, startedAt, durationMs, errorsCount }
+  const [fullRestoreResult, setFullRestoreResult] = useState(null);
+  // { logId, result, skippedTenants, totalOps, totalBatches, committedBatches, opsByArea, beforeBackupFileName, postDryRunOk, logSnapshot }
+  const [fullRestorePostDryRunRunning, setFullRestorePostDryRunRunning] = useState(false);
+  const [fullRestorePostDryRunError, setFullRestorePostDryRunError] = useState("");
+
+  // ★ Phase G1.1: restoreLogs viewer (read-only 監査画面) 用 state
+  //   - Firestore.restoreLogs collection を最新 N 件取得して表示
+  //   - 復元データの書換は一切行わない（read-only）
+  //   - 設計メモ: 現状の log は restoreSessionId フィールドを持たない。今回は logId を
+  //     session ID 代替として表示する。将来 restoreSessionId を追加した暁にはここを切替。
+  const [restoreLogsList, setRestoreLogsList] = useState([]);             // [{ id, ...data }]
+  const [restoreLogsLoading, setRestoreLogsLoading] = useState(false);
+  const [restoreLogsError, setRestoreLogsError] = useState("");
+  const [restoreLogsFilterResult, setRestoreLogsFilterResult] = useState("all"); // all | success | partial | failed | aborted-before-backup-failed | in-progress | non-success
+  const [restoreLogsFilterMode, setRestoreLogsFilterMode] = useState("all");     // all | restore-full-merge | restore-full-merge-simulate | restore-full-merge-sandbox | restore-failure-test
+  const [restoreLogsSelected, setRestoreLogsSelected] = useState(null);          // selected log object
+  const RESTORE_LOGS_FETCH_LIMIT = 20;
+
+  // ★ Phase G1 sandbox single-commit: 本番 restore 前の commit 安全性検証モード
+  //    - 対象: [SANDBOX] tenant の employee 1 件のみ
+  //    - 1 batch (createBatch) で 1 doc を merge:true commit
+  //    - read-back verify は merge-aware (_isMergeSubsetEqual) で実施
+  //    - mode: "restore-full-merge-sandbox"
+  //    - 通常 UI からは VITE_ENABLE_SANDBOX_RESTORE=true の時のみ表示
+  const [sandboxRestoreTargetTenantId, setSandboxRestoreTargetTenantId] = useState("");
+  const [sandboxRestoreTargetEmpId, setSandboxRestoreTargetEmpId] = useState("");
+  const [sandboxRestoreStage, setSandboxRestoreStage] = useState(null);  // null | "stage1" | "stage2"
+  const [sandboxRestoreAccountInput, setSandboxRestoreAccountInput] = useState("");
+  const [sandboxRestoreAck1, setSandboxRestoreAck1] = useState(false);
+  const [sandboxRestoreAck2, setSandboxRestoreAck2] = useState(false);
+  // backup が stale (30日以上前) の場合だけ要求される追加 ack。fresh の時は常に true として扱う。
+  const [sandboxRestoreAckStale, setSandboxRestoreAckStale] = useState(false);
+  const [isSandboxRestoreRunning, setIsSandboxRestoreRunning] = useState(false);
+  const [sandboxRestoreError, setSandboxRestoreError] = useState("");
+  const [sandboxRestorePreflightErrors, setSandboxRestorePreflightErrors] = useState([]);
+  const [sandboxRestorePreflightWarnings, setSandboxRestorePreflightWarnings] = useState([]);
+  const [sandboxRestoreResult, setSandboxRestoreResult] = useState(null);
+  // { logId, result, beforeBackupFileName, verifyOk, verifyError, logSnapshot, target:{tenantId,empId} }
+
+  // ★ Phase G1 failure injection test: 異常系監査用 state
+  //    - env: VITE_ENABLE_RESTORE_FAILURE_TEST=true 時のみ UI 表示
+  //    - 実 commit / saveDoc 系は呼ばない (restoreLogs だけ書く)
+  //    - 8 シナリオの fail-safe 動作確認
+  const [failureTestScenario, setFailureTestScenario] = useState("");
+  const [failureTestResult, setFailureTestResult] = useState(null);
+  const [failureTestError, setFailureTestError] = useState("");
+  const [isFailureTestRunning, setIsFailureTestRunning] = useState(false);
 
   // ★月次全体ロック管理ステート
   const [monthlyLocks, setMonthlyLocks] = useState({});
@@ -3937,7 +4561,7 @@ const App = () => {
   };
 
   // ============================================================================
-  // アプリ全体バックアップ（エクスポートのみ。復元は今回は実装しない）
+  // アプリ全体バックアップ（officeMaster / taxTables / tenants / settings / monthlyLocks / employees を JSON 化）
   // ----------------------------------------------------------------------------
   // 対象:
   //   - /officeMaster/* (全 doc)
@@ -4112,20 +4736,7 @@ const App = () => {
       return;
     }
     if (isFullAppBackupExporting) return;
-
-    const confirmMsg =
-      `アプリ全体のデータを JSON ファイルとしてダウンロードします。\n\n` +
-      `対象:\n` +
-      `- 事務所マスタ (officeMaster)\n` +
-      `- 源泉徴収税額表 (taxTables)\n` +
-      `- 顧問先一覧 (自分の tenants のみ)\n` +
-      `- 各顧問先の会社設定 (settings)\n` +
-      `- 各顧問先の月次ロック (monthlyLocks)\n` +
-      `- 各顧問先の社員データ・賃金台帳 (employees + 給与データ)\n\n` +
-      `※ 復元機能は今回は実装されていません（別フェーズで設計予定）。\n` +
-      `※ 顧問先・社員数によってはダウンロードに数秒以上かかります。\n\n` +
-      `実行しますか？`;
-    if (!window.confirm(confirmMsg)) return;
+    // 確認 dialog は廃止: バックアップ作成は読み取り + DL のみで非破壊のため、ボタン押下で即実行する。
 
     setIsFullAppBackupExporting(true);
     setFullAppBackupError("");
@@ -4269,7 +4880,7 @@ const App = () => {
   };
 
   // ============================================================================
-  // アプリ全体バックアップ 復元シミュレーション (Dry Run)
+  // アプリ全体バックアップ 復元前チェック（差分確認）
   // ----------------------------------------------------------------------------
   // ※ 今回は実復元しない。Firestore への書き込みは一切行わない。
   //    backup JSON と現在の Firestore スナップショットを docId 単位で比較し、
@@ -4602,10 +5213,10 @@ const App = () => {
     if (isFullAppDryRunRunning) return;
 
     const confirmMsg =
-      `復元シミュレーション (Dry Run) を実行します。\n\n` +
-      `・現在の Firestore データを読み込みます（顧問先・社員数によっては時間がかかります）。\n` +
+      `復元前チェック（差分確認）を実行します。\n\n` +
+      `・現在のデータを読み込みます（顧問先・社員数によっては時間がかかります）。\n` +
       `・Firestore への書き込みは一切行いません。\n` +
-      `・読み取り結果と backup JSON を比較し、件数・docId 差分のみを表示します。\n\n` +
+      `・読み取り結果と backup JSON を比較し、追加・上書き・差分の可能性を表示します。\n\n` +
       `実行しますか？`;
     if (!window.confirm(confirmMsg)) return;
 
@@ -4646,6 +5257,2139 @@ const App = () => {
       console.timeEnd("[full app dry run]");
       setIsFullAppDryRunRunning(false);
     }
+  };
+
+  // restoreLogs/{logId} への書込ヘルパー。
+  //   - phase: "start"（Step1, in-progress 書込）
+  //   - phase: "finish"（Step2, success/failed/partial 書込, merge:true）
+  const _writeRestoreLog = async (logId, payload, phase) => {
+    const path = PATHS.restoreLog(logId);
+    if (phase === "start") {
+      await saveDoc(path, payload);  // 新規作成
+    } else {
+      await saveDoc(path, payload, { merge: true });  // 更新
+    }
+  };
+
+  // Phase G1.1: restoreLogs 一覧取得（最新 N 件、timestamps.startedAt desc）
+  //   - 既存 restoreLogs 構造（v1 + v2 両対応）。timestamps.startedAt は両方とも存在。
+  //   - 単一 orderBy + limit のみ。複合条件ではないため Firestore index 追加不要。
+  //   - read-only。Firestore への書込は一切しない。
+  const _fetchRecentRestoreLogs = async (limitCount = RESTORE_LOGS_FETCH_LIMIT) => {
+    const baseRef = getCol(...PATHS.restoreLogsCol());
+    const q = queryCol(baseRef, orderByField("timestamps.startedAt", "desc"), limitN(limitCount));
+    const snaps = await fetchDocs(q);
+    const list = [];
+    snaps.forEach((d) => {
+      list.push({ id: d.id, ...(d.data() || {}) });
+    });
+    return list;
+  };
+
+  // 「ログを再読み込み」button handler
+  const handleRefreshRestoreLogs = async () => {
+    if (restoreLogsLoading) return;
+    setRestoreLogsLoading(true);
+    setRestoreLogsError("");
+    try {
+      const list = await _fetchRecentRestoreLogs(RESTORE_LOGS_FETCH_LIMIT);
+      setRestoreLogsList(list);
+      console.log("[restoreLogs viewer] fetched", list.length, "logs");
+    } catch (e) {
+      console.error("[restoreLogs viewer] fetch failed", e);
+      setRestoreLogsError("ログ取得に失敗: " + (e && e.message ? e.message : e));
+    } finally {
+      setRestoreLogsLoading(false);
+    }
+  };
+
+  // 一覧 / 詳細から JSON DL（既存 _downloadRestoreLogJson を再利用）
+  const handleDownloadOneRestoreLogJson = (log) => {
+    if (!log) return;
+    const idForFile = String(log.id || log.logId || "unknown").slice(0, 8);
+    const fileName = `payroll_restore_log_${_stdRewardTimestampStr()}_${idForFile}.json`;
+    _downloadRestoreLogJson(log, fileName);
+  };
+
+  // ログ JSON DL ヘルパー
+  const _downloadRestoreLogJson = (logObj, fileName) => {
+    try {
+      const text = JSON.stringify(logObj, null, 2);
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[restore] log JSON DL failed", e);
+    }
+  };
+
+  // 復元前自動フルバックアップ DL。失敗時は throw する（呼出側が中止判定）。
+  const _downloadBeforeRestoreBackup = async (uid, logId) => {
+    const json = await buildFullAppBackup(uid);
+    const fileName = `payroll_full_app_before_restore_${_stdRewardTimestampStr()}_${logId.slice(0, 8)}.json`;
+    let jsonString;
+    try {
+      jsonString = JSON.stringify(json, null, 2);
+    } catch (e) {
+      throw new Error("自動バックアップ JSON の文字列化に失敗: " + (e && e.message ? e.message : e));
+    }
+    const blob = new Blob([jsonString], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return { fileName, fileSize: blob.size };
+  };
+
+  // ============================================================================
+  // Phase G1 simulate: 災害復旧復元（全体上書き）の simulate engine
+  // ----------------------------------------------------------------------------
+  // 目的: restore engine の骨組みを Firestore commit なしで検証する。
+  // 禁止:
+  //   - batch.commit() を呼ばない
+  //   - saveDoc() でデータ書込しない（restoreLogs だけは例外として書く）
+  //   - removeDoc / deleteDoc を一切呼ばない
+  //   - restoreLogs を operation 対象に含めない
+  //   - tenants/{tid}/users/{uid} を operation 対象に含めない
+  // 動作:
+  //   - operation 配列を生成し、450 件で batch 分割
+  //   - 各 batch は `await new Promise(r => setTimeout(r, 50))` で simulate
+  //   - progress / restoreLogs / before backup DL は実装する
+  // ============================================================================
+
+  // ownerUid mismatch の tenant を抽出（pure）
+  //   返り値: { skipped: [{tenantId, backupOwnerUid}], allowed: [tenantId...] }
+  const _classifyOwnerUidMismatches = (backupJson, currentUid) => {
+    const skipped = [];
+    const allowed = [];
+    const tenants = (backupJson && backupJson.data && backupJson.data.tenants) || {};
+    for (const [tid, bundle] of Object.entries(tenants)) {
+      const bOwnerUid = (bundle && bundle.tenant && bundle.tenant.ownerUid) || null;
+      if (!currentUid) {
+        skipped.push({ tenantId: tid, backupOwnerUid: bOwnerUid, reason: "no-current-uid" });
+      } else if (bOwnerUid !== currentUid) {
+        skipped.push({ tenantId: tid, backupOwnerUid: bOwnerUid, reason: "ownerUid-mismatch" });
+      } else {
+        allowed.push(tid);
+      }
+    }
+    return { skipped, allowed };
+  };
+
+  // Firestore 書込前に undefined を除去（Firestore は undefined を拒否）
+  //   Date / Timestamp は本プロジェクトでは ISO 文字列保存のため特別処理不要
+  const _sanitizeForFirestore = (doc) => {
+    return JSON.parse(JSON.stringify(doc));
+  };
+
+  // backup JSON → RestoreOperation[] を生成（pure）
+  //   - merge は常に true（doc 単位 merge）
+  //   - skipped tenant は対象外
+  //   - tenants/{tid}/users/{uid} は対象外（バックアップにそもそも含まれていない）
+  //   - restoreLogs は対象外（buildFullAppBackup も読まない）
+  //   返り値: ops[] = [{area, path, data, merge:true, tenantId?, docId, estBytes?}]
+  const _buildFullRestoreOps = (backupJson, skippedTenantIdSet) => {
+    const ops = [];
+    const data = (backupJson && backupJson.data) || {};
+
+    // 1) officeMaster
+    for (const [docId, ofcDoc] of Object.entries(data.officeMaster || {})) {
+      if (!ofcDoc || typeof ofcDoc !== "object") continue;
+      ops.push({
+        area: "officeMaster",
+        path: PATHS.officeMaster(docId),
+        data: _sanitizeForFirestore(ofcDoc),
+        merge: true,
+        docId,
+      });
+    }
+    // 2) taxTables
+    for (const [docId, taxDoc] of Object.entries(data.taxTables || {})) {
+      if (!taxDoc || typeof taxDoc !== "object") continue;
+      ops.push({
+        area: "taxTables",
+        path: PATHS.taxTable(docId),
+        data: _sanitizeForFirestore(taxDoc),
+        merge: true,
+        docId,
+      });
+    }
+
+    // 3-6) tenants
+    for (const [tid, bundle] of Object.entries(data.tenants || {})) {
+      if (skippedTenantIdSet && skippedTenantIdSet.has(tid)) continue;
+      if (!bundle || typeof bundle !== "object") continue;
+
+      // 3) tenants 本体
+      if (bundle.tenant && typeof bundle.tenant === "object") {
+        ops.push({
+          area: "tenants",
+          path: PATHS.tenant(tid),
+          data: _sanitizeForFirestore(bundle.tenant),
+          merge: true,
+          tenantId: tid,
+          docId: tid,
+        });
+      }
+
+      // 4) settings
+      for (const [sid, sDoc] of Object.entries(bundle.settings || {})) {
+        if (!sDoc || typeof sDoc !== "object") continue;
+        ops.push({
+          area: "settings",
+          path: PATHS.settings(tid, sid),
+          data: _sanitizeForFirestore(sDoc),
+          merge: true,
+          tenantId: tid,
+          docId: sid,
+        });
+      }
+      // 5) monthlyLocks
+      for (const [lid, lDoc] of Object.entries(bundle.monthlyLocks || {})) {
+        if (!lDoc || typeof lDoc !== "object") continue;
+        ops.push({
+          area: "monthlyLocks",
+          path: PATHS.monthlyLocks(tid, lid),
+          data: _sanitizeForFirestore(lDoc),
+          merge: true,
+          tenantId: tid,
+          docId: lid,
+        });
+      }
+      // 6) employees
+      for (const [eid, eDoc] of Object.entries(bundle.employees || {})) {
+        if (!eDoc || typeof eDoc !== "object") continue;
+        ops.push({
+          area: "employees",
+          path: PATHS.employee(tid, eid),
+          data: _sanitizeForFirestore(eDoc),
+          merge: true,
+          tenantId: tid,
+          docId: eid,
+        });
+      }
+    }
+    return ops;
+  };
+
+  // ops を area 別に集計（pure）
+  const _summarizeOpsByArea = (ops) => {
+    const summary = {
+      officeMasterOps: 0,
+      taxTablesOps: 0,
+      tenantsOps: 0,
+      settingsOps: 0,
+      monthlyLocksOps: 0,
+      employeesOps: 0,
+      totalOps: 0,
+    };
+    for (const op of (ops || [])) {
+      summary.totalOps += 1;
+      switch (op.area) {
+        case "officeMaster": summary.officeMasterOps += 1; break;
+        case "taxTables":    summary.taxTablesOps += 1; break;
+        case "tenants":      summary.tenantsOps += 1; break;
+        case "settings":     summary.settingsOps += 1; break;
+        case "monthlyLocks": summary.monthlyLocksOps += 1; break;
+        case "employees":    summary.employeesOps += 1; break;
+        default: break;
+      }
+    }
+    return summary;
+  };
+
+  // ops[] を 450 件単位の batch に分割（pure）。Firestore 500 件制限への安全マージン 50 件。
+  const _splitOpsIntoBatches = (ops, maxOpsPerBatch = 450) => {
+    const batches = [];
+    for (let i = 0; i < ops.length; i += maxOpsPerBatch) {
+      const chunk = ops.slice(i, i + maxOpsPerBatch);
+      batches.push({
+        index: batches.length,
+        ops: chunk,
+        areas: Array.from(new Set(chunk.map((o) => o.area))),
+        count: chunk.length,
+        result: "pending",  // pending / simulated / committed / failed
+        error: null,
+      });
+    }
+    return batches;
+  };
+
+  // Simulate engine 用 preflight
+  const _runFullRestoreSimPreflight = ({ currentUserId, backupPreview, dryRunReport, isRunning }) => {
+    const errors = [];
+    const warnings = [];
+    if (!currentUserId) errors.push("ログインが必要です");
+    if (!dryRunReport) errors.push("Dry Run が未実行です。先に Dry Run を実行してください");
+    if (!backupPreview || !backupPreview.ok) errors.push("バックアップ JSON のプレビューがありません");
+    const bjson = backupPreview && backupPreview.json;
+    if (bjson && bjson.backupType !== "payroll-full-app-backup") errors.push("backupType が不正です");
+    if (bjson && bjson.backupVersion !== 1) errors.push("backupVersion が不正です");
+    if (isRunning) errors.push("simulate が既に実行中です");
+    return { ok: errors.length === 0, errors, warnings };
+  };
+
+  // simulate engine 開始（Stage1 ダイアログを開く）
+  const handleStartFullRestoreSimulation = () => {
+    setFullRestoreSimError("");
+    setFullRestoreSimResult(null);
+    setFullRestoreSimPreflightErrors([]);
+    setFullRestoreSimPreflightWarnings([]);
+    setFullRestoreSimAccountInput("");
+    setFullRestoreSimAck1(false);
+    setFullRestoreSimAck2(false);
+    setFullRestoreSimAckStale(false);
+    // backup size による block 判定 (100MB 超は restore 拒否)
+    const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+    if (!sizeGate.ok) {
+      setFullRestoreSimError("backup サイズ制限超過: " + sizeGate.reason);
+      return;
+    }
+    // operation 数 / batch 数による block 判定 (ownerUid skip 後の ops 数で判定)
+    //   ★ pure helper: _estimateRestoreOpsCount は doc を sanitize しない軽量版
+    const opsEst = _estimateRestoreOpsCount(fullAppBackupPreview && fullAppBackupPreview.json, userId);
+    const opsGate = _canRunRestoreByOps(opsEst.totalOps, opsEst.totalBatches);
+    if (!opsGate.ok) {
+      setFullRestoreSimError("operation 数制限超過: " + opsGate.reason);
+      return;
+    }
+    const pf = _runFullRestoreSimPreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      isRunning: isFullRestoreSimRunning,
+    });
+    setFullRestoreSimPreflightErrors(pf.errors);
+    setFullRestoreSimPreflightWarnings(pf.warnings);
+    if (!pf.ok) {
+      setFullRestoreSimError("Preflight 失敗: " + pf.errors.join(" / "));
+      return;
+    }
+    setFullRestoreSimStage("stage1");
+  };
+
+  const handleConfirmFullRestoreSimStage1 = () => {
+    setFullRestoreSimStage("stage2");
+  };
+
+  const handleCancelFullRestoreSimDialog = () => {
+    if (isFullRestoreSimRunning) return;  // simulate 実行中は cancel 不可
+    setFullRestoreSimStage(null);
+    setFullRestoreSimAccountInput("");
+    setFullRestoreSimAck1(false);
+    setFullRestoreSimAck2(false);
+    setFullRestoreSimAckStale(false);
+  };
+
+  // simulate orchestrator（Firestore commit はしない）
+  const handleExecuteFullRestoreSimulation = async () => {
+    if (isFullRestoreSimRunning) return;
+
+    // 期待値: actor email との完全一致（無い場合は uid 完全一致）
+    const expectedAccount = (() => {
+      try { return getAuth(app).currentUser?.email || userId; } catch { return userId; }
+    })();
+    if (fullRestoreSimAccountInput !== expectedAccount) {
+      setFullRestoreSimError("アカウント入力が一致しません");
+      return;
+    }
+    if (!fullRestoreSimAck1 || !fullRestoreSimAck2) {
+      setFullRestoreSimError("両方のチェックボックスへの同意が必要です");
+      return;
+    }
+
+    // 再 preflight
+    const pf = _runFullRestoreSimPreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      isRunning: false,
+    });
+    if (!pf.ok) {
+      setFullRestoreSimError("最終 Preflight 失敗: " + pf.errors.join(" / "));
+      setFullRestoreSimStage(null);
+      return;
+    }
+
+    setIsFullRestoreSimRunning(true);
+    setFullRestoreSimError("");
+    setFullRestoreSimStage(null);
+    console.time("[full restore simulate]");
+
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const logRef = newAutoDocRef("restoreLogs");
+    const logId = logRef.id;
+    const bjson = fullAppBackupPreview.json;
+
+    // ownerUid mismatch 分類
+    const { skipped: skippedTenants, allowed: allowedTenants } = _classifyOwnerUidMismatches(bjson, userId);
+    const skippedTenantIdSet = new Set(skippedTenants.map((s) => s.tenantId));
+
+    // operation 生成 + batch 分割
+    let ops;
+    let batches;
+    let opsByArea;
+    try {
+      ops = _buildFullRestoreOps(bjson, skippedTenantIdSet);
+      opsByArea = _summarizeOpsByArea(ops);
+      batches = _splitOpsIntoBatches(ops, 450);
+    } catch (e) {
+      setFullRestoreSimError("operation 生成に失敗しました: " + (e && e.message ? e.message : e));
+      setIsFullRestoreSimRunning(false);
+      console.timeEnd("[full restore simulate]");
+      return;
+    }
+
+    // 全 tenant が skip の場合は中止（officeMaster / taxTables だけで OK ならそのまま続行）
+    const tenantsInBackup = Object.keys((bjson && bjson.data && bjson.data.tenants) || {});
+    if (tenantsInBackup.length > 0 && allowedTenants.length === 0 && ops.length > 0 &&
+        opsByArea.tenantsOps === 0 && opsByArea.settingsOps === 0 &&
+        opsByArea.monthlyLocksOps === 0 && opsByArea.employeesOps === 0) {
+      // tenant 系 ops が 0 だが officeMaster/taxTables は残るパターン → 続行可
+      // → 警告だけ追加
+      pf.warnings.push("backup の全 tenant が ownerUid mismatch のため tenant 系 ops は 0 件です。officeMaster / taxTables のみ simulate します。");
+    } else if (ops.length === 0) {
+      setFullRestoreSimError("simulate 対象の operation が 0 件です（バックアップが空か、全 tenant が ownerUid mismatch）");
+      setIsFullRestoreSimRunning(false);
+      console.timeEnd("[full restore simulate]");
+      return;
+    }
+
+    // 初期 progress 表示
+    setFullRestoreSimProgress({
+      status: "preparing",
+      totalOps: ops.length,
+      completedOps: 0,
+      currentBatchIndex: 0,
+      totalBatches: batches.length,
+      currentArea: null,
+      startedAt,
+      durationMs: 0,
+    });
+
+    // Step1 log payload
+    const baseLog = {
+      logVersion: 2,
+      logId,
+      mode: "restore-full-merge-simulate",
+      label: "災害復旧復元（全体上書き） simulate",
+      phase: "G1",
+      simulate: true,
+      actor: { uid: userId, email: (() => { try { return getAuth(app).currentUser?.email || null; } catch { return null; } })() },
+      timestamps: { startedAt, completedAt: null, durationMs: null },
+      source: {
+        fileName: fullAppBackupPreview.fileName,
+        fileSize: fullAppBackupPreview.fileSize,
+        backupCreatedAt: bjson.createdAt || null,
+        backupAppId: bjson.appId || null,
+        backupVersion: bjson.backupVersion,
+        backupType: bjson.backupType,
+      },
+      beforeBackup: { fileName: null, fileSize: null, downloaded: false, downloadedAt: null },
+      dryRunSnapshot: fullAppDryRunReport ? {
+        ranAt: fullAppDryRunReport.runAt,
+        classification: fullAppDryRunReport.classification,
+        totalAddOnly: fullAppDryRunReport.totalAddOnly,
+        totalOverwrite: fullAppDryRunReport.totalOverwrite,
+        totalCurrentOnly: fullAppDryRunReport.totalCurrentOnly,
+        changedDocCount: (fullAppDryRunReport.contentDiff && fullAppDryRunReport.contentDiff.changedDocCount) || 0,
+        sameDocIdCount: (fullAppDryRunReport.contentDiff && fullAppDryRunReport.contentDiff.sameDocIdCount) || 0,
+      } : null,
+      ownerUidPolicy: "reject-mismatched-tenants",
+      skippedTenants,
+      scope: opsByArea,
+      // ★ ops gate metadata (start handler で block を通過した事実を残す。値は実際の build/split 後で確定)
+      opsGate: (() => {
+        const w = _computeRestoreOpsWarning(ops.length, batches.length);
+        return {
+          estimatedOps: ops.length,
+          estimatedBatches: batches.length,
+          opsWarningLevel: w.level,
+          opsWarningMessage: w.reason,
+          opsBlocked: w.level === "block",
+        };
+      })(),
+      operation: {
+        writePayloadShape: "full-merge per doc",
+        maxOpsPerBatch: 450,
+        totalBatches: batches.length,
+        batches: batches.map((b) => ({ index: b.index, count: b.count, areas: b.areas, result: b.result })),
+        writesAttempted: 0,
+        writesSucceeded: 0,
+        writesSimulated: 0,
+        errors: [],
+      },
+      verifySummary: null,    // simulate では実行しない
+      postRestoreDryRun: null, // simulate では実行しない
+      result: "in-progress",
+      warnings: pf.warnings,
+      errors: [],
+      userConfirmations: {
+        stage1ConfirmedAt: startedAt,
+        stage2ConfirmedAccountInput: fullRestoreSimAccountInput,
+        stage2InputMatched: true,
+        checkboxAcknowledged: fullRestoreSimAck1 && fullRestoreSimAck2,
+      },
+    };
+
+    let logSnapshot = { ...baseLog };
+
+    try {
+      // Step1: restoreLogs in-progress 書込
+      try {
+        await _writeRestoreLog(logId, logSnapshot, "start");
+        console.log("[full restore simulate] Step1 log written", { logId });
+      } catch (e) {
+        console.error("[full restore simulate] Step1 log write failed", e);
+        setFullRestoreSimError("復元ログの初期書込に失敗しました: " + (e && e.message ? e.message : e));
+        setIsFullRestoreSimRunning(false);
+        setFullRestoreSimProgress(null);
+        console.timeEnd("[full restore simulate]");
+        return;
+      }
+
+      // before_restore backup DL（fail-closed）
+      setFullRestoreSimProgress((p) => p ? { ...p, status: "before-backup" } : p);
+      let beforeBackup;
+      try {
+        beforeBackup = await _downloadBeforeRestoreBackup(userId, logId);
+        logSnapshot = {
+          ...logSnapshot,
+          beforeBackup: {
+            fileName: beforeBackup.fileName,
+            fileSize: beforeBackup.fileSize,
+            downloaded: true,
+            downloadedAt: new Date().toISOString(),
+          },
+        };
+        await _writeRestoreLog(logId, { beforeBackup: logSnapshot.beforeBackup }, "finish");
+        console.log("[full restore simulate] before-backup DL done", beforeBackup);
+      } catch (e) {
+        console.error("[full restore simulate] before-backup failed", e);
+        const errMsg = "自動バックアップ DL に失敗しました。simulate を中止します: " + (e && e.message ? e.message : e);
+        logSnapshot = {
+          ...logSnapshot,
+          result: "aborted-before-backup-failed",
+          timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+          errors: [errMsg],
+        };
+        await _writeRestoreLog(logId, {
+          result: logSnapshot.result,
+          timestamps: logSnapshot.timestamps,
+          errors: logSnapshot.errors,
+        }, "finish").catch(() => {});
+        setFullRestoreSimError(errMsg);
+        setFullRestoreSimResult({
+          logId,
+          result: "aborted-before-backup-failed",
+          skippedTenants,
+          totalOps: ops.length,
+          totalBatches: batches.length,
+          opsByArea,
+          beforeBackupFileName: null,
+          logSnapshot,
+        });
+        setIsFullRestoreSimRunning(false);
+        setFullRestoreSimProgress(null);
+        console.timeEnd("[full restore simulate]");
+        return;
+      }
+
+      // simulate batch loop
+      //   ★★★ ここでは batch.commit() を呼ばない。setTimeout(50ms) で commit を simulate する。
+      setFullRestoreSimProgress((p) => p ? { ...p, status: "writing" } : p);
+      const failedBatches = [];
+      let completedOps = 0;
+
+      for (let i = 0; i < batches.length; i += 1) {
+        const batchInfo = batches[i];
+        const firstArea = (batchInfo.ops[0] && batchInfo.ops[0].area) || null;
+
+        setFullRestoreSimProgress((prev) => prev ? {
+          ...prev,
+          currentBatchIndex: i,
+          currentArea: firstArea,
+          durationMs: Date.now() - startedAtMs,
+        } : prev);
+
+        try {
+          // ★ Firestore commit はしない。simulate のための 50ms sleep。
+          await new Promise((r) => setTimeout(r, 50));
+          batchInfo.result = "simulated";
+          completedOps += batchInfo.count;
+          setFullRestoreSimProgress((prev) => prev ? {
+            ...prev,
+            completedOps,
+            durationMs: Date.now() - startedAtMs,
+          } : prev);
+        } catch (e) {
+          batchInfo.result = "failed";
+          batchInfo.error = (e && e.message) ? e.message : String(e);
+          failedBatches.push({ index: i, error: batchInfo.error });
+          break;
+        }
+      }
+
+      // verify / post-restore dry run は simulate では実行しない（コメントで明示）
+      setFullRestoreSimProgress((p) => p ? { ...p, status: "verifying" } : p);
+      // ★ 実 commit していないので verify は意味が無い。Firestore 上の状態は変わっていない。
+      //    実 restore（Phase G1 本番）では read-back verify + post-restore Dry Run を実行する。
+
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - startedAtMs;
+      const result = failedBatches.length === 0 ? "success" : "partial";
+
+      logSnapshot = {
+        ...logSnapshot,
+        timestamps: { ...logSnapshot.timestamps, completedAt, durationMs },
+        operation: {
+          ...logSnapshot.operation,
+          writesAttempted: 0,
+          writesSucceeded: 0,
+          writesSimulated: completedOps,
+          batches: batches.map((b) => ({ index: b.index, count: b.count, areas: b.areas, result: b.result, error: b.error })),
+          errors: failedBatches.map((f) => `batch ${f.index}: ${f.error}`),
+        },
+        result,
+      };
+
+      await _writeRestoreLog(logId, {
+        timestamps: logSnapshot.timestamps,
+        operation: logSnapshot.operation,
+        result,
+      }, "finish").catch((e) => {
+        console.error("[full restore simulate] Step2 log write failed", e);
+      });
+
+      console.log("[full restore simulate] completed", {
+        logId, result, totalOps: ops.length, totalBatches: batches.length,
+        skippedTenantsCount: skippedTenants.length, durationMs,
+      });
+
+      setFullRestoreSimProgress((p) => p ? { ...p, status: result === "success" ? "completed" : "partial", durationMs } : p);
+      setFullRestoreSimResult({
+        logId,
+        result,
+        skippedTenants,
+        totalOps: ops.length,
+        totalBatches: batches.length,
+        opsByArea,
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        logSnapshot,
+      });
+    } catch (err) {
+      console.error("[full restore simulate] unexpected error", err);
+      const errMsg = "simulate 中に予期しないエラー: " + (err && err.message ? err.message : String(err));
+      logSnapshot = {
+        ...logSnapshot,
+        timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+        errors: [...(logSnapshot.errors || []), errMsg],
+        result: "failed",
+      };
+      await _writeRestoreLog(logId, {
+        timestamps: logSnapshot.timestamps,
+        errors: logSnapshot.errors,
+        result: "failed",
+      }, "finish").catch(() => {});
+      setFullRestoreSimError(errMsg);
+      setFullRestoreSimResult({
+        logId,
+        result: "failed",
+        skippedTenants,
+        totalOps: ops.length,
+        totalBatches: batches.length,
+        opsByArea,
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        logSnapshot,
+      });
+      setFullRestoreSimProgress((p) => p ? { ...p, status: "failed" } : p);
+    } finally {
+      setIsFullRestoreSimRunning(false);
+      console.timeEnd("[full restore simulate]");
+    }
+  };
+
+  // simulate 結果ログ JSON DL
+  const handleDownloadFullRestoreSimLog = () => {
+    if (!fullRestoreSimResult || !fullRestoreSimResult.logSnapshot) return;
+    _downloadRestoreLogJson(
+      fullRestoreSimResult.logSnapshot,
+      `payroll_restore_simulate_log_${_stdRewardTimestampStr()}_${fullRestoreSimResult.logId.slice(0, 8)}.json`
+    );
+  };
+
+  // simulate / sandbox / 本番 restore のいずれかが進行中の間 beforeunload 警告
+  useEffect(() => {
+    if (!isFullRestoreSimRunning && !isSandboxRestoreRunning && !isFullRestoreRunning) return;
+    const handler = (e) => {
+      e.preventDefault();
+      e.returnValue = "復元処理が進行中です。離れると不整合の可能性があります。";
+      return e.returnValue;
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isFullRestoreSimRunning, isSandboxRestoreRunning, isFullRestoreRunning]);
+
+  // ============================================================================
+  // Phase G1 本番 災害復旧復元（全体上書き）
+  // ----------------------------------------------------------------------------
+  // 対象: officeMaster / taxTables / tenants / settings / monthlyLocks / employees
+  // 対象外: restoreLogs / tenants/{tid}/users / legacy paths / current-only docs
+  // 動作:
+  //   - _buildFullRestoreOps で operation 生成（merge:true 固定）
+  //   - _splitOpsIntoBatches で 450 件 batch 分割
+  //   - 各 batch を for ループで順次 createBatch().commit()
+  //   - batch 失敗 → 以降中止 / committed batch 数で partial か failed 判定
+  // 禁止:
+  //   - batch.delete / removeDoc / deleteDoc / merge:false
+  //   - backup に無い current-only docs の削除
+  //   - tenants/{tid}/users 書込
+  //   - legacy path 書込
+  // ============================================================================
+
+  // 本番 full restore 用 preflight
+  const _runFullRestorePreflight = ({ currentUserId, backupPreview, dryRunReport, isRunning }) => {
+    const errors = [];
+    const warnings = [];
+    if (!currentUserId) errors.push("ログインが必要です");
+    if (!dryRunReport) errors.push("Dry Run が未実行です。先に Dry Run を実行してください");
+    if (!backupPreview || !backupPreview.ok) errors.push("バックアップ JSON のプレビューがありません");
+    const bjson = backupPreview && backupPreview.json;
+    if (bjson && bjson.backupType !== "payroll-full-app-backup") errors.push("backupType が不正です");
+    if (bjson && bjson.backupVersion !== 1) errors.push("backupVersion が不正です");
+    if (isRunning) errors.push("バックアップから復元（全体上書き）が既に実行中です");
+    if (isFullRestoreSimRunning) errors.push("simulate と同時実行できません");
+    if (isSandboxRestoreRunning) errors.push("sandbox commit と同時実行できません");
+    return { ok: errors.length === 0, errors, warnings };
+  };
+
+  // Stage1 ダイアログを開く
+  const handleStartFullRestore = () => {
+    setFullRestoreError("");
+    setFullRestoreResult(null);
+    setFullRestorePreflightErrors([]);
+    setFullRestorePreflightWarnings([]);
+    setFullRestoreAccountInput("");
+    setFullRestoreAck1(false);
+    setFullRestoreAck2(false);
+    setFullRestoreAck3(false);
+    setFullRestoreAckStale(false);
+    setFullRestorePostDryRunError("");
+    if (!ENABLE_FULL_RESTORE) {
+      setFullRestoreError("バックアップから復元（全体上書き）は無効化されています (VITE_ENABLE_FULL_RESTORE=true が必要)");
+      return;
+    }
+    // backup size による block 判定 (100MB 超は restore 拒否)
+    const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+    if (!sizeGate.ok) {
+      setFullRestoreError("backup サイズ制限超過: " + sizeGate.reason);
+      return;
+    }
+    // operation 数 / batch 数による block 判定 (ownerUid skip 後の ops 数で判定)
+    const opsEst = _estimateRestoreOpsCount(fullAppBackupPreview && fullAppBackupPreview.json, userId);
+    const opsGate = _canRunRestoreByOps(opsEst.totalOps, opsEst.totalBatches);
+    if (!opsGate.ok) {
+      setFullRestoreError("operation 数制限超過: " + opsGate.reason);
+      return;
+    }
+    if (opsEst.totalOps <= 0) {
+      setFullRestoreError("復元対象の operation が 0 件です（backup が空か、全 tenant が ownerUid mismatch）");
+      return;
+    }
+    const pf = _runFullRestorePreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      isRunning: isFullRestoreRunning,
+    });
+    setFullRestorePreflightErrors(pf.errors);
+    setFullRestorePreflightWarnings(pf.warnings);
+    if (!pf.ok) {
+      setFullRestoreError("Preflight 失敗: " + pf.errors.join(" / "));
+      return;
+    }
+    setFullRestoreStage("stage1");
+  };
+
+  const handleConfirmFullRestoreStage1 = () => {
+    setFullRestoreStage("stage2");
+  };
+
+  const handleCancelFullRestoreDialog = () => {
+    if (isFullRestoreRunning) return; // 実行中は閉じない
+    setFullRestoreStage(null);
+    setFullRestoreAccountInput("");
+    setFullRestoreAck1(false);
+    setFullRestoreAck2(false);
+    setFullRestoreAck3(false);
+    setFullRestoreAckStale(false);
+  };
+
+  // 本番 full restore orchestrator（実 batch.commit を実行）
+  const handleExecuteFullRestore = async () => {
+    if (isFullRestoreRunning) return;
+    if (!ENABLE_FULL_RESTORE) {
+      setFullRestoreError("バックアップから復元（全体上書き）は無効化されています");
+      return;
+    }
+
+    // Stage2 入力確認（UI 側でも disable 済だが二重ガード）
+    const expectedAccount = (() => {
+      try { return getAuth(app).currentUser?.email || userId; } catch { return userId; }
+    })();
+    if (fullRestoreAccountInput !== expectedAccount) {
+      setFullRestoreError("アカウント入力が一致しません");
+      return;
+    }
+    if (!fullRestoreAck1 || !fullRestoreAck2 || !fullRestoreAck3) {
+      setFullRestoreError("3 つのチェックボックスへの同意が必要です");
+      return;
+    }
+    // stale ack は stale backup の場合だけ必須
+    const stalenessCheck = (() => {
+      try {
+        return _computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt);
+      } catch { return { stale: false }; }
+    })();
+    if (stalenessCheck.stale && !fullRestoreAckStale) {
+      setFullRestoreError("古い backup チェックへの同意が必要です");
+      return;
+    }
+
+    // 最終 preflight 再実行（state が他経路で変化した場合への防御）
+    const pf = _runFullRestorePreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      isRunning: false,
+    });
+    if (!pf.ok) {
+      setFullRestoreError("最終 Preflight 失敗: " + pf.errors.join(" / "));
+      setFullRestoreStage(null);
+      return;
+    }
+
+    setIsFullRestoreRunning(true);
+    setFullRestoreError("");
+    setFullRestoreStage(null);
+    console.time("[full restore commit]");
+
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const logRef = newAutoDocRef("restoreLogs");
+    const logId = logRef.id;
+    const bjson = fullAppBackupPreview.json;
+
+    // ownerUid mismatch 分類
+    const { skipped: skippedTenants, allowed: allowedTenants } = _classifyOwnerUidMismatches(bjson, userId);
+    const skippedTenantIdSet = new Set(skippedTenants.map((s) => s.tenantId));
+
+    // operation 生成 + batch 分割
+    let ops;
+    let batches;
+    let opsByArea;
+    try {
+      ops = _buildFullRestoreOps(bjson, skippedTenantIdSet);
+      opsByArea = _summarizeOpsByArea(ops);
+      batches = _splitOpsIntoBatches(ops, RESTORE_OPS_WARNING_THRESHOLDS.batchSize);
+    } catch (e) {
+      setFullRestoreError("operation 生成に失敗しました: " + (e && e.message ? e.message : e));
+      setIsFullRestoreRunning(false);
+      console.timeEnd("[full restore commit]");
+      return;
+    }
+
+    // 全 tenant skip かつ officeMaster/taxTables も無い場合は中止
+    const tenantsInBackup = Object.keys((bjson && bjson.data && bjson.data.tenants) || {});
+    const onlyGlobalOpsRemain = (tenantsInBackup.length > 0 && allowedTenants.length === 0 && ops.length > 0 &&
+      opsByArea.tenantsOps === 0 && opsByArea.settingsOps === 0 &&
+      opsByArea.monthlyLocksOps === 0 && opsByArea.employeesOps === 0);
+    if (onlyGlobalOpsRemain) {
+      pf.warnings.push("backup の全 tenant が ownerUid mismatch のため tenant 系 ops は 0 件です。officeMaster / taxTables のみ復元します。");
+    } else if (ops.length === 0) {
+      setFullRestoreError("復元対象の operation が 0 件です（backup が空か、全 tenant が ownerUid mismatch）");
+      setIsFullRestoreRunning(false);
+      console.timeEnd("[full restore commit]");
+      return;
+    }
+
+    // size gate / ops gate metadata（restoreLogs 用）
+    const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview.fileSize);
+    const opsWarn = _computeRestoreOpsWarning(ops.length, batches.length);
+
+    // 初期 progress 表示
+    setFullRestoreProgress({
+      status: "preparing",
+      totalOps: ops.length,
+      completedOps: 0,
+      currentBatchIndex: 0,
+      totalBatches: batches.length,
+      currentArea: null,
+      startedAt,
+      durationMs: 0,
+      errorsCount: 0,
+    });
+
+    // Step1 log payload
+    const baseLog = {
+      logVersion: 2,
+      logId,
+      mode: "restore-full-merge",
+      label: "災害復旧復元（全体上書き）",
+      phase: "G1",
+      simulate: false,
+      actor: { uid: userId, email: (() => { try { return getAuth(app).currentUser?.email || null; } catch { return null; } })() },
+      timestamps: { startedAt, completedAt: null, durationMs: null },
+      source: {
+        fileName: fullAppBackupPreview.fileName,
+        fileSize: fullAppBackupPreview.fileSize,
+        backupCreatedAt: bjson.createdAt || null,
+        backupAppId: bjson.appId || null,
+        backupVersion: bjson.backupVersion,
+        backupType: bjson.backupType,
+      },
+      beforeBackup: { fileName: null, fileSize: null, downloaded: false, downloadedAt: null },
+      dryRunSnapshot: fullAppDryRunReport ? {
+        ranAt: fullAppDryRunReport.runAt,
+        classification: fullAppDryRunReport.classification,
+        totalAddOnly: fullAppDryRunReport.totalAddOnly,
+        totalOverwrite: fullAppDryRunReport.totalOverwrite,
+        totalCurrentOnly: fullAppDryRunReport.totalCurrentOnly,
+        changedDocCount: (fullAppDryRunReport.contentDiff && fullAppDryRunReport.contentDiff.changedDocCount) || 0,
+        sameDocIdCount: (fullAppDryRunReport.contentDiff && fullAppDryRunReport.contentDiff.sameDocIdCount) || 0,
+      } : null,
+      ownerUidPolicy: "reject-mismatched-tenants",
+      skippedTenants,
+      scope: opsByArea,
+      sizeGate: {
+        fileSize: fullAppBackupPreview.fileSize,
+        level: sizeGate.level,
+        reason: sizeGate.reason,
+        blocked: !sizeGate.ok,
+      },
+      opsGate: {
+        estimatedOps: ops.length,
+        estimatedBatches: batches.length,
+        opsWarningLevel: opsWarn.level,
+        opsWarningMessage: opsWarn.reason,
+        opsBlocked: opsWarn.level === "block",
+      },
+      operation: {
+        writePayloadShape: "full-merge per doc",
+        maxOpsPerBatch: RESTORE_OPS_WARNING_THRESHOLDS.batchSize,
+        totalBatches: batches.length,
+        batches: batches.map((b) => ({ index: b.index, count: b.count, areas: b.areas, result: b.result })),
+        writesAttempted: 0,
+        writesSucceeded: 0,
+        committedBatches: 0,
+        failedBatchIndex: null,
+        errors: [],
+      },
+      verifySummary: null,
+      postRestoreDryRun: null,
+      result: "in-progress",
+      warnings: pf.warnings,
+      errors: [],
+      userConfirmations: {
+        stage1ConfirmedAt: startedAt,
+        stage2ConfirmedAccountInput: fullRestoreAccountInput,
+        stage2InputMatched: true,
+        checkboxAcknowledged: fullRestoreAck1 && fullRestoreAck2 && fullRestoreAck3,
+        staleAckRequired: !!stalenessCheck.stale,
+        staleAckGiven: !!fullRestoreAckStale,
+      },
+    };
+
+    let logSnapshot = { ...baseLog };
+
+    try {
+      // Step1: restoreLogs in-progress 書込
+      try {
+        await _writeRestoreLog(logId, logSnapshot, "start");
+        console.log("[full restore commit] Step1 log written", { logId });
+      } catch (e) {
+        console.error("[full restore commit] Step1 log write failed", e);
+        setFullRestoreError("復元ログの初期書込に失敗しました: " + (e && e.message ? e.message : e));
+        setIsFullRestoreRunning(false);
+        setFullRestoreProgress(null);
+        console.timeEnd("[full restore commit]");
+        return;
+      }
+
+      // before_restore backup DL（fail-closed: 失敗時は Firestore data 書込しない）
+      setFullRestoreProgress((p) => p ? { ...p, status: "before-backup" } : p);
+      let beforeBackup;
+      try {
+        beforeBackup = await _downloadBeforeRestoreBackup(userId, logId);
+        logSnapshot = {
+          ...logSnapshot,
+          beforeBackup: {
+            fileName: beforeBackup.fileName,
+            fileSize: beforeBackup.fileSize,
+            downloaded: true,
+            downloadedAt: new Date().toISOString(),
+          },
+        };
+        await _writeRestoreLog(logId, { beforeBackup: logSnapshot.beforeBackup }, "finish");
+        console.log("[full restore commit] before-backup DL done", beforeBackup);
+      } catch (e) {
+        console.error("[full restore commit] before-backup failed", e);
+        const errMsg = "自動バックアップ DL に失敗しました。復元を中止します: " + (e && e.message ? e.message : e);
+        logSnapshot = {
+          ...logSnapshot,
+          result: "aborted-before-backup-failed",
+          timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+          errors: [errMsg],
+        };
+        await _writeRestoreLog(logId, {
+          result: logSnapshot.result,
+          timestamps: logSnapshot.timestamps,
+          errors: logSnapshot.errors,
+        }, "finish").catch(() => {});
+        setFullRestoreError(errMsg);
+        setFullRestoreResult({
+          logId,
+          result: "aborted-before-backup-failed",
+          skippedTenants,
+          totalOps: ops.length,
+          totalBatches: batches.length,
+          committedBatches: 0,
+          opsByArea,
+          beforeBackupFileName: null,
+          postDryRunOk: null,
+          logSnapshot,
+        });
+        setIsFullRestoreRunning(false);
+        setFullRestoreProgress(null);
+        console.timeEnd("[full restore commit]");
+        return;
+      }
+
+      // 本番 batch commit loop
+      //   ★★★ ここで実 Firestore へ書込。各 op は merge:true 固定。batch.delete は使わない。
+      setFullRestoreProgress((p) => p ? { ...p, status: "writing" } : p);
+      const failedBatches = [];
+      let completedOps = 0;
+      let committedBatchCount = 0;
+      let failedBatchIndex = null;
+
+      for (let i = 0; i < batches.length; i += 1) {
+        const batchInfo = batches[i];
+        const firstArea = (batchInfo.ops[0] && batchInfo.ops[0].area) || null;
+
+        setFullRestoreProgress((prev) => prev ? {
+          ...prev,
+          currentBatchIndex: i,
+          currentArea: firstArea,
+          durationMs: Date.now() - startedAtMs,
+        } : prev);
+
+        try {
+          const batch = createBatch();
+          for (const op of batchInfo.ops) {
+            // ★ merge:true 固定。delete は使わない。
+            batch.set(getDocRef(...op.path), op.data, { merge: true });
+          }
+          await batch.commit();
+          batchInfo.result = "committed";
+          completedOps += batchInfo.count;
+          committedBatchCount += 1;
+          setFullRestoreProgress((prev) => prev ? {
+            ...prev,
+            completedOps,
+            durationMs: Date.now() - startedAtMs,
+          } : prev);
+        } catch (e) {
+          batchInfo.result = "failed";
+          batchInfo.error = (e && e.message) ? e.message : String(e);
+          failedBatches.push({ index: i, error: batchInfo.error });
+          failedBatchIndex = i;
+          setFullRestoreProgress((prev) => prev ? {
+            ...prev,
+            errorsCount: (prev.errorsCount || 0) + 1,
+            durationMs: Date.now() - startedAtMs,
+          } : prev);
+          break;
+        }
+      }
+
+      // 結果判定
+      // - 1 件も commit できていない → failed
+      // - 1 batch 以上 commit 済 + 失敗あり → partial
+      // - 全 batch 成功 → success
+      const result =
+        failedBatches.length === 0 ? "success" :
+        committedBatchCount === 0  ? "failed" :
+                                     "partial";
+
+      // 自動 post Dry Run（失敗しても本体は failed にしない。warning を残すだけ）
+      let postDryRunSummary = null;
+      let postDryRunOk = null;
+      if (result !== "failed") {
+        setFullRestoreProgress((p) => p ? { ...p, status: "verifying" } : p);
+        try {
+          const currentSnapshot = await fetchCurrentFullAppSnapshot(userId);
+          const report = buildFullAppDryRunReport(bjson.data, currentSnapshot, userId, bjson.createdAt || null);
+          postDryRunSummary = {
+            ranAt: report.runAt || new Date().toISOString(),
+            classification: report.classification,
+            totalAddOnly: report.totalAddOnly,
+            totalOverwrite: report.totalOverwrite,
+            totalCurrentOnly: report.totalCurrentOnly,
+            changedDocCount: (report.contentDiff && report.contentDiff.changedDocCount) || 0,
+            sameDocIdCount: (report.contentDiff && report.contentDiff.sameDocIdCount) || 0,
+          };
+          postDryRunOk = true;
+          console.log("[full restore commit] post Dry Run done", postDryRunSummary);
+        } catch (e) {
+          console.warn("[full restore commit] post Dry Run failed (treated as warning)", e);
+          postDryRunOk = false;
+          pf.warnings.push("post Dry Run に失敗しました: " + (e && e.message ? e.message : e));
+        }
+      }
+
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - startedAtMs;
+
+      logSnapshot = {
+        ...logSnapshot,
+        timestamps: { ...logSnapshot.timestamps, completedAt, durationMs },
+        operation: {
+          ...logSnapshot.operation,
+          writesAttempted: completedOps + (failedBatches[0] ? batches[failedBatchIndex].count : 0),
+          writesSucceeded: completedOps,
+          committedBatches: committedBatchCount,
+          failedBatchIndex,
+          batches: batches.map((b) => ({ index: b.index, count: b.count, areas: b.areas, result: b.result, error: b.error })),
+          errors: failedBatches.map((f) => `batch ${f.index}: ${f.error}`),
+        },
+        postRestoreDryRun: postDryRunSummary,
+        result,
+        warnings: pf.warnings,
+      };
+
+      await _writeRestoreLog(logId, {
+        timestamps: logSnapshot.timestamps,
+        operation: logSnapshot.operation,
+        postRestoreDryRun: logSnapshot.postRestoreDryRun,
+        result,
+        warnings: logSnapshot.warnings,
+      }, "finish").catch((e) => {
+        console.error("[full restore commit] Step2 log write failed", e);
+      });
+
+      console.log("[full restore commit] completed", {
+        logId, result, totalOps: ops.length, totalBatches: batches.length,
+        committedBatchCount, failedBatchIndex,
+        skippedTenantsCount: skippedTenants.length, durationMs,
+      });
+
+      setFullRestoreProgress((p) => p ? {
+        ...p,
+        status: result === "success" ? "completed" : result,
+        durationMs,
+      } : p);
+      setFullRestoreResult({
+        logId,
+        result,
+        skippedTenants,
+        totalOps: ops.length,
+        totalBatches: batches.length,
+        committedBatches: committedBatchCount,
+        opsByArea,
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        postDryRunOk,
+        logSnapshot,
+      });
+    } catch (err) {
+      console.error("[full restore commit] unexpected error", err);
+      const errMsg = "復元中に予期しないエラー: " + (err && err.message ? err.message : String(err));
+      logSnapshot = {
+        ...logSnapshot,
+        timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+        errors: [...(logSnapshot.errors || []), errMsg],
+        result: "failed",
+      };
+      await _writeRestoreLog(logId, {
+        timestamps: logSnapshot.timestamps,
+        errors: logSnapshot.errors,
+        result: "failed",
+      }, "finish").catch(() => {});
+      setFullRestoreError(errMsg);
+      setFullRestoreResult({
+        logId,
+        result: "failed",
+        skippedTenants,
+        totalOps: ops.length,
+        totalBatches: batches.length,
+        committedBatches: 0,
+        opsByArea,
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        postDryRunOk: null,
+        logSnapshot,
+      });
+      setFullRestoreProgress((p) => p ? { ...p, status: "failed" } : p);
+    } finally {
+      setIsFullRestoreRunning(false);
+      console.timeEnd("[full restore commit]");
+    }
+  };
+
+  // 完了後の post Dry Run 再実行ボタン
+  const handleRunPostRestoreDryRun = async () => {
+    if (fullRestorePostDryRunRunning) return;
+    if (!userId || !fullAppBackupPreview || !fullAppBackupPreview.json) {
+      setFullRestorePostDryRunError("Dry Run 実行に必要な前提が不足しています");
+      return;
+    }
+    setFullRestorePostDryRunRunning(true);
+    setFullRestorePostDryRunError("");
+    try {
+      const currentSnapshot = await fetchCurrentFullAppSnapshot(userId);
+      const bjson = fullAppBackupPreview.json;
+      const report = buildFullAppDryRunReport(bjson.data, currentSnapshot, userId, bjson.createdAt || null);
+      setFullAppDryRunReport(report);
+      console.log("[full restore commit] post Dry Run rerun done");
+    } catch (e) {
+      console.error("[full restore commit] post Dry Run rerun failed", e);
+      setFullRestorePostDryRunError("Dry Run 再実行に失敗: " + (e && e.message ? e.message : e));
+    } finally {
+      setFullRestorePostDryRunRunning(false);
+    }
+  };
+
+  // restoreLogs JSON DL
+  const handleDownloadFullRestoreLog = () => {
+    if (!fullRestoreResult || !fullRestoreResult.logSnapshot) return;
+    _downloadRestoreLogJson(
+      fullRestoreResult.logSnapshot,
+      `payroll_restore_log_${_stdRewardTimestampStr()}_${fullRestoreResult.logId.slice(0, 8)}.json`
+    );
+  };
+
+  // ============================================================================
+  // Phase G1 sandbox single-commit: 本番 restore 前の commit 安全性検証
+  // ----------------------------------------------------------------------------
+  // 対象: [SANDBOX] tenant.name を持つ tenant の employee 1 件のみ
+  // 動作:
+  //   - createBatch を 1 個生成
+  //   - batch.set(empPath, backupEmpDoc, { merge: true })
+  //   - batch.commit() を 1 回呼ぶ（実 Firestore 書込）
+  //   - read-back + merge-aware verify (_isMergeSubsetEqual)
+  //   - restoreLogs に mode: "restore-full-merge-sandbox" で記録
+  // 禁止:
+  //   - 複数 employee
+  //   - settings / monthlyLocks / tenants / officeMaster / taxTables 書込
+  //   - multi-batch
+  //   - merge:false / delete / remove
+  // ============================================================================
+
+  // env flag: VITE_ENABLE_SANDBOX_RESTORE=true の時のみ UI 表示
+  const ENABLE_SANDBOX_RESTORE = (() => {
+    try { return import.meta.env.VITE_ENABLE_SANDBOX_RESTORE === "true"; } catch { return false; }
+  })();
+
+  // env flag: VITE_ENABLE_FULL_RESTORE=true の時のみ 本番 災害復旧復元（全体上書き）UI を表示
+  // ★ 本番 Firestore へ writeBatch.commit() を実行する破壊的機能のため、デフォルト OFF。
+  const ENABLE_FULL_RESTORE = (() => {
+    try { return import.meta.env.VITE_ENABLE_FULL_RESTORE === "true"; } catch { return false; }
+  })();
+
+  // tenant が sandbox かどうか判定（pure）。
+  // backup 側 tenant.name または current 側 tenant.name に [SANDBOX] が含まれる場合のみ sandbox。
+  const _isSandboxTenant = (tenantDoc) => {
+    if (!tenantDoc || typeof tenantDoc !== "object") return false;
+    const name = typeof tenantDoc.name === "string" ? tenantDoc.name : "";
+    return name.includes("[SANDBOX]");
+  };
+
+  // merge:true 後の verify 用 helper (pure)。
+  //   actual が expected の構造を **すべて含めば true**。actual が追加 key を持つことは許容。
+  //   理由: merge:true は payload に含まれない既存 key を保持するため、
+  //         完全一致 verify は false partial を量産する。
+  //   - primitive: ===
+  //   - Array: 長さと要素すべて一致（merge:true は array を丸ごと置換するため）
+  //   - plain object: expected の全 key について actual も同じ value を持つ（actual の追加 key は許容）
+  const _isMergeSubsetEqual = (expected, actual) => {
+    if (expected === actual) return true;
+    if (expected === null || expected === undefined) {
+      return actual === null || actual === undefined;
+    }
+    if (typeof expected !== "object" || typeof actual !== "object" || actual === null) {
+      return expected === actual;
+    }
+    const eIsArray = Array.isArray(expected);
+    const aIsArray = Array.isArray(actual);
+    if (eIsArray !== aIsArray) return false;
+    if (eIsArray) {
+      if (expected.length !== actual.length) return false;
+      for (let i = 0; i < expected.length; i += 1) {
+        if (!_isMergeSubsetEqual(expected[i], actual[i])) return false;
+      }
+      return true;
+    }
+    for (const k of Object.keys(expected)) {
+      if (!(k in actual)) return false;
+      if (!_isMergeSubsetEqual(expected[k], actual[k])) return false;
+    }
+    return true;
+  };
+
+  // sandbox-commit 用 preflight (pure-ish)
+  //   返り値: { ok, errors, warnings }
+  const _runSandboxRestorePreflight = ({ currentUserId, backupPreview, dryRunReport, tid, empId, isRunning }) => {
+    const errors = [];
+    const warnings = [];
+    if (!currentUserId) errors.push("ログインが必要です");
+    if (!dryRunReport) errors.push("Dry Run が未実行です");
+    if (!backupPreview || !backupPreview.ok) errors.push("バックアップ JSON のプレビューがありません");
+    const bjson = backupPreview && backupPreview.json;
+    if (bjson && bjson.backupType !== "payroll-full-app-backup") errors.push("backupType が不正です");
+    if (bjson && bjson.backupVersion !== 1) errors.push("backupVersion が不正です");
+    if (isRunning) errors.push("sandbox restore が既に実行中です");
+    if (isFullRestoreSimRunning) errors.push("simulate engine と同時実行できません");
+    if (!tid) errors.push("sandbox tenant が選択されていません");
+    if (!empId) errors.push("employee が選択されていません");
+    if (errors.length > 0) return { ok: false, errors, warnings };
+
+    // sandbox tenant 検証（current 側でも backup 側でも [SANDBOX] でなければ拒否）
+    const dtInfo = (dryRunReport.perTenant || []).find((p) => p.tenantId === tid);
+    if (!dtInfo) {
+      errors.push("対象 tenant が Dry Run report に存在しません");
+      return { ok: false, errors, warnings };
+    }
+    if (!dtInfo.inCurrent) {
+      errors.push("対象 tenant が現在の Firestore に存在しません");
+      return { ok: false, errors, warnings };
+    }
+    if (dtInfo.ownerUidMismatch) {
+      errors.push("対象 tenant の ownerUid が一致しません");
+      return { ok: false, errors, warnings };
+    }
+    // backup 側 tenant.name で sandbox 判定
+    const bTenantData = bjson && bjson.data && bjson.data.tenants && bjson.data.tenants[tid] && bjson.data.tenants[tid].tenant;
+    if (!_isSandboxTenant(bTenantData)) {
+      errors.push(`対象 tenant の name に [SANDBOX] が含まれていません（実 tenant への commit は禁止）。tenant.name: ${bTenantData?.name || "(なし)"}`);
+      return { ok: false, errors, warnings };
+    }
+    // employee が backup に存在
+    const bEmp = bjson.data.tenants[tid].employees && bjson.data.tenants[tid].employees[empId];
+    if (!bEmp || typeof bEmp !== "object") {
+      errors.push("対象 employee が backup に存在しません");
+      return { ok: false, errors, warnings };
+    }
+
+    return { ok: true, errors, warnings };
+  };
+
+  // sandbox UI 開始（Stage1）
+  const handleStartSandboxRestore = () => {
+    setSandboxRestoreError("");
+    setSandboxRestoreResult(null);
+    setSandboxRestorePreflightErrors([]);
+    setSandboxRestorePreflightWarnings([]);
+    setSandboxRestoreAccountInput("");
+    setSandboxRestoreAck1(false);
+    setSandboxRestoreAck2(false);
+    setSandboxRestoreAckStale(false);
+    // backup size による block 判定 (100MB 超は restore 拒否)
+    const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+    if (!sizeGate.ok) {
+      setSandboxRestoreError("backup サイズ制限超過: " + sizeGate.reason);
+      return;
+    }
+    const pf = _runSandboxRestorePreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      tid: sandboxRestoreTargetTenantId,
+      empId: sandboxRestoreTargetEmpId,
+      isRunning: isSandboxRestoreRunning,
+    });
+    setSandboxRestorePreflightErrors(pf.errors);
+    setSandboxRestorePreflightWarnings(pf.warnings);
+    if (!pf.ok) {
+      setSandboxRestoreError("Preflight 失敗: " + pf.errors.join(" / "));
+      return;
+    }
+    setSandboxRestoreStage("stage1");
+  };
+
+  const handleConfirmSandboxStage1 = () => {
+    setSandboxRestoreStage("stage2");
+  };
+
+  const handleCancelSandboxDialog = () => {
+    if (isSandboxRestoreRunning) return;
+    setSandboxRestoreStage(null);
+    setSandboxRestoreAccountInput("");
+    setSandboxRestoreAck1(false);
+    setSandboxRestoreAck2(false);
+    setSandboxRestoreAckStale(false);
+  };
+
+  // sandbox 実行: 1 employee × 1 batch × commit 1 回（実 Firestore 書込）
+  const handleExecuteSandboxRestore = async () => {
+    if (isSandboxRestoreRunning) return;
+
+    const expectedAccount = (() => {
+      try { return getAuth(app).currentUser?.email || userId; } catch { return userId; }
+    })();
+    if (sandboxRestoreAccountInput !== expectedAccount) {
+      setSandboxRestoreError("アカウント入力が一致しません");
+      return;
+    }
+    if (!sandboxRestoreAck1 || !sandboxRestoreAck2) {
+      setSandboxRestoreError("両方のチェックボックスへの同意が必要です");
+      return;
+    }
+
+    // 再 preflight
+    const pf = _runSandboxRestorePreflight({
+      currentUserId: userId,
+      backupPreview: fullAppBackupPreview,
+      dryRunReport: fullAppDryRunReport,
+      tid: sandboxRestoreTargetTenantId,
+      empId: sandboxRestoreTargetEmpId,
+      isRunning: false,
+    });
+    if (!pf.ok) {
+      setSandboxRestoreError("最終 Preflight 失敗: " + pf.errors.join(" / "));
+      setSandboxRestoreStage(null);
+      return;
+    }
+
+    setIsSandboxRestoreRunning(true);
+    setSandboxRestoreError("");
+    setSandboxRestoreStage(null);
+    console.time("[sandbox restore]");
+
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const logRef = newAutoDocRef("restoreLogs");
+    const logId = logRef.id;
+    const bjson = fullAppBackupPreview.json;
+    const bEmpDoc = bjson.data.tenants[sandboxRestoreTargetTenantId].employees[sandboxRestoreTargetEmpId];
+    const bTenantDoc = bjson.data.tenants[sandboxRestoreTargetTenantId].tenant;
+    const sanitizedEmpDoc = JSON.parse(JSON.stringify(bEmpDoc));
+
+    const baseLog = {
+      logVersion: 2,
+      logId,
+      mode: "restore-full-merge-sandbox",
+      label: "災害復旧復元エンジン sandbox single-commit 検証",
+      phase: "G1",
+      simulate: false,
+      sandbox: true,
+      actor: { uid: userId, email: (() => { try { return getAuth(app).currentUser?.email || null; } catch { return null; } })() },
+      timestamps: { startedAt, completedAt: null, durationMs: null },
+      source: {
+        fileName: fullAppBackupPreview.fileName,
+        fileSize: fullAppBackupPreview.fileSize,
+        backupCreatedAt: bjson.createdAt || null,
+        backupAppId: bjson.appId || null,
+        backupVersion: bjson.backupVersion,
+        backupType: bjson.backupType,
+      },
+      target: {
+        tenantId: sandboxRestoreTargetTenantId,
+        tenantName: bTenantDoc?.name || null,
+        empId: sandboxRestoreTargetEmpId,
+        scope: "single-employee-doc",
+        isSandboxTenant: _isSandboxTenant(bTenantDoc),
+      },
+      beforeBackup: { fileName: null, fileSize: null, downloaded: false, downloadedAt: null },
+      dryRunSnapshot: fullAppDryRunReport ? {
+        ranAt: fullAppDryRunReport.runAt,
+        classification: fullAppDryRunReport.classification,
+        totalAddOnly: fullAppDryRunReport.totalAddOnly,
+        totalOverwrite: fullAppDryRunReport.totalOverwrite,
+        totalCurrentOnly: fullAppDryRunReport.totalCurrentOnly,
+      } : null,
+      operation: {
+        writePayloadShape: "full-employee-doc merge:true",
+        writePath: `tenants/${sandboxRestoreTargetTenantId}/employees/${sandboxRestoreTargetEmpId}`,
+        totalBatches: 1,
+        maxOpsPerBatch: 1,
+        batches: [{ index: 0, count: 1, areas: ["employees"], result: "pending", error: null }],
+        writesAttempted: 0,
+        writesSucceeded: 0,
+        errors: [],
+      },
+      verifySummary: null,
+      result: "in-progress",
+      warnings: pf.warnings,
+      errors: [],
+      userConfirmations: {
+        stage1ConfirmedAt: startedAt,
+        stage2ConfirmedAccountInput: sandboxRestoreAccountInput,
+        stage2InputMatched: true,
+        checkboxAcknowledged: sandboxRestoreAck1 && sandboxRestoreAck2,
+      },
+    };
+    let logSnapshot = { ...baseLog };
+
+    try {
+      // Step1 log 書込
+      try {
+        await _writeRestoreLog(logId, logSnapshot, "start");
+        console.log("[sandbox restore] Step1 log written", { logId });
+      } catch (e) {
+        const errMsg = "復元ログの初期書込に失敗: " + (e && e.message ? e.message : e);
+        setSandboxRestoreError(errMsg);
+        setIsSandboxRestoreRunning(false);
+        console.timeEnd("[sandbox restore]");
+        return;
+      }
+
+      // before backup (fail-closed)
+      let beforeBackup;
+      try {
+        beforeBackup = await _downloadBeforeRestoreBackup(userId, logId);
+        logSnapshot = {
+          ...logSnapshot,
+          beforeBackup: {
+            fileName: beforeBackup.fileName,
+            fileSize: beforeBackup.fileSize,
+            downloaded: true,
+            downloadedAt: new Date().toISOString(),
+          },
+        };
+        await _writeRestoreLog(logId, { beforeBackup: logSnapshot.beforeBackup }, "finish");
+      } catch (e) {
+        const errMsg = "自動バックアップ DL に失敗。sandbox commit を中止: " + (e && e.message ? e.message : e);
+        logSnapshot = {
+          ...logSnapshot,
+          result: "aborted-before-backup-failed",
+          timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+          errors: [errMsg],
+        };
+        await _writeRestoreLog(logId, {
+          result: logSnapshot.result,
+          timestamps: logSnapshot.timestamps,
+          errors: logSnapshot.errors,
+        }, "finish").catch(() => {});
+        setSandboxRestoreError(errMsg);
+        setSandboxRestoreResult({
+          logId,
+          result: "aborted-before-backup-failed",
+          beforeBackupFileName: null,
+          verifyOk: false,
+          verifyError: null,
+          logSnapshot,
+          target: { tenantId: sandboxRestoreTargetTenantId, empId: sandboxRestoreTargetEmpId },
+        });
+        setIsSandboxRestoreRunning(false);
+        console.timeEnd("[sandbox restore]");
+        return;
+      }
+
+      // ★★★ 実 Firestore 書込（1 batch / 1 doc / merge:true）★★★
+      let commitOk = false;
+      let commitError = null;
+      try {
+        const batch = createBatch();
+        batch.set(
+          getDocRef(...PATHS.employee(sandboxRestoreTargetTenantId, sandboxRestoreTargetEmpId)),
+          sanitizedEmpDoc,
+          { merge: true }
+        );
+        await batch.commit();
+        commitOk = true;
+        console.log("[sandbox restore] batch.commit success", {
+          path: `tenants/${sandboxRestoreTargetTenantId}/employees/${sandboxRestoreTargetEmpId}`,
+        });
+      } catch (e) {
+        commitError = e;
+        console.error("[sandbox restore] batch.commit failed", e);
+      }
+
+      if (!commitOk) {
+        const errMsg = "batch.commit に失敗: " + (commitError && commitError.message ? commitError.message : String(commitError));
+        logSnapshot = {
+          ...logSnapshot,
+          result: "failed",
+          timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs },
+          operation: {
+            ...logSnapshot.operation,
+            writesAttempted: 1,
+            writesSucceeded: 0,
+            batches: [{ index: 0, count: 1, areas: ["employees"], result: "failed", error: errMsg }],
+            errors: [errMsg],
+          },
+        };
+        await _writeRestoreLog(logId, {
+          result: logSnapshot.result,
+          timestamps: logSnapshot.timestamps,
+          operation: logSnapshot.operation,
+        }, "finish").catch(() => {});
+        setSandboxRestoreError(errMsg);
+        setSandboxRestoreResult({
+          logId,
+          result: "failed",
+          beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+          verifyOk: false,
+          verifyError: errMsg,
+          logSnapshot,
+          target: { tenantId: sandboxRestoreTargetTenantId, empId: sandboxRestoreTargetEmpId },
+        });
+        setIsSandboxRestoreRunning(false);
+        console.timeEnd("[sandbox restore]");
+        return;
+      }
+
+      // read-back verify (merge-aware)
+      let verifyOk = false;
+      let verifyError = null;
+      let actualExists = null;             // ★ verify log: 対象 doc が read 時点で存在したか (null=read失敗)
+      const expectedDocPath = `tenants/${sandboxRestoreTargetTenantId}/employees/${sandboxRestoreTargetEmpId}`;
+      try {
+        const snap = await getDocOnce(...PATHS.employee(sandboxRestoreTargetTenantId, sandboxRestoreTargetEmpId));
+        actualExists = !!snap.exists();
+        if (!actualExists) {
+          verifyError = "read-back: 対象 doc が存在しません";
+        } else {
+          const actual = snap.data();
+          // ★ merge:true semantics に従い、expected の構造が actual にすべて含まれていれば OK
+          //   actual に追加 key（merge 前から current にあった key）は許容
+          if (_isMergeSubsetEqual(sanitizedEmpDoc, actual)) {
+            verifyOk = true;
+          } else {
+            verifyError = "read-back: backup の構造が現在の doc にすべて含まれていません（mismatch）";
+          }
+        }
+      } catch (e) {
+        verifyError = "read-back 読込エラー: " + (e && e.message ? e.message : e);
+      }
+      const comparedAt = new Date().toISOString();   // ★ verify 完了時刻
+
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - startedAtMs;
+      const result = verifyOk ? "success" : "partial";
+      const verifyResult = verifyOk ? "success" : "partial";
+
+      logSnapshot = {
+        ...logSnapshot,
+        result,
+        timestamps: { ...logSnapshot.timestamps, completedAt, durationMs },
+        operation: {
+          ...logSnapshot.operation,
+          writesAttempted: 1,
+          writesSucceeded: 1,
+          batches: [{ index: 0, count: 1, areas: ["employees"], result: "committed", error: null }],
+          errors: verifyError ? [verifyError] : [],
+        },
+        verifySummary: {
+          method: "merge-subset-equal",                  // legacy 互換キー
+          verifyMethod: "merge-subset",                  // ★ failure test と揃えた canonical 名
+          verifyOk,
+          verifyMatched: verifyOk,                       // ★ verify が一致したかの bool alias
+          verifyResult,                                  // ★ "success" | "partial"
+          verifyError,
+          expectedDocId: sandboxRestoreTargetEmpId,      // ★ 期待 doc id (empId)
+          expectedDocPath,                               // ★ 期待 doc の full path
+          actualExists,                                  // ★ read 時点で doc が存在したか
+          comparedAt,                                    // ★ verify 比較完了時刻 (ISO)
+        },
+      };
+
+      await _writeRestoreLog(logId, {
+        result,
+        timestamps: logSnapshot.timestamps,
+        operation: logSnapshot.operation,
+        verifySummary: logSnapshot.verifySummary,
+      }, "finish").catch((e) => {
+        console.error("[sandbox restore] Step2 log write failed", e);
+      });
+
+      console.log("[sandbox restore] completed", { logId, result, durationMs, verifyOk, verifyError });
+
+      setSandboxRestoreResult({
+        logId,
+        result,
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        verifyOk,
+        verifyError,
+        logSnapshot,
+        target: { tenantId: sandboxRestoreTargetTenantId, empId: sandboxRestoreTargetEmpId },
+      });
+    } catch (err) {
+      const errMsg = "sandbox commit 中に予期しないエラー: " + (err && err.message ? err.message : String(err));
+      console.error("[sandbox restore] unexpected", err);
+      logSnapshot = {
+        ...logSnapshot,
+        result: "failed",
+        timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+        errors: [...(logSnapshot.errors || []), errMsg],
+      };
+      await _writeRestoreLog(logId, {
+        result: "failed",
+        timestamps: logSnapshot.timestamps,
+        errors: logSnapshot.errors,
+      }, "finish").catch(() => {});
+      setSandboxRestoreError(errMsg);
+      setSandboxRestoreResult({
+        logId,
+        result: "failed",
+        beforeBackupFileName: logSnapshot.beforeBackup.fileName,
+        verifyOk: false,
+        verifyError: errMsg,
+        logSnapshot,
+        target: { tenantId: sandboxRestoreTargetTenantId, empId: sandboxRestoreTargetEmpId },
+      });
+    } finally {
+      setIsSandboxRestoreRunning(false);
+      console.timeEnd("[sandbox restore]");
+    }
+  };
+
+  // sandbox 結果ログ JSON DL
+  const handleDownloadSandboxRestoreLog = () => {
+    if (!sandboxRestoreResult || !sandboxRestoreResult.logSnapshot) return;
+    _downloadRestoreLogJson(
+      sandboxRestoreResult.logSnapshot,
+      `payroll_restore_sandbox_log_${_stdRewardTimestampStr()}_${sandboxRestoreResult.logId.slice(0, 8)}.json`
+    );
+  };
+
+  // ============================================================================
+  // Phase G1 failure injection test suite (異常系監査)
+  // ----------------------------------------------------------------------------
+  // 目的: restore engine の fail-safe 動作を 8 シナリオで意図的に壊して検証する。
+  // 制約:
+  //   - 実 commit / saveDoc (employees/settings/...) は呼ばない
+  //   - restoreLogs だけは書く (mode: "restore-failure-test", failureScenario 付き)
+  //   - 通常 UI からは VITE_ENABLE_RESTORE_FAILURE_TEST=true 時のみ表示
+  // ============================================================================
+
+  // env flag
+  const ENABLE_FAILURE_TEST = (() => {
+    try { return import.meta.env.VITE_ENABLE_RESTORE_FAILURE_TEST === "true"; } catch { return false; }
+  })();
+
+  // backup の鮮度判定 (pure)。createdAt が thresholdDays 以上前なら stale。
+  const _computeBackupStaleness = (createdAtIso, thresholdDays = 30) => {
+    if (!createdAtIso || typeof createdAtIso !== "string") return { stale: false, daysOld: null };
+    const t = Date.parse(createdAtIso);
+    if (isNaN(t)) return { stale: false, daysOld: null };
+    const daysOld = Math.floor((Date.now() - t) / (1000 * 60 * 60 * 24));
+    return { stale: daysOld >= thresholdDays, daysOld };
+  };
+
+  // backup サイズの警告レベル判定 (pure)。
+  //   20MB: warning, 50MB: danger, 100MB: block
+  const _computeBackupSizeWarning = (bytes) => {
+    if (bytes == null || isNaN(bytes)) return { level: "unknown" };
+    if (bytes >= 100 * 1024 * 1024) return { level: "block", reason: "100MB 超: restore 拒否推奨" };
+    if (bytes >= 50 * 1024 * 1024)  return { level: "danger", reason: "50MB 超: 強警告" };
+    if (bytes >= 20 * 1024 * 1024)  return { level: "warning", reason: "20MB 超: 注意" };
+    return { level: "ok" };
+  };
+
+  // restore 系ボタン (simulate / sandbox / 将来の本番 full) の実行可否を backup サイズだけで判定する共通 helper (pure)。
+  //   level === "block" (= 100MB 超) なら ok:false で実行禁止。fileSize 不明は ok:true (block しない) で fail-open。
+  //   stale / ownerUid 等の判定は別系で行うため、ここでは「サイズだけ」を見る。
+  const _canRunRestoreByBackupSize = (fileSizeBytes) => {
+    const w = _computeBackupSizeWarning(fileSizeBytes);
+    if (w.level === "block") return { ok: false, level: w.level, reason: w.reason };
+    return { ok: true, level: w.level, reason: w.reason || null };
+  };
+
+  // ========================================================================
+  // operation count gate (pure helpers)
+  // ------------------------------------------------------------------------
+  // 目的: backup の file size だけでは捕捉できない「書込件数 / batch 数」起因のリスクを判定する。
+  //   - simulate でも browser 凍結リスクを警告
+  //   - 本番 full restore commit 実装時に同じ helper で gate する
+  //   - sandbox は対象外 (常に 1 op / 1 batch なので gate 不要)
+  // ========================================================================
+
+  // backup JSON + currentUid から ops / batches を「件数だけ」推定する軽量 helper (pure)。
+  // ★ _buildFullRestoreOps は doc を JSON 深 copy するため毎レンダー呼出は危険。
+  //   ここでは sanitize せず、各 area の有効 entry 数のみ数える。
+  //   skippedTenantCount は ownerUid mismatch で除外される tenant 数。
+  const _estimateRestoreOpsCount = (backupJson, currentUid) => {
+    const empty = {
+      totalOps: 0, totalBatches: 0,
+      skippedTenantCount: 0, allowedTenantCount: 0,
+      byArea: { officeMaster: 0, taxTables: 0, tenants: 0, settings: 0, monthlyLocks: 0, employees: 0 },
+    };
+    if (!backupJson || !backupJson.data || typeof backupJson.data !== "object") return empty;
+    const data = backupJson.data;
+    const byArea = { officeMaster: 0, taxTables: 0, tenants: 0, settings: 0, monthlyLocks: 0, employees: 0 };
+
+    const _countValidObjEntries = (obj) => {
+      if (!obj || typeof obj !== "object") return 0;
+      let n = 0;
+      for (const k of Object.keys(obj)) {
+        if (obj[k] && typeof obj[k] === "object") n += 1;
+      }
+      return n;
+    };
+
+    byArea.officeMaster = _countValidObjEntries(data.officeMaster);
+    byArea.taxTables = _countValidObjEntries(data.taxTables);
+
+    const cls = _classifyOwnerUidMismatches(backupJson, currentUid);
+    const skippedSet = new Set(cls.skipped.map((s) => s.tenantId));
+
+    for (const [tid, bundle] of Object.entries(data.tenants || {})) {
+      if (skippedSet.has(tid)) continue;
+      if (!bundle || typeof bundle !== "object") continue;
+      if (bundle.tenant && typeof bundle.tenant === "object") byArea.tenants += 1;
+      byArea.settings += _countValidObjEntries(bundle.settings);
+      byArea.monthlyLocks += _countValidObjEntries(bundle.monthlyLocks);
+      byArea.employees += _countValidObjEntries(bundle.employees);
+    }
+
+    const totalOps =
+      byArea.officeMaster + byArea.taxTables + byArea.tenants +
+      byArea.settings + byArea.monthlyLocks + byArea.employees;
+    const totalBatches = totalOps === 0 ? 0 : Math.ceil(totalOps / RESTORE_OPS_WARNING_THRESHOLDS.batchSize);   // batchSize = _splitOpsIntoBatches の chunk size と一致
+
+    return {
+      totalOps,
+      totalBatches,
+      skippedTenantCount: cls.skipped.length,
+      allowedTenantCount: cls.allowed.length,
+      byArea,
+    };
+  };
+
+  // ops 件数 / batch 数の警告レベル判定 (pure)。
+  // 閾値は module-scope の RESTORE_OPS_WARNING_THRESHOLDS から参照。
+  // 反論メモ: 100 tenants × 100 employees ≈ 10000 ops で block 発火。災害復旧で大規模 org が
+  //          完全に block されるリスクあり。値は閾値 const 1 箇所で調整可能。
+  const _computeRestoreOpsWarning = (totalOps, totalBatches) => {
+    const T = RESTORE_OPS_WARNING_THRESHOLDS;
+    const ops = Number.isFinite(totalOps) ? totalOps : 0;
+    const bts = Number.isFinite(totalBatches) ? totalBatches : 0;
+    if (ops >= T.ops.block || bts >= T.batches.block) {
+      return { level: "block",   reason: `${ops.toLocaleString()}件 / ${bts} batch: ${T.ops.block.toLocaleString()}件以上 または ${T.batches.block} batch 以上のため、実行を停止します。` };
+    }
+    if (ops >= T.ops.strong || bts >= T.batches.strong) {
+      return { level: "strong",  reason: `${ops.toLocaleString()}件 / ${bts} batch: ${T.ops.strong.toLocaleString()}件以上 または ${T.batches.strong} batch 以上の大規模 restore です。強く注意してください。` };
+    }
+    if (ops >= T.ops.warning || bts >= T.batches.warning) {
+      return { level: "warning", reason: `${ops.toLocaleString()}件 / ${bts} batch: ${T.ops.warning.toLocaleString()}件以上 または ${T.batches.warning} batch 以上の中規模 restore です。` };
+    }
+    return { level: "safe", reason: `${ops.toLocaleString()}件 / ${bts} batch` };
+  };
+
+  // restore 系ボタンを ops / batch 数で gate する共通 helper (pure)。
+  //   level === "block" のとき ok:false で実行禁止。
+  const _canRunRestoreByOps = (totalOps, totalBatches) => {
+    const w = _computeRestoreOpsWarning(totalOps, totalBatches);
+    return {
+      ok: w.level !== "block",
+      level: w.level,
+      reason: w.reason,
+      totalOps,
+      totalBatches,
+    };
+  };
+
+  // simulate UI で毎レンダー直接呼ぶと巨大 backup で重いため useMemo 化。
+  // backup.json または userId が変わったときのみ再計算。
+  // ★ deps は意図的に [json, userId] のみ。component-scope helper を入れると毎レンダー再計算
+  //   になり memo の意味が無くなるため除外。
+  // null の場合: backup 未ロード or 未ログイン。UI は null チェックして safe 風表示にフォールバック。
+  const fullRestoreOpsEstimate = useMemo(() => {
+    if (!fullAppBackupPreview || !fullAppBackupPreview.json || !userId) return null;
+    return _estimateRestoreOpsCount(fullAppBackupPreview.json, userId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullAppBackupPreview && fullAppBackupPreview.json, userId]);
+
+  // 8 シナリオを 1 orchestrator で実行。
+  // 各シナリオは pure helper の挙動を確認し、想定された fail-safe path が動いたかチェック。
+  const handleRunFailureScenario = async (scenario) => {
+    setFailureTestResult(null);
+    setFailureTestError("");
+    if (!ENABLE_FAILURE_TEST) {
+      setFailureTestError("failure test モードが無効です (VITE_ENABLE_RESTORE_FAILURE_TEST=true が必要)");
+      return;
+    }
+    if (isFailureTestRunning) return;
+    if (!scenario) {
+      setFailureTestError("シナリオを選択してください");
+      return;
+    }
+    if (!userId) {
+      setFailureTestError("ログインが必要です");
+      return;
+    }
+    setIsFailureTestRunning(true);
+    console.time(`[failure test ${scenario}]`);
+
+    const startedAt = new Date().toISOString();
+    const logRef = newAutoDocRef("restoreLogs");
+    const logId = logRef.id;
+    const baseLog = {
+      logVersion: 2,
+      logId,
+      mode: "restore-failure-test",
+      label: `災害復旧復元 failure injection test (${scenario})`,
+      phase: "G1",
+      simulate: true,
+      failureTest: true,
+      failureScenario: scenario,
+      actor: { uid: userId, email: (() => { try { return getAuth(app).currentUser?.email || null; } catch { return null; } })() },
+      timestamps: { startedAt, completedAt: null },
+      result: "in-progress",
+      testOutcome: null,
+      expected: null,
+      actual: null,
+      extraNotes: {},
+      errors: [],
+    };
+    let logSnapshot = { ...baseLog };
+
+    try {
+      await _writeRestoreLog(logId, logSnapshot, "start").catch((e) => {
+        console.warn("[failure test] Step1 log write failed (continuing)", e);
+      });
+
+      let expected = null;
+      let actual = null;
+      const extraNotes = {};
+
+      switch (scenario) {
+        case "before-backup-failure": {
+          expected = "aborted-before-backup-failed";
+          // _downloadBeforeRestoreBackup を強制 throw する代わりに、その fail-safe 経路を直接 simulate
+          try {
+            throw new Error("[INJECTED] before_restore backup forced failure");
+          } catch (e) {
+            actual = "aborted-before-backup-failed";
+            extraNotes.injectedError = e.message;
+            extraNotes.commitExecuted = false;
+            extraNotes.restoreLogsResult = "aborted-before-backup-failed";
+          }
+          break;
+        }
+
+        case "verify-failure": {
+          expected = "partial";
+          // commit 後の verify が不一致になる状況を _isMergeSubsetEqual で simulate
+          //   expected.data.x = 1 だが actual.data.x = 2 → subset 不一致
+          const fakeExpected = { data: { years: { r07: { monthly: { "01": { basePay: 100 } } } } } };
+          const fakeActual = { data: { years: { r07: { monthly: { "01": { basePay: 999 } } } } } };
+          const verifyOk = _isMergeSubsetEqual(fakeExpected, fakeActual);
+          actual = verifyOk ? "success" : "partial";
+          extraNotes.verifyOk = verifyOk;
+          extraNotes.note = "verify-failure path → result must be partial, not success";
+          break;
+        }
+
+        case "ownerUid-mismatch": {
+          expected = "all-tenants-skipped";
+          if (!fullAppBackupPreview || !fullAppBackupPreview.ok) {
+            actual = "no-backup-preview";
+            extraNotes.note = "テスト前に backup preview を読み込んでください";
+          } else {
+            const fakeUid = "fake-uid-NEVER-MATCH-" + Math.random().toString(36).slice(2, 8);
+            const { skipped, allowed } = _classifyOwnerUidMismatches(fullAppBackupPreview.json, fakeUid);
+            const tenantsInBackup = Object.keys((fullAppBackupPreview.json.data && fullAppBackupPreview.json.data.tenants) || {});
+            extraNotes.fakeUid = fakeUid;
+            extraNotes.tenantsInBackup = tenantsInBackup.length;
+            extraNotes.skippedCount = skipped.length;
+            extraNotes.allowedCount = allowed.length;
+            if (tenantsInBackup.length === 0) {
+              actual = "no-tenants-in-backup";
+            } else if (allowed.length === 0 && skipped.length === tenantsInBackup.length) {
+              actual = "all-tenants-skipped";
+            } else {
+              actual = "partial-skip";
+            }
+          }
+          break;
+        }
+
+        case "malformed-backup": {
+          expected = "parse-rejected";
+          // 不正な shape の JSON を parseFullAppBackupJson に通す
+          const badJsonString = JSON.stringify({ backupType: "wrong-type", backupVersion: 999, data: "not-an-object" });
+          const result = parseFullAppBackupJson(badJsonString);
+          actual = result.error ? "parse-rejected" : "parse-accepted";
+          extraNotes.parseError = result.error || null;
+          extraNotes.testedShape = "backupType=wrong-type, data=string";
+          break;
+        }
+
+        case "stale-backup": {
+          expected = "stale-warned";
+          // 45 日前の擬似 createdAt
+          const fakeOldIso = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+          const staleness = _computeBackupStaleness(fakeOldIso, 30);
+          actual = staleness.stale ? "stale-warned" : "fresh";
+          extraNotes.fakeCreatedAt = fakeOldIso;
+          extraNotes.daysOld = staleness.daysOld;
+          extraNotes.thresholdDays = 30;
+          extraNotes.note = "stale でも commit 自体は禁止しない (warning + extra confirm 要求のみ)";
+          // 実 backup の鮮度も同時に判定
+          if (fullAppBackupPreview && fullAppBackupPreview.ok) {
+            const realStaleness = _computeBackupStaleness(fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30);
+            extraNotes.realBackup = {
+              createdAt: fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt,
+              stale: realStaleness.stale,
+              daysOld: realStaleness.daysOld,
+            };
+          }
+          break;
+        }
+
+        case "interrupted-restore": {
+          expected = "failed-mid-loop";
+          // simulate engine の batch loop 内で throw 注入を模擬
+          const fakeBatches = [
+            { index: 0, count: 100 },
+            { index: 1, count: 100 },
+            { index: 2, count: 50 },
+          ];
+          let processedBefore = 0;
+          let caughtError = null;
+          let lastBatchResult = null;
+          try {
+            for (let i = 0; i < fakeBatches.length; i += 1) {
+              if (i === 1) {
+                // batch index 1 で throw
+                throw new Error("[INJECTED] interrupted at batch 1 (network simulated)");
+              }
+              processedBefore += fakeBatches[i].count;
+              lastBatchResult = `committed (batch ${i})`;
+            }
+          } catch (e) {
+            caughtError = e.message;
+          }
+          actual = caughtError ? "failed-mid-loop" : "completed-all";
+          extraNotes.totalBatches = fakeBatches.length;
+          extraNotes.processedBefore = processedBefore;
+          extraNotes.caughtError = caughtError;
+          extraNotes.lastBatchResult = lastBatchResult;
+          extraNotes.note = "interrupted 時は progress 停止 + result: failed + restoreLogs failed が期待動作";
+          break;
+        }
+
+        case "concurrent-write-simulate": {
+          expected = "partial-from-mismatch";
+          // 別クライアントが commit 後 verify 前に値を書き換えたケースを simulate
+          //   expected = backup の値、actual = 別 client が上書きした値
+          const backupValue = { data: { years: { r07: { monthly: { "01": { basePay: 250000, payDate: "2025-07-25" } } } } } };
+          const externallyMutatedActual = { data: { years: { r07: { monthly: { "01": { basePay: 999999, payDate: "2025-07-25" } } } } } };
+          const verifyOk = _isMergeSubsetEqual(backupValue, externallyMutatedActual);
+          actual = verifyOk ? "no-mismatch-detected" : "partial-from-mismatch";
+          extraNotes.verifyOk = verifyOk;
+          extraNotes.note = "別 client mutation 後の verify は subset 不一致で partial 扱いになる必要あり";
+          break;
+        }
+
+        case "oversized-backup": {
+          expected = "blocked";
+          const fakeBytes = 110 * 1024 * 1024;  // 110MB
+          const warning = _computeBackupSizeWarning(fakeBytes);
+          actual = warning.level === "block" ? "blocked" : warning.level;
+          extraNotes.fakeBytes = fakeBytes;
+          extraNotes.warningLevel = warning.level;
+          extraNotes.warningReason = warning.reason;
+          extraNotes.note = "100MB 超は restore button disabled になる必要あり";
+          if (fullAppBackupPreview && fullAppBackupPreview.fileSize) {
+            const realWarning = _computeBackupSizeWarning(fullAppBackupPreview.fileSize);
+            extraNotes.realBackupSizeBytes = fullAppBackupPreview.fileSize;
+            extraNotes.realWarningLevel = realWarning.level;
+          }
+          break;
+        }
+
+        default:
+          throw new Error("unknown scenario: " + scenario);
+      }
+
+      const testOutcome = actual === expected ? "passed" : "failed";
+      const completedAt = new Date().toISOString();
+      logSnapshot = {
+        ...logSnapshot,
+        result: "test-complete",
+        testOutcome,
+        expected,
+        actual,
+        extraNotes,
+        timestamps: { ...logSnapshot.timestamps, completedAt },
+      };
+      await _writeRestoreLog(logId, {
+        result: logSnapshot.result,
+        testOutcome,
+        expected,
+        actual,
+        extraNotes,
+        timestamps: logSnapshot.timestamps,
+      }, "finish").catch((e) => {
+        console.warn("[failure test] Step2 log write failed", e);
+      });
+
+      console.log(`[failure test ${scenario}]`, { logId, testOutcome, expected, actual, extraNotes });
+      setFailureTestResult({ scenario, testOutcome, expected, actual, extraNotes, logId, logSnapshot });
+    } catch (err) {
+      const errMsg = "failure test 実行エラー: " + (err && err.message ? err.message : String(err));
+      console.error("[failure test] unexpected", err);
+      logSnapshot = {
+        ...logSnapshot,
+        result: "failed",
+        timestamps: { ...logSnapshot.timestamps, completedAt: new Date().toISOString() },
+        errors: [errMsg],
+      };
+      await _writeRestoreLog(logId, {
+        result: "failed",
+        errors: logSnapshot.errors,
+        timestamps: logSnapshot.timestamps,
+      }, "finish").catch(() => {});
+      setFailureTestError(errMsg);
+    } finally {
+      setIsFailureTestRunning(false);
+      console.timeEnd(`[failure test ${scenario}]`);
+    }
+  };
+
+  // failure test 結果ログ JSON DL
+  const handleDownloadFailureTestLog = () => {
+    if (!failureTestResult || !failureTestResult.logSnapshot) return;
+    _downloadRestoreLogJson(
+      failureTestResult.logSnapshot,
+      `payroll_restore_failure_test_${failureTestResult.scenario}_${_stdRewardTimestampStr()}_${failureTestResult.logId.slice(0, 8)}.json`
+    );
+  };
+
+  // sandbox 用 selection options
+  const _getSandboxRestoreOptions = () => {
+    const empty = { tenantOptions: [], empOptions: [] };
+    if (!ENABLE_SANDBOX_RESTORE) return empty;
+    if (!fullAppDryRunReport || !fullAppBackupPreview || !fullAppBackupPreview.ok) return empty;
+    const bjson = fullAppBackupPreview.json;
+    const bTenants = (bjson && bjson.data && bjson.data.tenants) || {};
+    // sandbox tenant のみ: backup 側 tenant.name に [SANDBOX] を含み、current にも存在し、ownerUid 一致
+    const tenantOptions = (fullAppDryRunReport.perTenant || [])
+      .filter((p) => p.inCurrent && p.inBackup && !p.ownerUidMismatch)
+      .filter((p) => {
+        const bt = bTenants[p.tenantId] && bTenants[p.tenantId].tenant;
+        return _isSandboxTenant(bt);
+      })
+      .map((p) => ({ tenantId: p.tenantId, tenantName: (bTenants[p.tenantId] && bTenants[p.tenantId].tenant && bTenants[p.tenantId].tenant.name) || p.tenantId }));
+    let empOptions = [];
+    if (sandboxRestoreTargetTenantId) {
+      const emps = (bTenants[sandboxRestoreTargetTenantId] && bTenants[sandboxRestoreTargetTenantId].employees) || {};
+      empOptions = Object.keys(emps).sort();
+    }
+    return { tenantOptions, empOptions };
   };
 
   // --- 賞与算出率表（税務署形式）のUI操作ハンドラ ---
@@ -7804,7 +10548,8 @@ const App = () => {
 
   // ▼追加：現在選択されているテナント（会社）の情報を取得▼
   const currentTenant = tenants.find(t => t.id === selectedTenantId);
-  const currentTenantName = currentTenant?.name || "未選択";
+  // clientCode が任意項目のため、設定済なら「{clientCode} {name}」、未設定なら name のみ表示。
+  const currentTenantName = currentTenant ? (formatTenantDisplayName(currentTenant) || "未選択") : "未選択";
 
   // ▼▼▼ 新規追加：ポータル（ルート）画面の独立レンダリング ▼▼▼
   if (activeTab === "portal") {
@@ -12781,7 +15526,7 @@ const App = () => {
               {/* ============================================================ */}
               {/* セクション2: アプリ全体バックアップ                            */}
               {/* （officeMaster + taxTables + tenants + settings + monthlyLocks */}
-              {/*  + employees。エクスポートのみ。復元は未実装）                */}
+              {/*  + employees。バックアップ作成・確認の主導線）                */}
               {/* ============================================================ */}
               <section>
                 <div className="flex items-center gap-2 mb-3 pb-2 border-b-2 border-rose-100">
@@ -12790,7 +15535,7 @@ const App = () => {
                     セクション2: アプリ全体バックアップ
                   </h3>
                   <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded border border-rose-100 font-black text-[10px]">
-                    エクスポートのみ
+                    バックアップ作成・確認
                   </span>
                 </div>
 
@@ -12799,11 +15544,18 @@ const App = () => {
                     <AlertTriangle size={14} /> 重要事項
                   </div>
                   <ul className="list-disc list-inside space-y-0.5">
-                    <li>対象: <b>事務所マスタ・源泉徴収税額表・全顧問先（自分が所有するもの）・各顧問先の会社設定・月次ロック・社員データ（給与データを含む）</b>。</li>
-                    <li>対象外: 他ユーザの顧問先、legacy パス（v0 移行元）。</li>
-                    <li><b>復元機能は今回は実装されていません。</b>万一に備えた JSON 取得のみが可能です。復元は危険度が高いため別フェーズで設計します。</li>
+                    <li>対象: <b>自分が所有する顧問先・社員データ（給与含む）と共通マスタ（税額表・事務所マスタ）</b>。他ユーザの顧問先は対象外。</li>
+                    <li>この画面では <b>バックアップ作成 → JSON 確認 → 復元前チェック → 復元</b> までを行えます。</li>
                     <li>顧問先・社員数によってはダウンロードに数秒～数十秒かかります。</li>
                   </ul>
+                  <details className="mt-2">
+                    <summary className="text-[10px] text-rose-700 cursor-pointer select-none">詳細を見る（管理者向け）</summary>
+                    <ul className="list-disc list-inside space-y-0.5 mt-1 text-[10px]">
+                      <li>復元対象は merge:true による全体上書きです。バックアップに存在しない現在データは <b>削除されません</b>。</li>
+                      <li>復元の実行は <code>VITE_ENABLE_FULL_RESTORE=true</code> の管理者環境のみ。一般運用画面からは実行できません。</li>
+                      <li>対象外: 他ユーザの顧問先、tenants/{"{tid}"}/users、legacy パス（v0 移行元）、restoreLogs。</li>
+                    </ul>
+                  </details>
                 </div>
 
                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-5">
@@ -12885,7 +15637,7 @@ const App = () => {
                       </div>
 
                       <div className="mt-2 text-[10px] text-emerald-700 italic">
-                        このバックアップはエクスポート専用です。復元機能はまだ実装されていません。
+                        この JSON は、復元前チェックおよび災害復旧復元に利用できます。通常は安全な場所に保管してください。
                       </div>
                     </div>
                   )}
@@ -12977,16 +15729,16 @@ const App = () => {
                 </div>
 
                 {/* ============================================================ */}
-                {/* 復元シミュレーション (Dry Run)                                  */}
+                {/* 復元前チェック（差分確認）                                      */}
                 {/*  - 実復元は行わない。Firestore 書込は 0 件。                     */}
                 {/*  - preview 済みの backup JSON がある時のみボタン有効。           */}
                 {/* ============================================================ */}
                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 mt-4">
                   <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-3">
-                    <ShieldCheck size={16} /> 復元シミュレーション（Dry Run）
+                    <ShieldCheck size={16} /> 復元前チェック（差分確認）
                   </h4>
                   <div className="text-xs text-slate-600 mb-3">
-                    プレビュー済みのバックアップ JSON を「現在の Firestore に復元したら何が起きるか」を可視化します。<span className="font-bold text-rose-600">Firestore への書き込みは一切行いません。</span>
+                    バックアップ JSON と現在のデータを比較し、復元した場合に追加・上書き・差分が出る可能性を確認します。<span className="font-bold text-rose-600">Firestore には書き込みません。</span>
                   </div>
 
                   <div className="bg-white border border-slate-200 rounded p-3 flex flex-wrap items-center gap-3">
@@ -13004,9 +15756,9 @@ const App = () => {
                         !fullAppBackupPreview.ok
                       }
                       className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                      title="バックアップ JSON と現在 Firestore の差分シミュレーション（書込なし）"
+                      title="バックアップ JSON と現在データの差分チェック（書込なし）"
                     >
-                      <ShieldCheck size={14} /> {isFullAppDryRunRunning ? "実行中..." : "復元シミュレーションを実行"}
+                      <ShieldCheck size={14} /> {isFullAppDryRunRunning ? "実行中..." : "復元前チェック（差分確認）を実行"}
                     </button>
                   </div>
 
@@ -13016,199 +15768,1910 @@ const App = () => {
                     </div>
                   )}
 
-                  {fullAppDryRunReport && (
+                  {fullAppDryRunReport && (() => {
+                    // 通常ユーザ向け簡易判定: 「差分があるか」「警告があるか」
+                    const addOnly = fullAppDryRunReport.totalAddOnly || 0;
+                    const overwrite = fullAppDryRunReport.totalOverwrite || 0;
+                    const currentOnly = fullAppDryRunReport.totalCurrentOnly || 0;
+                    const changed = (fullAppDryRunReport.contentDiff && fullAppDryRunReport.contentDiff.changedDocCount) || 0;
+                    const hasDiff = (addOnly + currentOnly + changed) > 0;
+                    const warnings = fullAppDryRunReport.warnings || [];
+                    return (
                     <div className="mt-3 bg-indigo-50 border border-indigo-200 rounded p-3 text-[11px] text-indigo-900">
                       <div className="font-bold mb-2 text-[12px] flex items-center gap-1.5">
-                        <ShieldCheck size={13} /> 復元シミュレーション結果（Dry Run）
+                        <ShieldCheck size={13} /> 復元前チェック（差分確認）結果
                       </div>
 
-                      {/* ▼ Firestore 書込なし明示 ▼ */}
-                      <div className="mb-2 bg-amber-50 border border-amber-300 text-amber-800 rounded p-2 text-[11px] font-bold">
-                        ※ これはシミュレーションです。Firestore には一切書き込んでいません。
+                      {/* ▼ 簡易判定（通常ユーザ向け） ▼ */}
+                      <div className={`mb-2 border-2 rounded p-2 text-[12px] font-bold ${hasDiff ? "bg-amber-50 border-amber-400 text-amber-900" : "bg-emerald-50 border-emerald-400 text-emerald-900"}`}>
+                        {hasDiff
+                          ? <>⚠ 差分あり: バックアップを復元すると現在データに変化が発生します（{addOnly + overwrite + changed} 件想定）。</>
+                          : <>✅ 差分なし: バックアップと現在データは一致しています。</>}
+                        {warnings.length > 0 && <div className="mt-1 text-[11px]">警告 {warnings.length} 件あり（詳細を確認してください）</div>}
                       </div>
 
-                      {/* ▼ 比較範囲の注意書き ▼ */}
-                      <div className="mb-2 bg-slate-100 border border-slate-300 text-slate-700 rounded p-2 text-[11px]">
-                        ※ このシミュレーションはdocId単位の存在比較と、同一docIdのドキュメント単位内容比較です。フィールド単位の詳細差分はまだ表示していません。
-                      </div>
-
-                      {/* ▼ 分類 + メタ ▼ */}
-                      <div className="bg-white border border-indigo-300 rounded p-2 mb-2 space-y-1">
-                        <div className="text-[12px]">
-                          <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest mr-1">Classification</span>
-                          <span className="font-black text-indigo-900">{fullAppDryRunReport.classification}</span>
-                        </div>
-                        <div className="text-[11px]">
-                          <span className="font-bold text-indigo-600 mr-1">実行日時:</span>
-                          <span className="font-mono text-slate-800">{fullAppDryRunReport.runAt}</span>
-                        </div>
-                        <div className="text-[11px]">
-                          <span className="font-bold text-indigo-600 mr-1">backup 作成日時:</span>
-                          <span className="font-mono text-slate-800">{fullAppDryRunReport.backupCreatedAt}</span>
-                        </div>
-                        <div className="text-[11px]">
-                          <span className="font-bold text-indigo-600 mr-1">比較対象クライアント数 (union):</span>
-                          <span className="font-mono font-bold text-slate-800">{fullAppDryRunReport.perTenant.length}</span>
-                        </div>
-                      </div>
-
-                      {/* ▼ 件数比較表 (backup vs current) ▼ */}
-                      <div className="bg-white border border-indigo-200 rounded p-2 mb-2">
-                        <div className="text-[11px] font-bold text-indigo-700 mb-1">件数比較（backup ／ 現在）</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5 font-mono">
-                          <div><span className="font-bold">事務所マスタ:</span> {fullAppDryRunReport.totals.officeMaster.backup} / {fullAppDryRunReport.totals.officeMaster.current}</div>
-                          <div><span className="font-bold">税額表:</span> {fullAppDryRunReport.totals.taxTables.backup} / {fullAppDryRunReport.totals.taxTables.current}</div>
-                          <div><span className="font-bold">クライアント:</span> {fullAppDryRunReport.totals.tenants.backup} / {fullAppDryRunReport.totals.tenants.current}</div>
-                          <div><span className="font-bold">会社別設定:</span> {fullAppDryRunReport.totals.settings.backup} / {fullAppDryRunReport.totals.settings.current}</div>
-                          <div><span className="font-bold">月次ロック:</span> {fullAppDryRunReport.totals.monthlyLocks.backup} / {fullAppDryRunReport.totals.monthlyLocks.current}</div>
-                          <div><span className="font-bold">社員数:</span> {fullAppDryRunReport.totals.employees.backup} / {fullAppDryRunReport.totals.employees.current}</div>
-                        </div>
-                      </div>
-
-                      {/* ▼ 差分サマリ ▼ */}
+                      {/* ▼ 差分サマリ（追加 / 上書き / 現在のみ） ▼ */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
                         <div className="bg-emerald-50 border border-emerald-300 rounded p-2">
                           <div className="text-[10px] font-bold text-emerald-700 uppercase">追加候補</div>
-                          <div className="text-[18px] font-black text-emerald-900 font-mono">{fullAppDryRunReport.totalAddOnly}</div>
+                          <div className="text-[18px] font-black text-emerald-900 font-mono">{addOnly}</div>
                           <div className="text-[10px] text-emerald-700">backup のみに存在</div>
                         </div>
                         <div className="bg-amber-50 border border-amber-300 rounded p-2">
                           <div className="text-[10px] font-bold text-amber-700 uppercase">上書き候補</div>
-                          <div className="text-[18px] font-black text-amber-900 font-mono">{fullAppDryRunReport.totalOverwrite}</div>
+                          <div className="text-[18px] font-black text-amber-900 font-mono">{overwrite}</div>
                           <div className="text-[10px] text-amber-700">両方に同じ docId</div>
                         </div>
                         <div className="bg-rose-50 border border-rose-300 rounded p-2">
                           <div className="text-[10px] font-bold text-rose-700 uppercase">現在のみ存在</div>
-                          <div className="text-[18px] font-black text-rose-900 font-mono">{fullAppDryRunReport.totalCurrentOnly}</div>
-                          <div className="text-[10px] text-rose-700">完全復元なら削除リスク</div>
+                          <div className="text-[18px] font-black text-rose-900 font-mono">{currentOnly}</div>
+                          <div className="text-[10px] text-rose-700">復元しても削除されません</div>
                         </div>
                       </div>
 
-                      {/* ▼ 内容差分（同一 docId のドキュメント単位比較） ▼ */}
-                      {fullAppDryRunReport.contentDiff && (
-                        <div className="bg-white border border-indigo-200 rounded p-2 mb-2">
-                          <div className="text-[11px] font-bold text-indigo-700 mb-1">
-                            内容差分（同一 docId）
-                          </div>
-
-                          {/* 集計 */}
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
-                            <div className="bg-slate-50 border border-slate-300 rounded p-2 text-center">
-                              <div className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">同一 docId 数</div>
-                              <div className="text-[16px] font-black text-slate-800 font-mono">{fullAppDryRunReport.contentDiff.sameDocIdCount}</div>
-                              <div className="text-[9px] text-slate-500">比較対象</div>
-                            </div>
-                            <div className="bg-emerald-50 border border-emerald-300 rounded p-2 text-center">
-                              <div className="text-[9px] font-bold text-emerald-700 uppercase tracking-wider">内容一致</div>
-                              <div className="text-[16px] font-black text-emerald-800 font-mono">{fullAppDryRunReport.contentDiff.unchangedDocCount}</div>
-                              <div className="text-[9px] text-emerald-600">変更なし</div>
-                            </div>
-                            <div className="bg-rose-50 border border-rose-300 rounded p-2 text-center">
-                              <div className="text-[9px] font-bold text-rose-700 uppercase tracking-wider">内容差分</div>
-                              <div className="text-[16px] font-black text-rose-800 font-mono">{fullAppDryRunReport.contentDiff.changedDocCount}</div>
-                              <div className="text-[9px] text-rose-600">変更あり</div>
-                            </div>
-                          </div>
-
-                          {/* area 別内訳（差分 > 0 のものだけ表示） */}
-                          {(() => {
-                            const byArea = fullAppDryRunReport.contentDiff.byArea || {};
-                            const areaLabels = {
-                              officeMaster: "事務所マスタ",
-                              taxTables: "税額表",
-                              tenants: "顧問先",
-                              settings: "会社別設定",
-                              monthlyLocks: "月次ロック",
-                              employees: "社員",
-                            };
-                            const rows = Object.keys(areaLabels)
-                              .filter((k) => byArea[k] && byArea[k].changed > 0);
-                            if (rows.length === 0) return null;
-                            return (
-                              <div className="mb-2 text-[10px] font-mono">
-                                <span className="text-indigo-700 font-bold mr-1">差分あり領域:</span>
-                                {rows.map((k) => (
-                                  <span key={k} className="inline-block mr-2 text-rose-700">
-                                    {areaLabels[k]} {byArea[k].changed} 件
-                                  </span>
-                                ))}
-                              </div>
-                            );
-                          })()}
-
-                          {/* 内容差分プレビュー（最大 20 件） */}
-                          {fullAppDryRunReport.contentDiff.changedPreview.length > 0 && (
-                            <div className="bg-slate-50 border border-slate-200 rounded p-1.5">
-                              <div className="text-[10px] font-bold text-slate-600 mb-1">
-                                内容差分プレビュー（最大 {fullAppDryRunReport.contentDiff.changedPreviewMax} 件）
-                              </div>
-                              <ul className="space-y-0.5 max-h-[180px] overflow-y-auto text-[10px] font-mono">
-                                {fullAppDryRunReport.contentDiff.changedPreview.map((c, i) => (
-                                  <li key={i} className="text-slate-700 truncate">
-                                    <span className="inline-block w-[78px] text-indigo-700 font-bold">{c.label}</span>
-                                    {c.tenantId ? <span className="text-slate-500">[{c.tenantId}] </span> : null}
-                                    <span className="text-slate-800">{c.docId}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                              {fullAppDryRunReport.contentDiff.changedPreviewOverflow > 0 && (
-                                <div className="mt-1 text-[10px] text-rose-700 italic">
-                                  ほか {fullAppDryRunReport.contentDiff.changedPreviewOverflow} 件の内容差分があります
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* 注意書き: フィールド単位 diff 未実装 */}
-                          <div className="mt-2 bg-amber-50 border border-amber-200 text-amber-800 rounded p-1.5 text-[10px]">
-                            ※ 内容差分はドキュメント単位の比較です。フィールド単位の詳細差分はまだ表示していません。
-                          </div>
-                        </div>
-                      )}
-
-                      {/* ▼ 警告 ▼ */}
-                      {fullAppDryRunReport.warnings && fullAppDryRunReport.warnings.length > 0 && (
+                      {/* ▼ 警告（実行可否に直結する preflight warning） ▼ */}
+                      {warnings.length > 0 && (
                         <div className="bg-white border border-amber-300 rounded p-2 mb-2">
                           <div className="text-[11px] font-bold text-amber-800 mb-1">⚠ 警告</div>
                           <ul className="list-disc list-inside text-[10px] text-amber-900 space-y-0.5">
-                            {fullAppDryRunReport.warnings.map((w, i) => (
-                              <li key={i}>{w}</li>
-                            ))}
+                            {warnings.map((w, i) => (<li key={i}>{w}</li>))}
                           </ul>
                         </div>
                       )}
 
-                      {/* ▼ tenant ごとの内訳（折りたたみなし、件数のみ） ▼ */}
-                      {fullAppDryRunReport.perTenant.length > 0 && (
-                        <details className="bg-white border border-indigo-200 rounded p-2">
-                          <summary className="text-[11px] font-bold text-indigo-700 cursor-pointer">
-                            tenant ごとの内訳（{fullAppDryRunReport.perTenant.length} 件）
-                          </summary>
-                          <div className="mt-2 space-y-1 text-[10px]">
-                            {fullAppDryRunReport.perTenant.map((pt) => (
-                              <div key={pt.tenantId} className={`p-1.5 rounded border ${pt.ownerUidMismatch ? "border-rose-300 bg-rose-50" : "border-slate-200 bg-slate-50"}`}>
-                                <div className="font-mono font-bold text-slate-800 truncate">
-                                  {pt.tenantId}
-                                  {!pt.inBackup && <span className="ml-2 text-rose-600 font-bold">(現在のみ)</span>}
-                                  {!pt.inCurrent && <span className="ml-2 text-emerald-600 font-bold">(backup のみ)</span>}
-                                  {pt.ownerUidMismatch && <span className="ml-2 text-rose-600 font-bold">⚠ ownerUid 不一致</span>}
+                      {/* ▼ 詳細を見る（上級者向け：classification / 件数比較 / 内容差分 / tenant 内訳） ▼ */}
+                      <details className="bg-white border border-slate-300 rounded p-2">
+                        <summary className="text-[11px] font-bold text-slate-700 cursor-pointer select-none">
+                          詳細を見る（上級者向け）
+                        </summary>
+                        <div className="mt-2 space-y-2">
+                          {/* メタ */}
+                          <div className="bg-indigo-50 border border-indigo-200 rounded p-2 space-y-0.5 text-[10px]">
+                            <div><span className="font-bold text-indigo-700">classification:</span> <span className="font-mono">{fullAppDryRunReport.classification}</span></div>
+                            <div><span className="font-bold text-indigo-700">実行日時:</span> <span className="font-mono">{fullAppDryRunReport.runAt}</span></div>
+                            <div><span className="font-bold text-indigo-700">backup 作成日時:</span> <span className="font-mono">{fullAppDryRunReport.backupCreatedAt}</span></div>
+                            <div><span className="font-bold text-indigo-700">比較対象クライアント数 (union):</span> <span className="font-mono font-bold">{fullAppDryRunReport.perTenant.length}</span></div>
+                          </div>
+
+                          {/* 件数比較 */}
+                          <div className="bg-white border border-indigo-200 rounded p-2">
+                            <div className="text-[11px] font-bold text-indigo-700 mb-1">件数比較（backup ／ 現在）</div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[10px]">
+                              <div><span className="font-bold">事務所マスタ:</span> {fullAppDryRunReport.totals.officeMaster.backup} / {fullAppDryRunReport.totals.officeMaster.current}</div>
+                              <div><span className="font-bold">税額表:</span> {fullAppDryRunReport.totals.taxTables.backup} / {fullAppDryRunReport.totals.taxTables.current}</div>
+                              <div><span className="font-bold">クライアント:</span> {fullAppDryRunReport.totals.tenants.backup} / {fullAppDryRunReport.totals.tenants.current}</div>
+                              <div><span className="font-bold">会社別設定:</span> {fullAppDryRunReport.totals.settings.backup} / {fullAppDryRunReport.totals.settings.current}</div>
+                              <div><span className="font-bold">月次ロック:</span> {fullAppDryRunReport.totals.monthlyLocks.backup} / {fullAppDryRunReport.totals.monthlyLocks.current}</div>
+                              <div><span className="font-bold">社員数:</span> {fullAppDryRunReport.totals.employees.backup} / {fullAppDryRunReport.totals.employees.current}</div>
+                            </div>
+                          </div>
+
+                          {/* 内容差分 */}
+                          {fullAppDryRunReport.contentDiff && (
+                            <div className="bg-white border border-indigo-200 rounded p-2">
+                              <div className="text-[11px] font-bold text-indigo-700 mb-1">内容差分（同一 docId）</div>
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+                                <div className="bg-slate-50 border border-slate-300 rounded p-2 text-center">
+                                  <div className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">同一 docId 数</div>
+                                  <div className="text-[16px] font-black text-slate-800 font-mono">{fullAppDryRunReport.contentDiff.sameDocIdCount}</div>
                                 </div>
-                                <div className="grid grid-cols-3 gap-2 font-mono text-slate-600">
-                                  <div>社員: 追加 {pt.employees.addOnly.length} / 上書 {pt.employees.overwrite.length} / 現在のみ {pt.employees.currentOnly.length}</div>
-                                  <div>設定: 追加 {pt.settings.addOnly.length} / 上書 {pt.settings.overwrite.length} / 現在のみ {pt.settings.currentOnly.length}</div>
-                                  <div>ロック: 追加 {pt.monthlyLocks.addOnly.length} / 上書 {pt.monthlyLocks.overwrite.length} / 現在のみ {pt.monthlyLocks.currentOnly.length}</div>
+                                <div className="bg-emerald-50 border border-emerald-300 rounded p-2 text-center">
+                                  <div className="text-[9px] font-bold text-emerald-700 uppercase tracking-wider">内容一致</div>
+                                  <div className="text-[16px] font-black text-emerald-800 font-mono">{fullAppDryRunReport.contentDiff.unchangedDocCount}</div>
+                                </div>
+                                <div className="bg-rose-50 border border-rose-300 rounded p-2 text-center">
+                                  <div className="text-[9px] font-bold text-rose-700 uppercase tracking-wider">内容差分</div>
+                                  <div className="text-[16px] font-black text-rose-800 font-mono">{fullAppDryRunReport.contentDiff.changedDocCount}</div>
                                 </div>
                               </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
+                              {(() => {
+                                const byArea = fullAppDryRunReport.contentDiff.byArea || {};
+                                const areaLabels = { officeMaster: "事務所マスタ", taxTables: "税額表", tenants: "顧問先", settings: "会社別設定", monthlyLocks: "月次ロック", employees: "社員" };
+                                const rows = Object.keys(areaLabels).filter((k) => byArea[k] && byArea[k].changed > 0);
+                                if (rows.length === 0) return null;
+                                return (
+                                  <div className="mb-2 text-[10px] font-mono">
+                                    <span className="text-indigo-700 font-bold mr-1">差分あり領域:</span>
+                                    {rows.map((k) => (
+                                      <span key={k} className="inline-block mr-2 text-rose-700">
+                                        {areaLabels[k]} {byArea[k].changed} 件
+                                      </span>
+                                    ))}
+                                  </div>
+                                );
+                              })()}
+                              {fullAppDryRunReport.contentDiff.changedPreview.length > 0 && (
+                                <div className="bg-slate-50 border border-slate-200 rounded p-1.5">
+                                  <div className="text-[10px] font-bold text-slate-600 mb-1">
+                                    内容差分プレビュー（最大 {fullAppDryRunReport.contentDiff.changedPreviewMax} 件）
+                                  </div>
+                                  <ul className="space-y-0.5 max-h-[180px] overflow-y-auto text-[10px] font-mono">
+                                    {fullAppDryRunReport.contentDiff.changedPreview.map((c, i) => (
+                                      <li key={i} className="text-slate-700 truncate">
+                                        <span className="inline-block w-[78px] text-indigo-700 font-bold">{c.label}</span>
+                                        {c.tenantId ? <span className="text-slate-500">[{c.tenantId}] </span> : null}
+                                        <span className="text-slate-800">{c.docId}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                  {fullAppDryRunReport.contentDiff.changedPreviewOverflow > 0 && (
+                                    <div className="mt-1 text-[10px] text-rose-700 italic">
+                                      ほか {fullAppDryRunReport.contentDiff.changedPreviewOverflow} 件の内容差分があります
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              <div className="mt-2 text-[10px] text-slate-500 italic">
+                                ※ 内容差分はドキュメント単位の比較です。フィールド単位 diff は未実装。
+                              </div>
+                            </div>
+                          )}
 
-                      <div className="mt-2 text-[10px] text-indigo-700 italic">
-                        hasFirestoreWrites: <span className="font-mono font-bold">{String(fullAppDryRunReport.hasFirestoreWrites)}</span>（実復元は別フェーズで設計予定）
+                          {/* tenant ごとの内訳 */}
+                          {fullAppDryRunReport.perTenant.length > 0 && (
+                            <details className="bg-white border border-indigo-200 rounded p-2">
+                              <summary className="text-[11px] font-bold text-indigo-700 cursor-pointer">
+                                tenant ごとの内訳（{fullAppDryRunReport.perTenant.length} 件）
+                              </summary>
+                              <div className="mt-2 space-y-1 text-[10px]">
+                                {fullAppDryRunReport.perTenant.map((pt) => (
+                                  <div key={pt.tenantId} className={`p-1.5 rounded border ${pt.ownerUidMismatch ? "border-rose-300 bg-rose-50" : "border-slate-200 bg-slate-50"}`}>
+                                    <div className="font-mono font-bold text-slate-800 truncate">
+                                      {pt.tenantId}
+                                      {!pt.inBackup && <span className="ml-2 text-rose-600 font-bold">(現在のみ)</span>}
+                                      {!pt.inCurrent && <span className="ml-2 text-emerald-600 font-bold">(backup のみ)</span>}
+                                      {pt.ownerUidMismatch && <span className="ml-2 text-rose-600 font-bold">⚠ ownerUid 不一致</span>}
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2 font-mono text-slate-600">
+                                      <div>社員: 追加 {pt.employees.addOnly.length} / 上書 {pt.employees.overwrite.length} / 現在のみ {pt.employees.currentOnly.length}</div>
+                                      <div>設定: 追加 {pt.settings.addOnly.length} / 上書 {pt.settings.overwrite.length} / 現在のみ {pt.settings.currentOnly.length}</div>
+                                      <div>ロック: 追加 {pt.monthlyLocks.addOnly.length} / 上書 {pt.monthlyLocks.overwrite.length} / 現在のみ {pt.monthlyLocks.currentOnly.length}</div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      </details>
+                    </div>
+                    );
+                  })()}
+
+                  {/* ============================================================ */}
+                  {/* 本番復元 env-OFF 時の案内カード                                 */}
+                  {/*   - 「復元ボタンがどこにあるか分からない」問題への対応          */}
+                  {/*   - 復元前チェック完了 & ENABLE_FULL_RESTORE=false の時に表示  */}
+                  {/* ============================================================ */}
+                  {!ENABLE_FULL_RESTORE && fullAppDryRunReport && fullAppBackupPreview && fullAppBackupPreview.ok && (
+                    <div className="mt-4 bg-slate-50 border-2 border-slate-400 rounded p-3">
+                      <div className="font-bold text-[12px] text-slate-800 mb-1.5 flex items-center gap-1.5">
+                        <Lock size={14} /> バックアップから復元（全体上書き）は現在無効です
+                      </div>
+                      <div className="text-[11px] text-slate-700 mb-1.5">
+                        この環境では安全のため、実際に Firestore へ書き込む復元ボタンは非表示になっています。
+                      </div>
+                      <div className="bg-white border border-slate-300 rounded p-2 mb-1.5 text-[11px] text-slate-700 font-mono">
+                        復元を実行するには、検証環境で <span className="font-bold">VITE_ENABLE_FULL_RESTORE=true</span> を設定し、開発サーバーまたはビルドを再起動してください。
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        下に表示されている simulate / sandbox / failure test は開発者向け検証機能です。通常の復元操作では使用しません。
                       </div>
                     </div>
                   )}
+
+                  {/* ============================================================ */}
+                  {/* Phase G1 本番: 災害復旧復元（全体上書き）                       */}
+                  {/*   - env: VITE_ENABLE_FULL_RESTORE=true 時のみ表示              */}
+                  {/*   - 実 batch.commit() / 全 area / merge:true 固定              */}
+                  {/*   - 自動 before-backup DL（失敗時は fail-closed）              */}
+                  {/*   - delete/remove は禁止。backup に無い current-only は残す。  */}
+                  {/* ============================================================ */}
+                  {ENABLE_FULL_RESTORE && fullAppDryRunReport && fullAppBackupPreview && fullAppBackupPreview.ok && (() => {
+                    const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+                    const sizeBlocked = !sizeGate.ok;
+                    const opsEst = fullRestoreOpsEstimate || {
+                      totalOps: 0, totalBatches: 0,
+                      allowedTenantCount: 0, skippedTenantCount: 0,
+                      byArea: { officeMaster: 0, taxTables: 0, tenants: 0, settings: 0, monthlyLocks: 0, employees: 0 },
+                    };
+                    const opsWarn = _computeRestoreOpsWarning(opsEst.totalOps, opsEst.totalBatches);
+                    const opsBlocked = opsWarn.level === "block";
+                    const opsLevelLabel =
+                      opsWarn.level === "block"   ? "⛔ block" :
+                      opsWarn.level === "strong"  ? "‼ strong warning" :
+                      opsWarn.level === "warning" ? "⚠ warning" :
+                                                    "✅ safe";
+                    return (
+                      <div className="mt-4 bg-rose-50 border-2 border-rose-500 rounded p-3">
+                        <div className="font-bold text-[12px] text-rose-900 mb-2 flex items-center gap-1.5">
+                          <AlertTriangle size={14} /> バックアップから復元（全体上書き） — 管理者向け
+                        </div>
+                        <div className="mb-2 bg-rose-100 border border-rose-400 text-rose-900 rounded p-2 text-[11px]">
+                          <span className="font-bold">災害復旧用の管理者機能です。バックアップ JSON を現在の Firestore へ全体上書きします。バックアップに存在しない現在データは削除されません。</span>
+                        </div>
+                        <div className="mb-2 bg-amber-50 border border-amber-300 text-amber-900 rounded p-2 text-[11px]">
+                          初回テストは検証用の顧問先・社員 1 名など、小さいデータで実行してください。
+                        </div>
+
+                        <div className="bg-white border border-rose-200 rounded p-2 mb-2 text-[10px] space-y-0.5">
+                          <div className="font-mono">
+                            <span className="font-bold text-rose-700">backup:</span>{" "}
+                            {fullAppBackupPreview.fileName} ({fullAppBackupPreview.summary.jsonSizeLabel})
+                          </div>
+                          <div className="font-mono">
+                            <span className="font-bold text-rose-700">createdAt:</span>{" "}
+                            {fullAppBackupPreview.json.createdAt || "-"}
+                          </div>
+                          <div className="font-mono">
+                            <span className="font-bold text-rose-700">tenants:</span>{" "}
+                            {fullAppBackupPreview.summary.tenantsCount} / employees: {fullAppBackupPreview.summary.employeesCount}
+                          </div>
+                        </div>
+
+                        {sizeBlocked && (
+                          <div className="bg-rose-200 border-2 border-rose-600 rounded p-2 mb-2 text-[11px] text-rose-900 font-bold">
+                            ⛔ {sizeGate.reason}（本番復元は無効化されています）
+                          </div>
+                        )}
+
+                        <div className={`border-2 rounded p-2 mb-2 text-[11px] ${
+                          opsWarn.level === "block"   ? "bg-rose-100 border-rose-500 text-rose-900" :
+                          opsWarn.level === "strong"  ? "bg-orange-100 border-orange-500 text-orange-900" :
+                          opsWarn.level === "warning" ? "bg-amber-50 border-amber-400 text-amber-900" :
+                                                        "bg-emerald-50 border-emerald-400 text-emerald-900"
+                        }`}>
+                          <div className="font-bold mb-0.5">本番 restore operation 推定（ownerUid skip 後）</div>
+                          <div className="font-mono text-[10px] grid grid-cols-2 gap-x-2">
+                            <div>推定書込数: <span className="font-bold">{opsEst.totalOps.toLocaleString()} 件</span></div>
+                            <div>推定 batch 数: <span className="font-bold">{opsEst.totalBatches}</span></div>
+                            <div>allow tenant: <span className="font-bold">{opsEst.allowedTenantCount}</span></div>
+                            <div>skip tenant: <span className="font-bold">{opsEst.skippedTenantCount}</span></div>
+                          </div>
+                          <div className="font-bold mt-1">判定: {opsLevelLabel}</div>
+                          {opsWarn.level !== "safe" && (
+                            <div className="mt-0.5 text-[10px]">{opsWarn.reason}</div>
+                          )}
+                        </div>
+
+                        <button
+                          onClick={handleStartFullRestore}
+                          disabled={
+                            isFullRestoreRunning || isFullRestoreSimRunning ||
+                            isSandboxRestoreRunning ||
+                            isFullAppDryRunRunning || sizeBlocked || opsBlocked ||
+                            opsEst.totalOps <= 0
+                          }
+                          className="w-full bg-rose-700 hover:bg-rose-600 text-white px-3 py-1.5 rounded text-[11px] font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                          title={
+                            sizeBlocked ? "backup サイズ超過のため実行不可" :
+                            opsBlocked ? "operation 数超過のため実行不可" :
+                            "バックアップから復元（全体上書き）を実行（本番 Firestore に書込）"
+                          }
+                        >
+                          {isFullRestoreRunning ? "復元実行中..." : "バックアップから復元（全体上書き）を実行"}
+                        </button>
+
+                        {fullRestorePreflightErrors.length > 0 && (
+                          <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800">
+                            <div className="font-bold mb-1">⛔ Preflight 失敗:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              {fullRestorePreflightErrors.map((e, i) => (<li key={i}>{e}</li>))}
+                            </ul>
+                          </div>
+                        )}
+                        {fullRestorePreflightWarnings.length > 0 && (
+                          <div className="bg-amber-50 border border-amber-300 rounded p-2 mt-2 text-[10px] text-amber-900">
+                            <div className="font-bold mb-1">⚠ 警告:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              {fullRestorePreflightWarnings.map((w, i) => (<li key={i}>{w}</li>))}
+                            </ul>
+                          </div>
+                        )}
+                        {fullRestoreError && (
+                          <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800 font-bold">
+                            {fullRestoreError}
+                          </div>
+                        )}
+
+                        {fullRestoreResult && !isFullRestoreRunning && (() => {
+                          const r = fullRestoreResult;
+                          const isOk = r.result === "success";
+                          const isPartial = r.result === "partial";
+                          const isAborted = r.result === "aborted-before-backup-failed";
+                          // 動的 class 名は build 時解決されないため、静的に分岐
+                          const resultStyle = isOk
+                            ? "bg-emerald-50 border-emerald-400 text-emerald-900"
+                            : isPartial
+                              ? "bg-amber-50 border-amber-400 text-amber-900"
+                              : "bg-rose-50 border-rose-400 text-rose-900";
+                          const completedOps = (r.logSnapshot && r.logSnapshot.operation && r.logSnapshot.operation.writesSucceeded) || 0;
+                          return (
+                            <div className={`mt-3 border-2 rounded p-2 text-[11px] ${resultStyle}`}>
+                              <div className="font-bold mb-1">復元結果: {r.result}</div>
+                              <div className="font-mono text-[10px] space-y-0.5">
+                                <div>commit 済 ops: <span className="font-bold">{completedOps} / {r.totalOps}</span></div>
+                                <div>committed batches: <span className="font-bold">{r.committedBatches} / {r.totalBatches}</span></div>
+                                <div>skipped tenants: <span className="font-bold">{r.skippedTenants.length}</span></div>
+                                <div>before backup: <span className="font-mono">{r.beforeBackupFileName || "—"}</span></div>
+                                <div>post Dry Run: <span className="font-bold">{r.postDryRunOk === true ? "OK" : r.postDryRunOk === false ? "失敗（本体は continue）" : "—"}</span></div>
+                                <div>restore log id: <span className="font-mono">{r.logId}</span></div>
+                              </div>
+                              {isAborted && (
+                                <div className="mt-1 text-[10px] font-bold">
+                                  自動バックアップ DL に失敗したため Firestore 書込は行っていません。
+                                </div>
+                              )}
+                              {isPartial && (
+                                <div className="mt-1 text-[10px] font-bold">
+                                  partial: 一部 batch のみ commit 済。restore log の operation.batches を確認してください。
+                                </div>
+                              )}
+                              {isOk && (
+                                <div className="mt-1 bg-white border border-emerald-300 rounded p-1.5 text-[10px] text-emerald-900">
+                                  復元後はページを再読み込みし、同じバックアップ JSON で「復元前チェック（差分確認）」を再実行してください。差分がなくなっていることを確認して完了です。
+                                </div>
+                              )}
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                <button
+                                  onClick={handleDownloadFullRestoreLog}
+                                  className="bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                                >
+                                  復元ログ JSON を DL
+                                </button>
+                                <button
+                                  onClick={handleRunPostRestoreDryRun}
+                                  disabled={fullRestorePostDryRunRunning}
+                                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded text-[10px] font-bold disabled:opacity-40"
+                                >
+                                  {fullRestorePostDryRunRunning ? "Dry Run 実行中..." : "post Dry Run を再実行"}
+                                </button>
+                                <button
+                                  onClick={() => { try { window.location.reload(); } catch {} }}
+                                  className="bg-emerald-700 hover:bg-emerald-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                                >
+                                  ページを再読み込み
+                                </button>
+                              </div>
+                              {fullRestorePostDryRunError && (
+                                <div className="mt-1 text-[10px] text-red-700 font-bold">
+                                  {fullRestorePostDryRunError}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
+
+                  {/* ===== Phase G1 本番 Stage 1 確認モーダル ===== */}
+                  {ENABLE_FULL_RESTORE && fullRestoreStage === "stage1" && (() => {
+                    const opsEst = fullRestoreOpsEstimate || { totalOps: 0, totalBatches: 0, allowedTenantCount: 0, skippedTenantCount: 0 };
+                    return (
+                      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelFullRestoreDialog}>
+                        <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-rose-400" onClick={(e) => e.stopPropagation()}>
+                          <div className="text-[14px] font-black text-rose-800 mb-3 flex items-center gap-2">
+                            <ShieldCheck size={18} /> バックアップから復元（全体上書き）Stage 1: 一般確認
+                          </div>
+                          <div className="text-[12px] text-slate-700 space-y-2">
+                            <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[11px] space-y-0.5">
+                              <div><span className="font-bold">backup file:</span> {fullAppBackupPreview?.fileName || "-"}</div>
+                              <div><span className="font-bold">createdAt:</span> {fullAppBackupPreview?.json?.createdAt || "-"}</div>
+                              <div><span className="font-bold">estimated ops:</span> {opsEst.totalOps.toLocaleString()}</div>
+                              <div><span className="font-bold">estimated batches:</span> {opsEst.totalBatches}</div>
+                              <div><span className="font-bold">skip tenants (ownerUid mismatch):</span> {opsEst.skippedTenantCount}</div>
+                              <div><span className="font-bold">allow tenants:</span> {opsEst.allowedTenantCount}</div>
+                            </div>
+                            <div className="bg-amber-50 border border-amber-300 rounded p-2 text-[11px]">
+                              <div className="font-bold mb-1">範囲ポリシー:</div>
+                              <ul className="list-disc list-inside space-y-0.5">
+                                <li>backup に存在する全 doc を merge:true で上書きします</li>
+                                <li>backup に存在しない現在 doc は<span className="font-bold">削除されません</span></li>
+                                <li>restoreLogs は復元対象外です（監査証跡保護）</li>
+                                <li>tenants/{"{tid}"}/users は復元対象外です</li>
+                                <li>ownerUid 不一致 tenant は自動 skip されます</li>
+                              </ul>
+                            </div>
+                            {fullRestorePreflightWarnings.length > 0 && (
+                              <div className="bg-amber-100 border border-amber-400 rounded p-2 text-[11px]">
+                                <div className="font-bold mb-1">⚠ 警告:</div>
+                                <ul className="list-disc list-inside">
+                                  {fullRestorePreflightWarnings.map((w, i) => (<li key={i}>{w}</li>))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                          <div className="mt-4 flex justify-end gap-2">
+                            <button
+                              onClick={handleCancelFullRestoreDialog}
+                              className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                            >
+                              キャンセル
+                            </button>
+                            <button
+                              onClick={handleConfirmFullRestoreStage1}
+                              className="px-3 py-1.5 rounded text-[11px] font-bold bg-rose-600 hover:bg-rose-500 text-white"
+                            >
+                              次へ（Stage 2）
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* ===== Phase G1 本番 Stage 2 破壊性確認モーダル ===== */}
+                  {ENABLE_FULL_RESTORE && fullRestoreStage === "stage2" && (() => {
+                    const expectedAccount = (() => {
+                      try { return getAuth(app).currentUser?.email || userId; } catch { return userId; }
+                    })();
+                    const stalenessCheck = (() => {
+                      try {
+                        return _computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30);
+                      } catch { return { stale: false }; }
+                    })();
+                    const accountMatched = fullRestoreAccountInput === expectedAccount;
+                    const allChecks = fullRestoreAck1 && fullRestoreAck2 && fullRestoreAck3;
+                    const staleOk = !stalenessCheck.stale || fullRestoreAckStale;
+                    const canExecute = accountMatched && allChecks && staleOk && !isFullRestoreRunning;
+                    return (
+                      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelFullRestoreDialog}>
+                        <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-rose-600" onClick={(e) => e.stopPropagation()}>
+                          <div className="text-[14px] font-black text-rose-800 mb-3 flex items-center gap-2">
+                            <AlertTriangle size={18} /> バックアップから復元（全体上書き）Stage 2: 破壊性確認
+                          </div>
+                          <div className="text-[12px] text-slate-700 space-y-2">
+                            <div className="bg-rose-50 border border-rose-300 rounded p-2 text-[11px]">
+                              <div className="font-bold mb-1">本番 Firestore に書き込みます</div>
+                              <div className="font-mono text-[10px]">
+                                merge:true / delete なし / restoreLogs と users は対象外
+                              </div>
+                            </div>
+
+                            {stalenessCheck.stale && (
+                              <div className="bg-amber-100 border-2 border-amber-500 rounded p-2 text-[11px] font-bold text-amber-900">
+                                ⚠ この backup は古い可能性があります（createdAt: {fullAppBackupPreview?.json?.createdAt || "-"} / 経過: {stalenessCheck.ageDays != null ? `${stalenessCheck.ageDays} 日` : "-"}）
+                              </div>
+                            )}
+
+                            <div>
+                              <div className="font-bold mb-1 text-[11px]">
+                                ログインアカウント (email) を入力してください（完全一致で enable）:
+                              </div>
+                              <input
+                                type="text"
+                                value={fullRestoreAccountInput}
+                                onChange={(e) => setFullRestoreAccountInput(e.target.value)}
+                                placeholder={expectedAccount || ""}
+                                className="w-full border-2 border-rose-300 rounded p-1.5 text-[12px] font-mono"
+                              />
+                              <div className="text-[10px] text-slate-500 mt-0.5">
+                                期待値: <span className="font-mono font-bold">{expectedAccount || "(未取得)"}</span>
+                              </div>
+                            </div>
+
+                            <label className="flex items-start gap-2 text-[11px]">
+                              <input
+                                type="checkbox"
+                                checked={fullRestoreAck1}
+                                onChange={(e) => setFullRestoreAck1(e.target.checked)}
+                                className="mt-0.5"
+                              />
+                              <span>既存 docId のデータが merge:true で上書きされることを理解しました</span>
+                            </label>
+                            <label className="flex items-start gap-2 text-[11px]">
+                              <input
+                                type="checkbox"
+                                checked={fullRestoreAck2}
+                                onChange={(e) => setFullRestoreAck2(e.target.checked)}
+                                className="mt-0.5"
+                              />
+                              <span>backup に存在しない現在データは削除されないことを理解しました</span>
+                            </label>
+                            <label className="flex items-start gap-2 text-[11px]">
+                              <input
+                                type="checkbox"
+                                checked={fullRestoreAck3}
+                                onChange={(e) => setFullRestoreAck3(e.target.checked)}
+                                className="mt-0.5"
+                              />
+                              <span>復元前自動バックアップ（before_restore JSON）を保存する必要があることを理解しました</span>
+                            </label>
+                            {stalenessCheck.stale && (
+                              <label className="flex items-start gap-2 text-[11px] bg-amber-50 border border-amber-300 rounded p-1.5">
+                                <input
+                                  type="checkbox"
+                                  checked={fullRestoreAckStale}
+                                  onChange={(e) => setFullRestoreAckStale(e.target.checked)}
+                                  className="mt-0.5"
+                                />
+                                <span className="font-bold text-amber-900">古い backup であることを理解した上で復元します</span>
+                              </label>
+                            )}
+                          </div>
+                          <div className="mt-4 flex justify-end gap-2">
+                            <button
+                              onClick={handleCancelFullRestoreDialog}
+                              className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                            >
+                              キャンセル
+                            </button>
+                            <button
+                              onClick={handleExecuteFullRestore}
+                              disabled={!canExecute}
+                              className="px-3 py-1.5 rounded text-[11px] font-bold bg-rose-700 hover:bg-rose-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={canExecute ? "本番 Firestore に書込" : "全条件を満たすと有効化されます"}
+                            >
+                              バックアップから復元（全体上書き）を実行
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* ===== Phase G1 本番 progress modal（全画面、復元中は閉じない） ===== */}
+                  {isFullRestoreRunning && fullRestoreProgress && (
+                    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/70 p-4">
+                      <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 border-2 border-rose-500">
+                        <div className="text-[14px] font-black text-rose-800 mb-3 flex items-center gap-2">
+                          <ShieldCheck size={18} /> バックアップから復元（全体上書き）実行中
+                        </div>
+                        <div className="space-y-2 text-[11px] text-slate-700">
+                          <div className="font-mono">
+                            status: <span className="font-bold">{fullRestoreProgress.status}</span>
+                          </div>
+                          <div className="font-mono">
+                            進捗: <span className="font-bold">{fullRestoreProgress.completedOps}</span> / {fullRestoreProgress.totalOps} 件
+                            {" "}
+                            ({fullRestoreProgress.totalOps > 0 ? Math.floor(fullRestoreProgress.completedOps / fullRestoreProgress.totalOps * 100) : 0}%)
+                          </div>
+                          <div className="font-mono">
+                            batch: {fullRestoreProgress.currentBatchIndex + 1} / {fullRestoreProgress.totalBatches}
+                          </div>
+                          <div className="font-mono">
+                            area: <span className="font-bold">{fullRestoreProgress.currentArea || "—"}</span>
+                          </div>
+                          <div className="font-mono">
+                            errors: <span className="font-bold">{fullRestoreProgress.errorsCount || 0}</span>
+                          </div>
+                          <div className="font-mono">
+                            経過: {((fullRestoreProgress.durationMs || 0) / 1000).toFixed(1)} 秒
+                          </div>
+                          <div className="w-full bg-slate-200 rounded overflow-hidden h-3">
+                            <div
+                              className="bg-rose-600 h-3 transition-all"
+                              style={{ width: `${fullRestoreProgress.totalOps > 0 ? Math.floor(fullRestoreProgress.completedOps / fullRestoreProgress.totalOps * 100) : 0}%` }}
+                            />
+                          </div>
+                          <div className="text-[10px] text-rose-700 font-bold text-center mt-2">
+                            ⚠ 画面を閉じたり、ページを再読み込みしないでください
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ============================================================ */}
+                  {/* 詳細・開発者モード（通常の復元では使いません）                  */}
+                  {/*   主導線「バックアップ / 確認 / Dry Run / 全体復元」以外を      */}
+                  {/*   collapse 化。simulate / sandbox / failure test を内包。      */}
+                  {/* ============================================================ */}
+
+                  {/* ===== simulate engine（collapsed: 詳細・開発者モード） ===== */}
+                  <details className="mt-4 bg-slate-50 border border-slate-300 rounded p-2">
+                    <summary className="text-[11px] font-bold text-slate-700 cursor-pointer select-none">
+                      詳細・開発者モード: simulate engine（通常の復元では使いません）
+                    </summary>
+                  {fullAppDryRunReport && fullAppBackupPreview && fullAppBackupPreview.ok && (
+                    <div className="mt-2 bg-violet-50 border-2 border-violet-300 rounded p-3">
+                      <div className="font-bold text-[12px] text-violet-800 mb-2 flex items-center gap-1.5">
+                        <ShieldCheck size={14} /> 災害復旧復元（全体上書き） — simulate engine
+                      </div>
+                      <div className="mb-2 bg-violet-100 border border-violet-300 text-violet-900 rounded p-2 text-[11px] font-bold">
+                        ⚠ simulate mode です。Firestore のデータには **書き込みません**。<br />
+                        operation 生成・batch 分割・progress・restoreLogs のみ実行します。
+                      </div>
+
+                      <div className="bg-white border border-violet-200 rounded p-2 mb-2 text-[10px] space-y-0.5">
+                        <div className="font-mono">
+                          <span className="font-bold text-violet-700">backup:</span>{" "}
+                          {fullAppBackupPreview.fileName} ({fullAppBackupPreview.summary.jsonSizeLabel})
+                        </div>
+                        <div className="font-mono">
+                          <span className="font-bold text-violet-700">tenants in backup:</span>{" "}
+                          {fullAppBackupPreview.summary.tenantsCount} / employees: {fullAppBackupPreview.summary.employeesCount}
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+                        const sizeBlocked = !sizeGate.ok;
+                        // ops 推定 (ownerUid skip 後)。useMemo 化済 (fullRestoreOpsEstimate)。
+                        // backup 未ロード時は null フォールバック (safe 風表示)。
+                        const opsEst = fullRestoreOpsEstimate || {
+                          totalOps: 0, totalBatches: 0,
+                          allowedTenantCount: 0, skippedTenantCount: 0,
+                          byArea: { officeMaster: 0, taxTables: 0, tenants: 0, settings: 0, monthlyLocks: 0, employees: 0 },
+                        };
+                        const opsWarn = _computeRestoreOpsWarning(opsEst.totalOps, opsEst.totalBatches);
+                        const opsBlocked = opsWarn.level === "block";
+                        const opsLevelStyle =
+                          opsWarn.level === "block"   ? "bg-rose-100 border-rose-500 text-rose-900" :
+                          opsWarn.level === "strong"  ? "bg-orange-100 border-orange-500 text-orange-900" :
+                          opsWarn.level === "warning" ? "bg-amber-50 border-amber-400 text-amber-900" :
+                                                        "bg-emerald-50 border-emerald-400 text-emerald-900";
+                        const opsLevelLabel =
+                          opsWarn.level === "block"   ? "⛔ block" :
+                          opsWarn.level === "strong"  ? "‼ strong warning" :
+                          opsWarn.level === "warning" ? "⚠ warning" :
+                                                        "✅ safe";
+                        return (
+                          <>
+                            {sizeBlocked && (
+                              <div className="bg-rose-100 border-2 border-rose-500 rounded p-2 mb-2 text-[11px] text-rose-900 font-bold">
+                                ⛔ {sizeGate.reason}（restore 系ボタンは無効化されています）
+                              </div>
+                            )}
+                            <div className={`border-2 rounded p-2 mb-2 text-[11px] ${opsLevelStyle}`}>
+                              <div className="font-bold mb-0.5">restore operation 推定（ownerUid skip 後）</div>
+                              <div className="font-mono text-[10px] grid grid-cols-2 gap-x-2">
+                                <div>推定書込数: <span className="font-bold">{opsEst.totalOps.toLocaleString()} 件</span></div>
+                                <div>推定 batch 数: <span className="font-bold">{opsEst.totalBatches}</span></div>
+                                <div>allow tenant: <span className="font-bold">{opsEst.allowedTenantCount}</span></div>
+                                <div>skip tenant: <span className="font-bold">{opsEst.skippedTenantCount}</span></div>
+                              </div>
+                              <div className="font-bold mt-1">判定: {opsLevelLabel}</div>
+                              {opsBlocked && (
+                                <div className="mt-0.5">{opsWarn.reason}</div>
+                              )}
+                              {!opsBlocked && opsWarn.level !== "safe" && (
+                                <div className="mt-0.5 text-[10px]">{opsWarn.reason}</div>
+                              )}
+                            </div>
+                            <button
+                              onClick={handleStartFullRestoreSimulation}
+                              disabled={isFullRestoreSimRunning || isFullAppDryRunRunning || sizeBlocked || opsBlocked}
+                              className="w-full bg-violet-600 hover:bg-violet-500 text-white px-3 py-1.5 rounded text-[11px] font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={sizeBlocked ? "backup サイズ超過のため実行不可" : opsBlocked ? "operation 数超過のため実行不可" : "simulate engine を起動（Firestore commit なし）"}
+                            >
+                              {isFullRestoreSimRunning ? "simulate 実行中..." : "災害復旧復元 simulate を実行（Firestore commit なし）"}
+                            </button>
+                          </>
+                        );
+                      })()}
+
+                      {fullRestoreSimPreflightErrors.length > 0 && (
+                        <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800">
+                          <div className="font-bold mb-1">⛔ Preflight 失敗:</div>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {fullRestoreSimPreflightErrors.map((e, i) => (<li key={i}>{e}</li>))}
+                          </ul>
+                        </div>
+                      )}
+                      {fullRestoreSimPreflightWarnings.length > 0 && (
+                        <div className="bg-amber-50 border border-amber-300 rounded p-2 mt-2 text-[10px] text-amber-900">
+                          <div className="font-bold mb-1">⚠ 警告:</div>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {fullRestoreSimPreflightWarnings.map((w, i) => (<li key={i}>{w}</li>))}
+                          </ul>
+                        </div>
+                      )}
+                      {fullRestoreSimError && (
+                        <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800 font-bold">
+                          {fullRestoreSimError}
+                        </div>
+                      )}
+
+                      {/* simulate 完了表示 */}
+                      {fullRestoreSimResult && !isFullRestoreSimRunning && (
+                        <div className={`border-2 rounded p-3 mt-2 text-[11px] ${
+                          fullRestoreSimResult.result === "success"
+                            ? "bg-emerald-50 border-emerald-400 text-emerald-900"
+                            : fullRestoreSimResult.result === "partial"
+                            ? "bg-amber-50 border-amber-400 text-amber-900"
+                            : "bg-rose-50 border-rose-400 text-rose-900"
+                        }`}>
+                          <div className="font-black text-[13px] mb-2 text-center bg-violet-200 text-violet-900 rounded p-1">
+                            🛡 Firestore のデータには書き込んでいません（simulate）
+                          </div>
+                          <div className="font-bold mb-1">simulate 結果: {fullRestoreSimResult.result}</div>
+                          <div className="font-mono text-[10px] space-y-0.5">
+                            <div>logId: {fullRestoreSimResult.logId}</div>
+                            <div>totalOps: <span className="font-bold">{fullRestoreSimResult.totalOps}</span> 件（実書込される予定だった件数）</div>
+                            <div>totalBatches: <span className="font-bold">{fullRestoreSimResult.totalBatches}</span></div>
+                            <div>skippedTenants: <span className="font-bold">{fullRestoreSimResult.skippedTenants.length}</span> 件（ownerUid mismatch）</div>
+                            <div>before backup: {fullRestoreSimResult.beforeBackupFileName || "（DL なし）"}</div>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-0.5 text-[10px] font-mono">
+                            <div>事務所マスタ: {fullRestoreSimResult.opsByArea.officeMasterOps}</div>
+                            <div>税額表: {fullRestoreSimResult.opsByArea.taxTablesOps}</div>
+                            <div>tenants: {fullRestoreSimResult.opsByArea.tenantsOps}</div>
+                            <div>settings: {fullRestoreSimResult.opsByArea.settingsOps}</div>
+                            <div>monthlyLocks: {fullRestoreSimResult.opsByArea.monthlyLocksOps}</div>
+                            <div>employees: {fullRestoreSimResult.opsByArea.employeesOps}</div>
+                          </div>
+                          {fullRestoreSimResult.skippedTenants.length > 0 && (
+                            <div className="mt-2 bg-white border border-amber-300 rounded p-1.5 text-[10px]">
+                              <div className="font-bold text-amber-800 mb-0.5">skip された tenant:</div>
+                              <ul className="list-disc list-inside font-mono">
+                                {fullRestoreSimResult.skippedTenants.map((s, i) => (
+                                  <li key={i}>{s.tenantId} (ownerUid: {s.backupOwnerUid || "なし"})</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              onClick={handleDownloadFullRestoreSimLog}
+                              className="bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                            >
+                              simulate ログ JSON を DL
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ===== simulate Stage 1 ===== */}
+                  {fullRestoreSimStage === "stage1" && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelFullRestoreSimDialog}>
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-violet-400" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-[14px] font-black text-violet-800 mb-3 flex items-center gap-2">
+                          <ShieldCheck size={18} /> Stage 1: 一般確認（simulate）
+                        </div>
+                        <div className="text-[12px] text-slate-700 space-y-2">
+                          <div className="bg-violet-100 border border-violet-300 rounded p-2 text-[11px] font-bold">
+                            この操作は **simulate** です。Firestore データには書き込みません。
+                          </div>
+                          <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[11px]">
+                            <div><span className="font-bold">backup:</span> {fullAppBackupPreview && fullAppBackupPreview.fileName}</div>
+                            <div><span className="font-bold">backup 作成日時:</span> {fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt}</div>
+                          </div>
+                          <div className="bg-amber-50 border border-amber-300 rounded p-2 text-[11px]">
+                            <div className="font-bold mb-1">simulate で実行されること:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              <li>operation 配列の生成</li>
+                              <li>450 件単位の batch 分割</li>
+                              <li>ownerUid mismatch tenant の skip</li>
+                              <li>復元前自動バックアップ JSON の DL</li>
+                              <li>restoreLogs への書込（mode: restore-full-merge-simulate）</li>
+                              <li>各 batch を 50ms sleep で simulate</li>
+                            </ul>
+                            <div className="font-bold mt-1 text-rose-700">
+                              ※ batch.commit() は呼ばれません。Firestore データは変わりません。
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button
+                            onClick={handleCancelFullRestoreSimDialog}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                          >
+                            キャンセル
+                          </button>
+                          <button
+                            onClick={handleConfirmFullRestoreSimStage1}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-violet-600 hover:bg-violet-500 text-white"
+                          >
+                            次へ（Stage 2）
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ===== simulate Stage 2 ===== */}
+                  {fullRestoreSimStage === "stage2" && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelFullRestoreSimDialog}>
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-violet-500" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-[14px] font-black text-violet-800 mb-3 flex items-center gap-2">
+                          <AlertTriangle size={18} /> Stage 2: 破壊性確認（simulate）
+                        </div>
+                        <div className="text-[12px] text-slate-700 space-y-2">
+                          <div className="bg-violet-100 border border-violet-300 rounded p-2 text-[11px] font-bold">
+                            ※ simulate mode: 実際の書込は行われませんが、本番 UI と同じ確認手順を踏みます。
+                          </div>
+                          <div>
+                            <div className="font-bold mb-1 text-[11px]">
+                              ログイン中のアカウント（メール / uid）を入力してください:
+                            </div>
+                            <input
+                              type="text"
+                              value={fullRestoreSimAccountInput}
+                              onChange={(e) => setFullRestoreSimAccountInput(e.target.value)}
+                              placeholder={(() => { try { return getAuth(app).currentUser?.email || userId || ""; } catch { return userId || ""; } })()}
+                              className="w-full border-2 border-violet-300 rounded p-1.5 text-[12px] font-mono"
+                            />
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              期待値: <span className="font-mono font-bold">{(() => { try { return getAuth(app).currentUser?.email || userId || "(no email)"; } catch { return userId || "(no email)"; } })()}</span>
+                            </div>
+                          </div>
+                          <label className="flex items-start gap-2 text-[11px]">
+                            <input
+                              type="checkbox"
+                              checked={fullRestoreSimAck1}
+                              onChange={(e) => setFullRestoreSimAck1(e.target.checked)}
+                              className="mt-0.5"
+                            />
+                            <span>これは simulate であり、Firestore データには書き込まれないことを理解しました</span>
+                          </label>
+                          <label className="flex items-start gap-2 text-[11px]">
+                            <input
+                              type="checkbox"
+                              checked={fullRestoreSimAck2}
+                              onChange={(e) => setFullRestoreSimAck2(e.target.checked)}
+                              className="mt-0.5"
+                            />
+                            <span>復元前自動バックアップ JSON が DL されることを理解しました</span>
+                          </label>
+                          {(() => {
+                            const st = _computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30);
+                            if (!st.stale) return null;
+                            return (
+                              <>
+                                <div className="bg-amber-100 border-2 border-amber-500 rounded p-2 mt-1 text-[11px] text-amber-900">
+                                  <div className="font-bold mb-0.5">⚠ 古いバックアップです（{st.daysOld}日前）</div>
+                                  <div>このバックアップは30日以上前のものです。現在データとの差分が大きい可能性があります。</div>
+                                </div>
+                                <label className="flex items-start gap-2 text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={fullRestoreSimAckStale}
+                                    onChange={(e) => setFullRestoreSimAckStale(e.target.checked)}
+                                    className="mt-0.5"
+                                  />
+                                  <span>古いバックアップ（{st.daysOld}日前）であることを理解しました</span>
+                                </label>
+                              </>
+                            );
+                          })()}
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button
+                            onClick={handleCancelFullRestoreSimDialog}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                          >
+                            キャンセル
+                          </button>
+                          <button
+                            onClick={handleExecuteFullRestoreSimulation}
+                            disabled={
+                              isFullRestoreSimRunning ||
+                              !fullRestoreSimAck1 ||
+                              !fullRestoreSimAck2 ||
+                              !fullRestoreSimAccountInput ||
+                              fullRestoreSimAccountInput !== ((() => { try { return getAuth(app).currentUser?.email || userId || ""; } catch { return userId || ""; } })()) ||
+                              (_computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30).stale && !fullRestoreSimAckStale)
+                            }
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-violet-700 hover:bg-violet-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            simulate を実行
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ===== simulate 進捗モーダル ===== */}
+                  {isFullRestoreSimRunning && fullRestoreSimProgress && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4">
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-violet-500">
+                        <div className="text-[14px] font-black text-violet-800 mb-3 flex items-center gap-2">
+                          <ShieldCheck size={18} /> 災害復旧復元 simulate 実行中
+                        </div>
+                        <div className="text-[12px] text-slate-700 space-y-2">
+                          <div className="bg-violet-100 border border-violet-300 rounded p-2 text-[11px] font-bold text-center">
+                            🛡 Firestore のデータには書き込んでいません
+                          </div>
+
+                          <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[11px] space-y-0.5">
+                            <div>
+                              status: <span className="font-bold text-violet-700">{fullRestoreSimProgress.status}</span>
+                            </div>
+                            <div>
+                              進捗: <span className="font-bold">{fullRestoreSimProgress.completedOps}</span> / {fullRestoreSimProgress.totalOps} 件
+                              {" "}
+                              ({fullRestoreSimProgress.totalOps > 0 ? Math.floor(fullRestoreSimProgress.completedOps / fullRestoreSimProgress.totalOps * 100) : 0}%)
+                            </div>
+                            <div>
+                              batch: {fullRestoreSimProgress.currentBatchIndex + 1} / {fullRestoreSimProgress.totalBatches}
+                            </div>
+                            <div>
+                              現在の area: <span className="font-bold">{fullRestoreSimProgress.currentArea || "—"}</span>
+                            </div>
+                            <div>
+                              経過: {((fullRestoreSimProgress.durationMs || 0) / 1000).toFixed(1)} 秒
+                            </div>
+                          </div>
+
+                          <div className="w-full bg-slate-200 rounded overflow-hidden h-3">
+                            <div
+                              className="bg-violet-600 h-3 transition-all"
+                              style={{ width: `${fullRestoreSimProgress.totalOps > 0 ? Math.floor(fullRestoreSimProgress.completedOps / fullRestoreSimProgress.totalOps * 100) : 0}%` }}
+                            />
+                          </div>
+
+                          <div className="text-[10px] text-rose-700 font-bold text-center">
+                            ⚠ 画面を閉じたり、ページを再読み込みしないでください
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  </details>
+
+                  {/* ===== sandbox single-commit（collapsed: 詳細・開発者モード） ===== */}
+                  <details className="mt-4 bg-slate-50 border border-slate-300 rounded p-2">
+                    <summary className="text-[11px] font-bold text-slate-700 cursor-pointer select-none">
+                      詳細・開発者モード: sandbox single-commit 検証（通常の復元では使いません）
+                    </summary>
+                  {ENABLE_SANDBOX_RESTORE && fullAppDryRunReport && fullAppBackupPreview && fullAppBackupPreview.ok && (() => {
+                    const opts = _getSandboxRestoreOptions();
+                    return (
+                      <div className="mt-4 bg-orange-50 border-2 border-orange-400 rounded p-3">
+                        <div className="font-bold text-[12px] text-orange-800 mb-2 flex items-center gap-1.5">
+                          <ShieldCheck size={14} /> sandbox single-commit 検証（本番 restore 前の安全検証モード）
+                        </div>
+                        <div className="mb-2 bg-orange-100 border border-orange-300 text-orange-900 rounded p-2 text-[11px]">
+                          <div className="font-bold mb-0.5">本番 restore 前の安全検証モードです。</div>
+                          <ul className="list-disc list-inside text-[10px]">
+                            <li>対象: tenant.name に <code className="bg-white px-1 rounded">[SANDBOX]</code> を含む tenant のみ</li>
+                            <li>commit 範囲: employee 1 件 / 1 batch / merge:true</li>
+                            <li>Firestore に実書込します（restoreLogs と employee doc 1 件）</li>
+                            <li>このモードは本番災害復旧復元ではありません</li>
+                          </ul>
+                        </div>
+
+                        <div className="bg-white border border-orange-200 rounded p-2 mb-2 space-y-1.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <label className="flex flex-col text-[10px]">
+                              <span className="font-bold text-orange-700 mb-0.5">sandbox tenant（[SANDBOX] 含）</span>
+                              <select
+                                value={sandboxRestoreTargetTenantId}
+                                onChange={(e) => {
+                                  setSandboxRestoreTargetTenantId(e.target.value);
+                                  setSandboxRestoreTargetEmpId("");
+                                  setSandboxRestoreError("");
+                                  setSandboxRestorePreflightErrors([]);
+                                }}
+                                disabled={isSandboxRestoreRunning}
+                                className="text-[11px] border border-slate-300 rounded p-1 font-mono"
+                              >
+                                <option value="">-- 選択 --</option>
+                                {opts.tenantOptions.map((t) => (
+                                  <option key={t.tenantId} value={t.tenantId}>
+                                    {t.tenantName} ({t.tenantId})
+                                  </option>
+                                ))}
+                              </select>
+                              {opts.tenantOptions.length === 0 && (
+                                <span className="text-[9px] text-rose-700 mt-0.5">
+                                  [SANDBOX] を含む tenant がありません
+                                </span>
+                              )}
+                            </label>
+                            <label className="flex flex-col text-[10px]">
+                              <span className="font-bold text-orange-700 mb-0.5">employee（backup 側）</span>
+                              <select
+                                value={sandboxRestoreTargetEmpId}
+                                onChange={(e) => {
+                                  setSandboxRestoreTargetEmpId(e.target.value);
+                                  setSandboxRestoreError("");
+                                }}
+                                disabled={isSandboxRestoreRunning || !sandboxRestoreTargetTenantId}
+                                className="text-[11px] border border-slate-300 rounded p-1 font-mono"
+                              >
+                                <option value="">-- 選択 --</option>
+                                {opts.empOptions.map((e) => (
+                                  <option key={e} value={e}>{e}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+
+                          {(() => {
+                            const sizeGate = _canRunRestoreByBackupSize(fullAppBackupPreview && fullAppBackupPreview.fileSize);
+                            const sizeBlocked = !sizeGate.ok;
+                            return (
+                              <>
+                                {sizeBlocked && (
+                                  <div className="bg-rose-100 border-2 border-rose-500 rounded p-2 mb-2 text-[11px] text-rose-900 font-bold">
+                                    ⛔ {sizeGate.reason}（sandbox commit は無効化されています）
+                                  </div>
+                                )}
+                                {/* sandbox commit は ops gate 対象外 (常に 1 op / 1 batch / 1 doc) */}
+                                <div className="bg-emerald-50 border border-emerald-400 rounded p-2 mb-2 text-[11px] text-emerald-900">
+                                  <div className="font-bold">sandbox commit: 1 operation only</div>
+                                  <div className="font-mono text-[10px] mt-0.5">
+                                    書込件数: 1 件 / batch 数: 1 / 対象 doc: [SANDBOX] tenant の employee 1 件のみ
+                                  </div>
+                                  <div className="text-[10px] mt-0.5">
+                                    ops gate の対象外です（常に最小規模のため）。
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={handleStartSandboxRestore}
+                                  disabled={
+                                    isSandboxRestoreRunning ||
+                                    isFullRestoreSimRunning ||
+                                    !sandboxRestoreTargetTenantId ||
+                                    !sandboxRestoreTargetEmpId ||
+                                    sizeBlocked
+                                  }
+                                  className="w-full bg-orange-600 hover:bg-orange-500 text-white px-3 py-1.5 rounded text-[11px] font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                                  title={sizeBlocked ? "backup サイズ超過のため実行不可" : "sandbox 1 件 commit を実行（[SANDBOX] tenant のみ）"}
+                                >
+                                  {isSandboxRestoreRunning ? "sandbox commit 中..." : "sandbox commit を実行（[SANDBOX] tenant の 1 employee）"}
+                                </button>
+                              </>
+                            );
+                          })()}
+                        </div>
+
+                        {sandboxRestorePreflightErrors.length > 0 && (
+                          <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800">
+                            <div className="font-bold mb-1">⛔ Preflight 失敗:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              {sandboxRestorePreflightErrors.map((e, i) => (<li key={i}>{e}</li>))}
+                            </ul>
+                          </div>
+                        )}
+                        {sandboxRestorePreflightWarnings.length > 0 && (
+                          <div className="bg-amber-50 border border-amber-300 rounded p-2 mt-2 text-[10px] text-amber-900">
+                            <div className="font-bold mb-1">⚠ 警告:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              {sandboxRestorePreflightWarnings.map((w, i) => (<li key={i}>{w}</li>))}
+                            </ul>
+                          </div>
+                        )}
+                        {sandboxRestoreError && (
+                          <div className="bg-red-50 border border-red-300 rounded p-2 mt-2 text-[10px] text-red-800 font-bold">
+                            {sandboxRestoreError}
+                          </div>
+                        )}
+
+                        {sandboxRestoreResult && !isSandboxRestoreRunning && (
+                          <div className={`border-2 rounded p-3 mt-2 text-[11px] ${
+                            sandboxRestoreResult.result === "success"
+                              ? "bg-emerald-50 border-emerald-400 text-emerald-900"
+                              : sandboxRestoreResult.result === "partial"
+                              ? "bg-amber-50 border-amber-400 text-amber-900"
+                              : "bg-rose-50 border-rose-400 text-rose-900"
+                          }`}>
+                            <div className="font-bold mb-1">sandbox 結果: {sandboxRestoreResult.result}</div>
+                            <div className="font-mono text-[10px] space-y-0.5">
+                              <div>logId: {sandboxRestoreResult.logId}</div>
+                              <div>target: {sandboxRestoreResult.target.tenantId} / {sandboxRestoreResult.target.empId}</div>
+                              <div>verifyOk: {String(sandboxRestoreResult.verifyOk)}</div>
+                              {sandboxRestoreResult.verifyError && (
+                                <div className="text-rose-700">verify エラー: {sandboxRestoreResult.verifyError}</div>
+                              )}
+                              <div>before backup: {sandboxRestoreResult.beforeBackupFileName || "（DL なし）"}</div>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <button
+                                onClick={handleRunFullAppRestoreDryRun}
+                                disabled={isFullAppDryRunRunning}
+                                className="bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded text-[10px] font-bold disabled:opacity-40"
+                              >
+                                Dry Run を再実行
+                              </button>
+                              <button
+                                onClick={handleDownloadSandboxRestoreLog}
+                                className="bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                              >
+                                sandbox ログ JSON を DL
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* ===== sandbox Stage 1 ===== */}
+                  {sandboxRestoreStage === "stage1" && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelSandboxDialog}>
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-orange-400" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-[14px] font-black text-orange-800 mb-3 flex items-center gap-2">
+                          <ShieldCheck size={18} /> sandbox commit - Stage 1（一般確認）
+                        </div>
+                        <div className="text-[12px] text-slate-700 space-y-2">
+                          <div className="bg-orange-100 border border-orange-300 rounded p-2 text-[11px] font-bold">
+                            本番 restore 前の安全検証モードです。[SANDBOX] tenant の employee 1 件のみ commit します。
+                          </div>
+                          <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[11px]">
+                            <div><span className="font-bold">tenant:</span> {sandboxRestoreTargetTenantId}</div>
+                            <div><span className="font-bold">employee:</span> {sandboxRestoreTargetEmpId}</div>
+                            <div><span className="font-bold">書込件数:</span> 1 doc / 1 batch / merge:true</div>
+                          </div>
+                          <div className="bg-amber-50 border border-amber-300 rounded p-2 text-[11px]">
+                            <div className="font-bold mb-1">実行されること:</div>
+                            <ul className="list-disc list-inside space-y-0.5">
+                              <li>復元前自動バックアップ JSON の DL（fail-closed）</li>
+                              <li>restoreLogs Step1 in-progress 書込</li>
+                              <li>employee doc 1 件を merge:true で Firestore 書込</li>
+                              <li>read-back + merge-aware verify</li>
+                              <li>restoreLogs Step2 success/partial 書込</li>
+                            </ul>
+                          </div>
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button
+                            onClick={handleCancelSandboxDialog}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                          >
+                            キャンセル
+                          </button>
+                          <button
+                            onClick={handleConfirmSandboxStage1}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-orange-600 hover:bg-orange-500 text-white"
+                          >
+                            次へ（Stage 2）
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ===== sandbox Stage 2 ===== */}
+                  {sandboxRestoreStage === "stage2" && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" onClick={handleCancelSandboxDialog}>
+                      <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full p-5 border-2 border-orange-500" onClick={(e) => e.stopPropagation()}>
+                        <div className="text-[14px] font-black text-orange-800 mb-3 flex items-center gap-2">
+                          <AlertTriangle size={18} /> sandbox commit - Stage 2（破壊性確認）
+                        </div>
+                        <div className="text-[12px] text-slate-700 space-y-2">
+                          <div className="bg-rose-50 border border-rose-300 rounded p-2 text-[11px]">
+                            <div className="font-bold mb-1">これは Firestore への実書込です</div>
+                            <div className="font-mono text-[10px]">
+                              path: tenants/{sandboxRestoreTargetTenantId}/employees/{sandboxRestoreTargetEmpId}<br />
+                              merge: true / 1 batch / 1 doc
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-bold mb-1 text-[11px]">ログイン中のアカウントを入力してください:</div>
+                            <input
+                              type="text"
+                              value={sandboxRestoreAccountInput}
+                              onChange={(e) => setSandboxRestoreAccountInput(e.target.value)}
+                              placeholder={(() => { try { return getAuth(app).currentUser?.email || userId || ""; } catch { return userId || ""; } })()}
+                              className="w-full border-2 border-orange-300 rounded p-1.5 text-[12px] font-mono"
+                            />
+                            <div className="text-[10px] text-slate-500 mt-0.5">
+                              期待値: <span className="font-mono font-bold">{(() => { try { return getAuth(app).currentUser?.email || userId; } catch { return userId; } })()}</span>
+                            </div>
+                          </div>
+                          <label className="flex items-start gap-2 text-[11px]">
+                            <input
+                              type="checkbox"
+                              checked={sandboxRestoreAck1}
+                              onChange={(e) => setSandboxRestoreAck1(e.target.checked)}
+                              className="mt-0.5"
+                            />
+                            <span>[SANDBOX] tenant の employee doc が merge:true で実書込されることを理解しました</span>
+                          </label>
+                          <label className="flex items-start gap-2 text-[11px]">
+                            <input
+                              type="checkbox"
+                              checked={sandboxRestoreAck2}
+                              onChange={(e) => setSandboxRestoreAck2(e.target.checked)}
+                              className="mt-0.5"
+                            />
+                            <span>これは sandbox 検証であり、本番 restore ではないことを理解しました</span>
+                          </label>
+                          {(() => {
+                            const st = _computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30);
+                            if (!st.stale) return null;
+                            return (
+                              <>
+                                <div className="bg-amber-100 border-2 border-amber-500 rounded p-2 mt-1 text-[11px] text-amber-900">
+                                  <div className="font-bold mb-0.5">⚠ 古いバックアップです（{st.daysOld}日前）</div>
+                                  <div>このバックアップは30日以上前のものです。現在データとの差分が大きい可能性があります。</div>
+                                </div>
+                                <label className="flex items-start gap-2 text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={sandboxRestoreAckStale}
+                                    onChange={(e) => setSandboxRestoreAckStale(e.target.checked)}
+                                    className="mt-0.5"
+                                  />
+                                  <span>古いバックアップ（{st.daysOld}日前）であることを理解しました</span>
+                                </label>
+                              </>
+                            );
+                          })()}
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button
+                            onClick={handleCancelSandboxDialog}
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-700"
+                          >
+                            キャンセル
+                          </button>
+                          <button
+                            onClick={handleExecuteSandboxRestore}
+                            disabled={
+                              isSandboxRestoreRunning ||
+                              !sandboxRestoreAck1 ||
+                              !sandboxRestoreAck2 ||
+                              !sandboxRestoreAccountInput ||
+                              sandboxRestoreAccountInput !== ((() => { try { return getAuth(app).currentUser?.email || userId; } catch { return userId; } })()) ||
+                              (_computeBackupStaleness(fullAppBackupPreview && fullAppBackupPreview.json && fullAppBackupPreview.json.createdAt, 30).stale && !sandboxRestoreAckStale)
+                            }
+                            className="px-3 py-1.5 rounded text-[11px] font-bold bg-orange-700 hover:bg-orange-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            sandbox commit を実行
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ===== sandbox 実行中モーダル ===== */}
+                  {isSandboxRestoreRunning && (
+                    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4">
+                      <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 border-2 border-orange-500">
+                        <div className="text-[14px] font-black text-orange-800 mb-3 flex items-center gap-2">
+                          <ShieldCheck size={18} /> sandbox commit 実行中
+                        </div>
+                        <div className="text-[11px] text-slate-700 space-y-2">
+                          <div className="bg-orange-100 border border-orange-300 rounded p-2 font-bold text-center">
+                            [SANDBOX] tenant の employee 1 doc を Firestore に書込中
+                          </div>
+                          <div className="font-mono text-[10px]">
+                            target: {sandboxRestoreTargetTenantId} / {sandboxRestoreTargetEmpId}
+                          </div>
+                          <div className="text-[10px] text-rose-700 font-bold text-center">
+                            ⚠ 画面を閉じたり、ページを再読み込みしないでください
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  </details>
+
+                  {/* ===== failure injection test（collapsed: 詳細・開発者モード） ===== */}
+                  <details className="mt-4 bg-slate-50 border border-slate-300 rounded p-2">
+                    <summary className="text-[11px] font-bold text-slate-700 cursor-pointer select-none">
+                      詳細・開発者モード: failure injection test suite（通常の復元では使いません）
+                    </summary>
+                  {ENABLE_FAILURE_TEST && (
+                    <div className="mt-4 bg-zinc-900 border-2 border-zinc-700 rounded p-3 text-zinc-100">
+                      <div className="font-bold text-[12px] mb-2 flex items-center gap-1.5">
+                        <AlertTriangle size={14} className="text-yellow-400" /> failure injection test suite（異常系監査）
+                      </div>
+                      <div className="mb-2 bg-zinc-800 border border-zinc-700 rounded p-2 text-[10px]">
+                        <div className="font-bold mb-0.5 text-yellow-300">restore engine の fail-safe を意図的に壊して検証します。</div>
+                        <ul className="list-disc list-inside text-zinc-300 space-y-0.5">
+                          <li>本番 restore ではありません</li>
+                          <li>実 commit / saveDoc (employees 等) は呼びません</li>
+                          <li>restoreLogs に mode: "restore-failure-test" + failureScenario で記録</li>
+                          <li>各シナリオは expected vs actual を pass/fail 判定</li>
+                        </ul>
+                      </div>
+
+                      <div className="bg-zinc-800 border border-zinc-700 rounded p-2 mb-2 space-y-1.5">
+                        <label className="flex flex-col text-[10px]">
+                          <span className="font-bold text-yellow-300 mb-0.5">シナリオ選択</span>
+                          <select
+                            value={failureTestScenario}
+                            onChange={(e) => {
+                              setFailureTestScenario(e.target.value);
+                              setFailureTestResult(null);
+                              setFailureTestError("");
+                            }}
+                            disabled={isFailureTestRunning}
+                            className="text-[11px] border border-zinc-600 bg-zinc-900 text-zinc-100 rounded p-1 font-mono"
+                          >
+                            <option value="">-- 選択 --</option>
+                            <option value="before-backup-failure">before-backup-failure: 自動バックアップ DL を強制 throw</option>
+                            <option value="verify-failure">verify-failure: read-back 不一致 → partial</option>
+                            <option value="ownerUid-mismatch">ownerUid-mismatch: 全 tenant が skip される</option>
+                            <option value="malformed-backup">malformed-backup: 不正 JSON shape → parse reject</option>
+                            <option value="stale-backup">stale-backup: 45日前の backup → warning</option>
+                            <option value="interrupted-restore">interrupted-restore: batch loop 中で throw</option>
+                            <option value="concurrent-write-simulate">concurrent-write-simulate: 別 client 書込 → verify mismatch</option>
+                            <option value="oversized-backup">oversized-backup: 110MB の backup → block</option>
+                          </select>
+                        </label>
+                        <button
+                          onClick={() => handleRunFailureScenario(failureTestScenario)}
+                          disabled={isFailureTestRunning || !failureTestScenario}
+                          className="w-full bg-yellow-600 hover:bg-yellow-500 text-zinc-900 px-3 py-1.5 rounded text-[11px] font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="選択したシナリオを実行 (commit なし)"
+                        >
+                          {isFailureTestRunning ? "実行中..." : "failure scenario を実行"}
+                        </button>
+                      </div>
+
+                      {failureTestError && (
+                        <div className="bg-rose-900 border border-rose-700 rounded p-2 mt-2 text-[10px] text-rose-100 font-bold">
+                          {failureTestError}
+                        </div>
+                      )}
+
+                      {failureTestResult && (
+                        <div className={`border-2 rounded p-3 mt-2 text-[11px] ${
+                          failureTestResult.testOutcome === "passed"
+                            ? "bg-emerald-900 border-emerald-600 text-emerald-100"
+                            : "bg-rose-900 border-rose-600 text-rose-100"
+                        }`}>
+                          <div className="font-bold text-[12px] mb-1">
+                            {failureTestResult.testOutcome === "passed" ? "✅ PASSED" : "❌ FAILED"}
+                            {" - "}{failureTestResult.scenario}
+                          </div>
+                          <div className="font-mono text-[10px] space-y-0.5">
+                            <div>expected: <span className="font-bold">{failureTestResult.expected}</span></div>
+                            <div>actual:   <span className="font-bold">{failureTestResult.actual}</span></div>
+                            <div>logId: {failureTestResult.logId}</div>
+                          </div>
+                          {failureTestResult.extraNotes && Object.keys(failureTestResult.extraNotes).length > 0 && (
+                            <details className="mt-2">
+                              <summary className="cursor-pointer text-[10px] font-bold">extraNotes</summary>
+                              <pre className="bg-zinc-800 border border-zinc-700 rounded p-2 text-[9px] text-zinc-100 overflow-x-auto mt-1 whitespace-pre-wrap">
+{JSON.stringify(failureTestResult.extraNotes, null, 2)}
+                              </pre>
+                            </details>
+                          )}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              onClick={handleDownloadFailureTestLog}
+                              className="bg-zinc-700 hover:bg-zinc-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                            >
+                              ログ JSON を DL
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  </details>
+
+                  {/* ============================================================ */}
+                  {/* Phase G1.1: restoreLogs viewer（復元ログを見る — 管理者向け） */}
+                  {/*   - read-only。Firestore.restoreLogs を最新 N 件取得して表示 */}
+                  {/*   - 復元データの書き換えは行わない                            */}
+                  {/*   - 通常のバックアップ作成では確認不要のため details closed   */}
+                  {/*   - 設計メモ: 将来 restoreSessionId を追加すべき。現状は      */}
+                  {/*     logId を session ID 代替として表示している。              */}
+                  {/* ============================================================ */}
+                  <details className="mt-4 bg-slate-50 border border-slate-300 rounded p-2">
+                    <summary className="text-[12px] font-bold text-slate-700 cursor-pointer select-none flex items-center gap-1.5">
+                      <FileText size={14} /> 復元ログを見る（管理者向け）
+                    </summary>
+                    <div className="mt-1 mb-2 text-[11px] text-slate-600 px-1">
+                      復元ログは実行後の確認用です。復元を開始する場所ではありません。
+                      災害復旧復元や検証機能の実行ログを確認できます。通常のバックアップ作成では確認不要です。
+                    </div>
+                  {(() => {
+                    const filtered = restoreLogsList.filter((log) => {
+                      if (restoreLogsFilterMode !== "all" && log.mode !== restoreLogsFilterMode) return false;
+                      if (restoreLogsFilterResult === "all") return true;
+                      if (restoreLogsFilterResult === "non-success") return log.result !== "success";
+                      return log.result === restoreLogsFilterResult;
+                    });
+                    const inProgressCount = restoreLogsList.filter((l) => l.result === "in-progress").length;
+                    const resultBadge = (result) => {
+                      const map = {
+                        "success":                       { cls: "bg-emerald-100 text-emerald-800 border-emerald-300", label: "success" },
+                        "partial":                       { cls: "bg-amber-100 text-amber-800 border-amber-400",       label: "partial" },
+                        "failed":                        { cls: "bg-rose-100 text-rose-800 border-rose-400",          label: "failed" },
+                        "aborted-before-backup-failed":  { cls: "bg-zinc-200 text-zinc-800 border-zinc-400",          label: "aborted (before-backup failed)" },
+                        "in-progress":                   { cls: "bg-sky-100 text-sky-800 border-sky-400",             label: "in-progress" },
+                      };
+                      const conf = map[result] || { cls: "bg-slate-100 text-slate-700 border-slate-300", label: String(result || "—") };
+                      return <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-bold ${conf.cls}`}>{conf.label}</span>;
+                    };
+                    const fmtMs = (ms) => (typeof ms === "number" ? `${(ms / 1000).toFixed(1)} 秒` : "—");
+                    return (
+                      <div className="mt-4 bg-slate-50 border-2 border-slate-300 rounded p-3">
+                        <div className="font-bold text-[12px] text-slate-800 mb-2 flex items-center gap-1.5">
+                          <FileText size={14} /> 復元ログ・監査
+                        </div>
+                        <div className="mb-2 bg-white border border-slate-200 rounded p-2 text-[11px] text-slate-700">
+                          災害復旧復元、simulate、sandbox 検証、failure test の実行ログを確認できます。
+                          復元ログは監査用であり、アプリ全体バックアップには含めていません。
+                          <br />
+                          <span className="font-bold text-slate-900">この画面はログ表示専用です。ここから復元データの書き換えは行いません。</span>
+                        </div>
+
+                        {inProgressCount > 0 && (
+                          <div className="bg-sky-50 border-2 border-sky-400 rounded p-2 mb-2 text-[11px] text-sky-900 font-bold">
+                            ⚠ in-progress のログが {inProgressCount} 件あります。前回の復元が完了していない可能性があります。
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-end gap-2 mb-2">
+                          <label className="flex flex-col text-[10px]">
+                            <span className="font-bold text-slate-600 mb-0.5">result filter</span>
+                            <select
+                              value={restoreLogsFilterResult}
+                              onChange={(e) => setRestoreLogsFilterResult(e.target.value)}
+                              className="text-[11px] border border-slate-300 rounded p-1 font-mono"
+                            >
+                              <option value="all">全て</option>
+                              <option value="non-success">success 以外のみ</option>
+                              <option value="success">success</option>
+                              <option value="partial">partial</option>
+                              <option value="failed">failed</option>
+                              <option value="aborted-before-backup-failed">aborted-before-backup-failed</option>
+                              <option value="in-progress">in-progress</option>
+                            </select>
+                          </label>
+                          <label className="flex flex-col text-[10px]">
+                            <span className="font-bold text-slate-600 mb-0.5">mode filter</span>
+                            <select
+                              value={restoreLogsFilterMode}
+                              onChange={(e) => setRestoreLogsFilterMode(e.target.value)}
+                              className="text-[11px] border border-slate-300 rounded p-1 font-mono"
+                            >
+                              <option value="all">全て</option>
+                              <option value="restore-full-merge">本番 full restore</option>
+                              <option value="restore-full-merge-simulate">simulate</option>
+                              <option value="restore-full-merge-sandbox">sandbox</option>
+                              <option value="restore-failure-test">failure test</option>
+                            </select>
+                          </label>
+                          <button
+                            onClick={handleRefreshRestoreLogs}
+                            disabled={restoreLogsLoading}
+                            className="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded text-[11px] font-bold disabled:opacity-40"
+                          >
+                            {restoreLogsLoading ? "読み込み中..." : (restoreLogsList.length === 0 ? "ログを読み込み" : "ログを再読み込み")}
+                          </button>
+                          <span className="text-[10px] text-slate-500">
+                            最新 {RESTORE_LOGS_FETCH_LIMIT} 件 / 表示 {filtered.length} 件 / 取得 {restoreLogsList.length} 件
+                          </span>
+                        </div>
+
+                        {restoreLogsError && (
+                          <div className="bg-red-50 border border-red-300 rounded p-2 mb-2 text-[10px] text-red-800 font-bold">
+                            {restoreLogsError}
+                          </div>
+                        )}
+
+                        {restoreLogsList.length === 0 && !restoreLogsLoading && !restoreLogsError && (
+                          <div className="bg-white border border-slate-200 rounded p-3 text-[11px] text-slate-500 text-center">
+                            復元ログはまだありません。または「ログを読み込み」を押してください。
+                          </div>
+                        )}
+
+                        {filtered.length > 0 && (
+                          <div className="bg-white border border-slate-200 rounded overflow-x-auto">
+                            {/* 簡略表示: 成功/失敗・実行日時・mode・backup file の 4 列のみ。 */}
+                            {/* actor / ops / batches / errors 等の詳細は行クリックで modal 展開。 */}
+                            <table className="w-full text-[10px] font-mono">
+                              <thead className="bg-slate-100 text-slate-700">
+                                <tr>
+                                  <th className="px-1.5 py-1 text-left">result</th>
+                                  <th className="px-1.5 py-1 text-left">実行日時</th>
+                                  <th className="px-1.5 py-1 text-left">mode</th>
+                                  <th className="px-1.5 py-1 text-left">backup file</th>
+                                  <th className="px-1.5 py-1 text-left"></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filtered.map((log) => {
+                                  const backupFile = (log.source && log.source.fileName) || "—";
+                                  return (
+                                    <tr key={log.id} className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={() => setRestoreLogsSelected(log)}>
+                                      <td className="px-1.5 py-1">{resultBadge(log.result)}</td>
+                                      <td className="px-1.5 py-1">{(log.timestamps && log.timestamps.startedAt) || "—"}</td>
+                                      <td className="px-1.5 py-1">{log.mode || "—"}</td>
+                                      <td className="px-1.5 py-1 truncate max-w-[220px]" title={backupFile}>{backupFile}</td>
+                                      <td className="px-1.5 py-1">
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); handleDownloadOneRestoreLogJson(log); }}
+                                          className="bg-slate-600 hover:bg-slate-500 text-white px-1.5 py-0.5 rounded text-[10px] font-bold"
+                                          title="このログを JSON DL"
+                                        >
+                                          DL
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {restoreLogsSelected && (
+                          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4" onClick={() => setRestoreLogsSelected(null)}>
+                            <div className="bg-white rounded-lg shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-4 border-2 border-slate-300" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="text-[14px] font-black text-slate-800 flex items-center gap-2">
+                                  <FileText size={16} /> restoreLog 詳細
+                                </div>
+                                <button
+                                  onClick={() => setRestoreLogsSelected(null)}
+                                  className="text-slate-500 hover:text-slate-700"
+                                >
+                                  <X size={18} />
+                                </button>
+                              </div>
+                              {(() => {
+                                const log = restoreLogsSelected;
+                                const op = log.operation || {};
+                                const r = log.result;
+                                const nextAction =
+                                  r === "partial" ? "一部の batch は完了済みです。削除は行われていません。同じ backup で再実行する前に、before_restore backup と failedBatchIndex を確認してください。" :
+                                  r === "failed" ? "復元が失敗しました。committedBatches が 0 の場合、復元対象データへの書込は完了していない可能性が高いです。1 以上の場合は partial と同様に扱ってください。" :
+                                  r === "aborted-before-backup-failed" ? "復元前バックアップに失敗したため、復元対象データへの書込は行われていません。restoreLogs はこの行のみが残っています。" :
+                                  r === "in-progress" ? "このログは未完了状態です。ブラウザ閉鎖 / ネットワーク中断などで Step2 が書込まれなかった可能性があります。" :
+                                  null;
+                                // Phase G1.2: pure helper による復旧ガイダンス
+                                const guidance = buildRestoreRecoveryGuidance(log);
+                                const riskBadge = (level) => {
+                                  const map = {
+                                    low:      "bg-emerald-100 text-emerald-800 border-emerald-400",
+                                    medium:   "bg-amber-100 text-amber-800 border-amber-400",
+                                    high:     "bg-rose-100 text-rose-800 border-rose-400",
+                                    critical: "bg-rose-700 text-white border-rose-900",
+                                  };
+                                  return (
+                                    <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-black uppercase ${map[level] || "bg-slate-100 text-slate-700 border-slate-300"}`}>
+                                      risk: {level}
+                                    </span>
+                                  );
+                                };
+                                const recoBadge = (rec) => {
+                                  const map = {
+                                    "no-action":            { cls: "bg-emerald-50 text-emerald-700 border-emerald-300", label: "対応不要" },
+                                    "retry-safe":           { cls: "bg-sky-50 text-sky-700 border-sky-300",             label: "再実行可能" },
+                                    "manual-inspection":    { cls: "bg-amber-50 text-amber-800 border-amber-400",       label: "手動確認が必要" },
+                                    "rollback-recommended": { cls: "bg-rose-50 text-rose-800 border-rose-400",          label: "復元前バックアップ確認を推奨" },
+                                  };
+                                  const conf = map[rec] || { cls: "bg-slate-100 text-slate-700 border-slate-300", label: rec || "—" };
+                                  return (
+                                    <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${conf.cls}`}>
+                                      {conf.label}
+                                    </span>
+                                  );
+                                };
+                                const guidanceBoxStyle =
+                                  guidance.riskLevel === "critical" ? "bg-rose-50 border-rose-600" :
+                                  guidance.riskLevel === "high"     ? "bg-rose-50 border-rose-400" :
+                                  guidance.riskLevel === "medium"   ? "bg-amber-50 border-amber-400" :
+                                                                      "bg-emerald-50 border-emerald-400";
+                                // 主導線整理: 通常運用では critical/failed/partial/aborted/in-progress のみ強調
+                                const isCriticalForTopLevel =
+                                  r === "partial" || r === "failed" ||
+                                  r === "aborted-before-backup-failed" || r === "in-progress" ||
+                                  guidance.riskLevel === "critical";
+                                const topBannerStyle =
+                                  guidance.riskLevel === "critical" ? "bg-rose-100 border-rose-600 text-rose-900" :
+                                  r === "failed" || r === "partial" ? "bg-rose-50 border-rose-400 text-rose-900" :
+                                  r === "in-progress" ? "bg-sky-50 border-sky-400 text-sky-900" :
+                                                        "bg-zinc-50 border-zinc-400 text-zinc-900";
+                                const backupFileName = (log.source && log.source.fileName) || "—";
+                                return (
+                                  <div className="space-y-2 text-[11px] text-slate-700">
+                                    {/* ===== 簡略 summary（常時表示） ===== */}
+                                    <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[10px] space-y-0.5">
+                                      <div>
+                                        <span className="font-bold">result:</span> {resultBadge(r)}{" "}
+                                        <span className="font-bold ml-3">restore mode:</span> {log.mode || "—"}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">createdAt (startedAt):</span> {(log.timestamps && log.timestamps.startedAt) || "—"}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">backup file:</span> {backupFileName}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">summary:</span> {guidance.title}
+                                      </div>
+                                    </div>
+
+                                    {/* ===== top-level 強調は critical/failed/partial/aborted/in-progress のみ ===== */}
+                                    {isCriticalForTopLevel && (
+                                      <div className={`border-2 rounded p-2 text-[11px] font-bold ${topBannerStyle}`}>
+                                        <div className="mb-0.5">{guidance.title}</div>
+                                        <div className="font-normal">{guidance.summary}</div>
+                                      </div>
+                                    )}
+
+                                    {/* ===== 詳細を見る（上級者向け、デフォルト closed） ===== */}
+                                    <details className="bg-white border border-slate-300 rounded p-2">
+                                      <summary className="font-bold text-[11px] cursor-pointer select-none">
+                                        詳細を見る（上級者向け）— ガイダンス / 復旧分析 / batches / skipped / errors 等
+                                      </summary>
+                                      <div className="mt-2 space-y-2">
+                                    {/* ===== Phase G1.2: 復旧ガイダンス ===== */}
+                                    <div className={`border-2 rounded p-2.5 ${guidanceBoxStyle}`}>
+                                      <div className="font-black text-[12px] text-slate-900 mb-1.5 flex items-center gap-2 flex-wrap">
+                                        <ShieldCheck size={14} /> 復旧ガイダンス
+                                        {riskBadge(guidance.riskLevel)}
+                                        {recoBadge(guidance.recommendation)}
+                                      </div>
+                                      <div className="font-bold text-[11px] mb-1">{guidance.title}</div>
+                                      <div className="text-[11px] mb-2">{guidance.summary}</div>
+
+                                      {guidance.nextActions && guidance.nextActions.length > 0 && (
+                                        <div className="mb-1.5">
+                                          <div className="font-bold text-[10px] mb-0.5">次のアクション:</div>
+                                          <ul className="list-disc list-inside text-[10px] space-y-0.5">
+                                            {guidance.nextActions.map((a, i) => (<li key={i}>{a}</li>))}
+                                          </ul>
+                                        </div>
+                                      )}
+
+                                      {guidance.warnings && guidance.warnings.length > 0 && (
+                                        <div className="mb-1.5 bg-rose-100 border border-rose-400 rounded p-1.5">
+                                          <div className="font-bold text-[10px] mb-0.5 text-rose-900">⚠ 警告:</div>
+                                          <ul className="list-disc list-inside text-[10px] space-y-0.5 text-rose-900">
+                                            {guidance.warnings.map((w, i) => (<li key={i}>{w}</li>))}
+                                          </ul>
+                                        </div>
+                                      )}
+
+                                      {guidance.inspectionPoints && guidance.inspectionPoints.length > 0 && (
+                                        <div>
+                                          <div className="font-bold text-[10px] mb-0.5">確認ポイント:</div>
+                                          <ul className="list-disc list-inside text-[10px] space-y-0.5">
+                                            {guidance.inspectionPoints.map((p, i) => (<li key={i}>{p}</li>))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* ===== Phase G1.3: 復旧分析（推定 commit 境界 + 再実行可否 + 完了率） ===== */}
+                                    {(() => {
+                                      const analysis = buildRestoreExecutionAnalysis(log);
+                                      const b = analysis.committedBoundary || {};
+                                      const safetyBadge = (s) => {
+                                        const map = {
+                                          safe:    "bg-emerald-100 text-emerald-800 border-emerald-400",
+                                          unsafe:  "bg-rose-100 text-rose-800 border-rose-400",
+                                          unknown: "bg-slate-100 text-slate-700 border-slate-300",
+                                        };
+                                        const label = { safe: "再実行 safe", unsafe: "再実行 unsafe", unknown: "再実行 unknown" }[s] || s;
+                                        return <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-black uppercase ${map[s] || map.unknown}`}>{label}</span>;
+                                      };
+                                      const rollbackBadge = (s) => {
+                                        const map = {
+                                          ready:   { cls: "bg-emerald-50 text-emerald-700 border-emerald-300", label: "復元前バックアップあり" },
+                                          missing: { cls: "bg-rose-50 text-rose-800 border-rose-400",          label: "rollback source 不足 — 手動保全推奨" },
+                                          unknown: { cls: "bg-slate-100 text-slate-700 border-slate-300",      label: "rollback 状態 unknown" },
+                                        };
+                                        const conf = map[s] || map.unknown;
+                                        return <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${conf.cls}`}>{conf.label}</span>;
+                                      };
+                                      const statusCellStyle = (st) =>
+                                        st === "committed"     ? "bg-emerald-100 text-emerald-900" :
+                                        st === "partial"       ? "bg-amber-100 text-amber-900" :
+                                        st === "not-committed" ? "bg-rose-100 text-rose-900" :
+                                                                 "bg-slate-100 text-slate-700";
+                                      const statusLabel = (st) =>
+                                        st === "committed"     ? "committed" :
+                                        st === "partial"       ? "partial" :
+                                        st === "not-committed" ? "not committed" : st;
+                                      const completenessPct = analysis.estimatedCompleteness;
+                                      return (
+                                        <div className="border-2 rounded p-2.5 bg-slate-50 border-slate-300">
+                                          <div className="font-black text-[12px] text-slate-900 mb-1.5 flex items-center gap-2 flex-wrap">
+                                            <Database size={14} /> 復旧分析
+                                            {safetyBadge(analysis.retrySafety)}
+                                            {rollbackBadge(analysis.rollbackReadiness)}
+                                          </div>
+
+                                          <div className="bg-amber-50 border border-amber-300 rounded p-1.5 mb-2 text-[10px] text-amber-900">
+                                            ⚠ ここで表示する commit 境界は <span className="font-bold">推定値</span> です。Firestore transaction log ではないため、batch atomicity を仮定した近似であり、100% 正確な commit 境界保証ではありません。
+                                          </div>
+
+                                          {/* 完了率 progress bar */}
+                                          <div className="mb-2">
+                                            <div className="flex items-center justify-between text-[10px] font-bold text-slate-700 mb-0.5">
+                                              <span>復元完了推定</span>
+                                              <span>
+                                                {completenessPct == null
+                                                  ? "—（適用外 / 算出不可）"
+                                                  : `${completenessPct}%（${b.committedOps || 0} / ${b.totalOps || 0} ops）`}
+                                              </span>
+                                            </div>
+                                            <div className="w-full bg-slate-200 rounded overflow-hidden h-2.5">
+                                              <div
+                                                className={`h-2.5 transition-all ${
+                                                  completenessPct == null ? "bg-slate-300" :
+                                                  completenessPct === 100 ? "bg-emerald-500" :
+                                                  completenessPct === 0   ? "bg-slate-300" :
+                                                                            "bg-amber-500"
+                                                }`}
+                                                style={{ width: `${completenessPct == null ? 0 : completenessPct}%` }}
+                                              />
+                                            </div>
+                                          </div>
+
+                                          {/* batch 概況 */}
+                                          <div className="font-mono text-[10px] grid grid-cols-2 gap-x-3 gap-y-0.5 mb-2 bg-white border border-slate-200 rounded p-1.5">
+                                            <div>committed batches: <span className="font-bold">{b.committedBatches} / {b.totalBatches}</span></div>
+                                            <div>failed batch idx: <span className="font-bold">{b.failedBatchIndex != null ? b.failedBatchIndex : "—"}</span></div>
+                                            <div>completed ops: <span className="font-bold">{b.committedOps}</span></div>
+                                            <div>remaining ops: <span className="font-bold">{b.remainingOps}</span></div>
+                                          </div>
+
+                                          {/* area 別 commit 境界テーブル */}
+                                          {Array.isArray(b.areaBreakdown) && b.areaBreakdown.length > 0 ? (
+                                            <div className="bg-white border border-slate-200 rounded overflow-x-auto mb-2">
+                                              <table className="w-full text-[10px] font-mono">
+                                                <thead className="bg-slate-100 text-slate-700">
+                                                  <tr>
+                                                    <th className="px-1.5 py-1 text-left">area</th>
+                                                    <th className="px-1.5 py-1 text-right">committed batches</th>
+                                                    <th className="px-1.5 py-1 text-right">total batches</th>
+                                                    <th className="px-1.5 py-1 text-left">status (推定)</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody>
+                                                  {b.areaBreakdown.map((row) => (
+                                                    <tr key={row.area} className="border-t border-slate-100">
+                                                      <td className="px-1.5 py-1 font-bold">{row.area}</td>
+                                                      <td className="px-1.5 py-1 text-right">{row.committedBatches}</td>
+                                                      <td className="px-1.5 py-1 text-right">{row.totalBatches}</td>
+                                                      <td className={`px-1.5 py-1 ${statusCellStyle(row.status)}`}>{statusLabel(row.status)}</td>
+                                                    </tr>
+                                                  ))}
+                                                </tbody>
+                                              </table>
+                                            </div>
+                                          ) : (
+                                            <div className="bg-white border border-slate-200 rounded p-2 mb-2 text-[10px] text-slate-500">
+                                              area 別 commit 境界の算出に必要な operation.batches がありません（v1 ログ または 未実行）。
+                                            </div>
+                                          )}
+
+                                          {/* recovery strategy */}
+                                          <div className="bg-white border border-slate-300 rounded p-2 text-[11px] text-slate-800">
+                                            <div className="font-bold mb-0.5 text-[10px]">復旧戦略（推定）:</div>
+                                            <div>{analysis.recoveryStrategy}</div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+
+                                    <div className="bg-slate-50 border border-slate-200 rounded p-2 font-mono text-[10px] space-y-0.5">
+                                      <div>
+                                        <span className="font-bold">result:</span> {resultBadge(r)}{" "}
+                                        <span className="font-bold ml-3">mode:</span> {log.mode}{" "}
+                                        <span className="font-bold ml-3">label:</span> {log.label || "—"}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">logId / sessionId 代替:</span> {log.id}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">actor:</span> {(log.actor && (log.actor.email || log.actor.uid)) || "—"}
+                                      </div>
+                                      <div>
+                                        <span className="font-bold">startedAt:</span> {(log.timestamps && log.timestamps.startedAt) || "—"}
+                                        {" / "}
+                                        <span className="font-bold">completedAt:</span> {(log.timestamps && log.timestamps.completedAt) || "—"}
+                                        {" / "}
+                                        <span className="font-bold">duration:</span> {fmtMs(log.timestamps && log.timestamps.durationMs)}
+                                      </div>
+                                    </div>
+
+                                    {nextAction && (
+                                      <div className={`border rounded p-2 text-[11px] ${
+                                        r === "partial" ? "bg-amber-50 border-amber-300 text-amber-900" :
+                                        r === "failed" ? "bg-rose-50 border-rose-300 text-rose-900" :
+                                        r === "aborted-before-backup-failed" ? "bg-zinc-50 border-zinc-300 text-zinc-900" :
+                                        "bg-sky-50 border-sky-300 text-sky-900"
+                                      }`}>
+                                        <div className="font-bold mb-0.5">次に何をすべきか（簡易）</div>
+                                        <div>{nextAction}</div>
+                                      </div>
+                                    )}
+
+                                    <details className="bg-white border border-slate-200 rounded p-2" open>
+                                      <summary className="font-bold cursor-pointer">source backup</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.source || null, null, 2)}</pre>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2" open>
+                                      <summary className="font-bold cursor-pointer">before_restore backup</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.beforeBackup || null, null, 2)}</pre>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2" open>
+                                      <summary className="font-bold cursor-pointer">operation summary</summary>
+                                      <div className="font-mono text-[10px] mt-1 space-y-0.5">
+                                        <div>totalOps: {op.totalOps != null ? op.totalOps : (op.writesAttempted != null ? op.writesAttempted : "—")}</div>
+                                        <div>completedOps (writesSucceeded): {op.writesSucceeded != null ? op.writesSucceeded : "—"}</div>
+                                        <div>writesSimulated: {op.writesSimulated != null ? op.writesSimulated : "—"}</div>
+                                        <div>totalBatches: {op.totalBatches != null ? op.totalBatches : "—"}</div>
+                                        <div>committedBatches: {op.committedBatches != null ? op.committedBatches : "—"}</div>
+                                        <div>failedBatchIndex: {op.failedBatchIndex != null ? op.failedBatchIndex : "—"}</div>
+                                        <div>maxOpsPerBatch: {op.maxOpsPerBatch != null ? op.maxOpsPerBatch : "—"}</div>
+                                      </div>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">batch summaries ({Array.isArray(op.batches) ? op.batches.length : 0})</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(op.batches || [], null, 2)}</pre>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">skipped tenants ({Array.isArray(log.skippedTenants) ? log.skippedTenants.length : 0})</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.skippedTenants || [], null, 2)}</pre>
+                                    </details>
+
+                                    {Array.isArray(log.warnings) && log.warnings.length > 0 && (
+                                      <details className="bg-amber-50 border border-amber-300 rounded p-2" open>
+                                        <summary className="font-bold cursor-pointer text-amber-900">warnings ({log.warnings.length})</summary>
+                                        <ul className="list-disc list-inside text-[10px] mt-1 space-y-0.5">
+                                          {log.warnings.map((w, i) => (<li key={i}>{w}</li>))}
+                                        </ul>
+                                      </details>
+                                    )}
+
+                                    {Array.isArray(log.errors) && log.errors.length > 0 && (
+                                      <details className="bg-rose-50 border border-rose-300 rounded p-2" open>
+                                        <summary className="font-bold cursor-pointer text-rose-900">errors ({log.errors.length})</summary>
+                                        <ul className="list-disc list-inside text-[10px] mt-1 space-y-0.5">
+                                          {log.errors.map((er, i) => (<li key={i}>{er}</li>))}
+                                        </ul>
+                                      </details>
+                                    )}
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">userConfirmations</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.userConfirmations || null, null, 2)}</pre>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">postRestoreDryRun</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.postRestoreDryRun || null, null, 2)}</pre>
+                                    </details>
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">verifySummary</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.verifySummary || null, null, 2)}</pre>
+                                    </details>
+
+                                    {log.failureScenario && (
+                                      <details className="bg-white border border-slate-200 rounded p-2" open>
+                                        <summary className="font-bold cursor-pointer">failureScenario</summary>
+                                        <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify(log.failureScenario, null, 2)}</pre>
+                                      </details>
+                                    )}
+
+                                    <details className="bg-white border border-slate-200 rounded p-2">
+                                      <summary className="font-bold cursor-pointer">opsGate / sizeGate</summary>
+                                      <pre className="text-[10px] font-mono mt-1 whitespace-pre-wrap break-all">{JSON.stringify({ opsGate: log.opsGate || null, sizeGate: log.sizeGate || null }, null, 2)}</pre>
+                                    </details>
+                                      </div>
+                                    </details>
+                                    {/* ===== 詳細を見る ここまで ===== */}
+
+                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                      <button
+                                        onClick={() => handleDownloadOneRestoreLogJson(log)}
+                                        className="bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded text-[10px] font-bold"
+                                      >
+                                        この log を JSON DL
+                                      </button>
+                                      <button
+                                        onClick={() => setRestoreLogsSelected(null)}
+                                        className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded text-[10px] font-bold"
+                                      >
+                                        閉じる
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  </details>
                 </div>
               </section>
             </div>

@@ -10005,9 +10005,12 @@ const App = () => {
     { label: "休日労働", value: rowData.holidayHours },
   ];
 
+  // 賞与時は基本給ラベルを「賞与」に変更。月次専用の手当は 0 円なら非表示（賞与で値があれば残す）。
   const paymentItems = [
-    { label: "基本給", value: formatCurrency(rowData.basePay) },
-    ...allowanceDefs.map(def => ({ label: def.name, value: formatCurrency(rowData.allowanceAmounts?.[def.id]) }))
+    { label: isBonus ? "賞与" : "基本給", value: formatCurrency(rowData.basePay) },
+    ...allowanceDefs
+      .filter(def => !isBonus || (Number(rowData.allowanceAmounts?.[def.id]) || 0) !== 0)
+      .map(def => ({ label: def.name, value: formatCurrency(rowData.allowanceAmounts?.[def.id]) }))
   ];
 
   // 月次給与のみ手動上書きを反映（賞与は対象外）
@@ -10053,7 +10056,15 @@ const App = () => {
   const _slipHasHealth = emp.master.healthIns !== undefined ? emp.master.healthIns === 1 : emp.master.socialIns === 1;
   const _slipHasPension = emp.master.pensionIns !== undefined ? emp.master.pensionIns === 1 : emp.master.socialIns === 1;
   const _slipHasEmployment = emp.master.employmentIns === 1;
-  const _slipHasNursingIns = !isBonus && rowData.hasNursingIns === 1;
+  // 賞与は yearData.monthly[bonusMonthKey].hasNursingIns を参照（calculateBonusResult L2337 と整合）。
+  // bonusMonthKey は payDate がある場合は payDate の月、無ければ getBonusRateMonth(rowData) を使用。
+  const _bonusMonthKey = isBonus
+    ? (rowData.payDate ? String(rowData.payDate).slice(5, 7) : getBonusRateMonth(rowData))
+    : null;
+  const _bonusMonthRow = (isBonus && _bonusMonthKey) ? (slipYearData.monthly?.[_bonusMonthKey] || {}) : null;
+  const _slipHasNursingIns = isBonus
+    ? (_slipHasHealth && _bonusMonthRow && _bonusMonthRow.hasNursingIns === 1)
+    : (rowData.hasNursingIns === 1);
   // 健保用 / 厚年用 / legacy stdAmount をそれぞれ判定。賞与時は標準報酬月額に依存しないため両方 true。
   // health/nursing/childCare → stdAmtHealthSet、 pension → stdAmtPensionSet を参照する。
   // legacy stdAmount のみ入力された旧データもフォールバックで認識する。
@@ -10096,8 +10107,15 @@ const App = () => {
     ...(_slipHasHealth ? [{ label: "子ども・子育て", value: <SocialInsCell kind="childCare" value={dispChildCareCell} {..._slipInsFlags} /> }] : []),
     // 所得税: null は「計算不可」と明示表示する(¥0 表示の誤認を防ぐ)。
     { label: "所得税", value: _slipIncomeTaxIsUncalc ? <span className="text-rose-600 font-black">計算不可</span> : formatCurrency(dispIncomeTax) },
-    { label: "住民税", value: formatCurrency(dispResidentTax) },
-    ...dispCustomDeductions.map(d => ({ label: d.name, value: formatCurrency(d.value) })),
+    // 住民税:
+    //   月次給与: 従来通り常時表示
+    //   賞与: 通常は徴収対象外のため非表示。ただし residentTax > 0 が入力されている場合は
+    //         控除合計に含まれるため明細行も表示する（合計との整合性確保）。
+    ...((!isBonus || (Number(dispResidentTax) || 0) > 0) ? [{ label: "住民税", value: formatCurrency(dispResidentTax) }] : []),
+    // 月次専用カスタム控除は賞与時 0 円なら非表示（値があれば残す）。
+    ...dispCustomDeductions
+      .filter(d => !isBonus || (Number(d.value) || 0) !== 0)
+      .map(d => ({ label: d.name, value: formatCurrency(d.value) })),
   ];
 
   // 最低8行は確保し、明細書の高さを一定に保つ

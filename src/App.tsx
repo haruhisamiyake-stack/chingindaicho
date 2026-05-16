@@ -5941,6 +5941,23 @@ const App = () => {
     return () => window.removeEventListener("beforeunload", handler);
   }, [isFullRestoreSimRunning, isSandboxRestoreRunning, isFullRestoreRunning]);
 
+  // number input のホイール誤入力防止:
+  //   給与・賞与・標準報酬月額・手当・控除など全 type="number" input が対象。
+  //   focus 中の number input にホイールが届いたら blur することで、ブラウザ既定の
+  //   「increment/decrement」を回避しつつ画面スクロールは自然に継続させる。
+  //   preventDefault は使わない（スクロール自体は妨げない方針）。
+  useEffect(() => {
+    const handleWheel = (e) => {
+      const t = e.target;
+      if (!t || t.tagName !== "INPUT") return;
+      if (t.type !== "number") return;
+      if (document.activeElement !== t) return;
+      t.blur();
+    };
+    document.addEventListener("wheel", handleWheel);
+    return () => document.removeEventListener("wheel", handleWheel);
+  }, []);
+
   // ============================================================================
   // Phase G1 本番 災害復旧復元（全体上書き）
   // ----------------------------------------------------------------------------
@@ -13427,7 +13444,7 @@ const App = () => {
                                       }}
                                       title="前月の標準報酬月額をコピー"
                                       aria-label="前月の標準報酬月額をコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      className="flex-shrink-0 p-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:border-blue-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
                                     >
                                       <Copy size={9} />
                                     </button>
@@ -13451,7 +13468,7 @@ const App = () => {
                                       }}
                                       title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
                                       aria-label="12月までコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      className="flex-shrink-0 p-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
                                     >
                                       <ChevronsRight size={9} />
                                     </button>
@@ -13602,7 +13619,7 @@ const App = () => {
                                       }}
                                       title="前月の標準報酬月額をコピー"
                                       aria-label="前月の標準報酬月額をコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      className="flex-shrink-0 p-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:border-blue-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
                                     >
                                       <Copy size={9} />
                                     </button>
@@ -13626,7 +13643,7 @@ const App = () => {
                                       }}
                                       title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
                                       aria-label="12月までコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-transparent text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      className="flex-shrink-0 p-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
                                     >
                                       <ChevronsRight size={9} />
                                     </button>

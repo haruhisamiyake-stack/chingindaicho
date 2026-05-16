@@ -8976,6 +8976,174 @@ const App = () => {
     });
   };
 
+  // ============================================================================
+  // 前月コピー / 12月まで一括コピー — 「項目単位」コピー helper
+  // ----------------------------------------------------------------------------
+  // 設計方針:
+  //   - 1 つのボタンは 1 つの field だけをコピーする（全項目バルクコピーは廃止）。
+  //   - 12月までコピーは atomic（単一 requestEmployeeSave 内で複数月を更新）。
+  //   - ロック月（年度 / 個別 / 全体）は skip。
+  //   - scalar field と nested field（allowanceAmounts / deductionAmounts の key 単位）
+  //     をそれぞれ別 helper で扱う。
+  // ============================================================================
+
+  // 前月コピー（scalar field）: prev (=m-1) row の fieldName を m 行の fieldName へコピー。
+  //   legacyFallbackField が指定されていれば、prev の主 field が空欄/null のとき fallback。
+  //   "" は 0 と区別して "" のまま保存（未入力の意図保持）。
+  const handleCopyScalarFieldFromPrev = (year, m, fieldName, legacyFallbackField = null) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId) return;
+    const num = parseInt(m, 10);
+    if (!Number.isFinite(num) || num < 2 || num > 12) return;
+    const prevKey = String(num - 1).padStart(2, "0");
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+      const yearObj = currentData.years?.[year] || createInitialYearData(year, settings);
+      const prevRow = yearObj.monthly?.[prevKey];
+      if (!prevRow) return null;
+      const targetRow = yearObj.monthly?.[m] || {};
+      if (targetRow.isLocked) return null;
+      if (isMonthGloballyLocked(year, m)) return null;
+      let prevVal = prevRow[fieldName];
+      if ((prevVal == null || prevVal === "") && legacyFallbackField) {
+        prevVal = prevRow[legacyFallbackField];
+      }
+      const valToWrite = (prevVal == null || prevVal === "")
+        ? ""
+        : (typeof prevVal === "number" ? prevVal : Number(prevVal));
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [year]: {
+              ...yearObj,
+              monthly: {
+                ...(yearObj.monthly || {}),
+                [m]: { ...targetRow, [fieldName]: valToWrite },
+              },
+            },
+          },
+        },
+      };
+    });
+  };
+
+  // 12月まで一括コピー（scalar field）: srcM の 1 つの field を srcM+1〜12 へ atomic 反映。
+  //   valueToCopy は呼び出し側で render-scope の値（legacy 解決済み）を渡す。
+  //   src 自身は無変更。ロック月は skip。
+  const handleCopyScalarFieldToYearEnd = (year, srcM, fieldName, valueToCopy) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId) return;
+    const startNum = parseInt(srcM, 10);
+    if (!Number.isFinite(startNum) || startNum < 1 || startNum > 11) return;
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+      const yearObj = currentData.years?.[year] || createInitialYearData(year, settings);
+      const newMonthly = { ...(yearObj.monthly || {}) };
+      const skipped = [];
+      let anyChange = false;
+      for (let n = startNum + 1; n <= 12; n++) {
+        const target = String(n).padStart(2, "0");
+        const row = newMonthly[target] || {};
+        if (row.isLocked) { skipped.push(target); continue; }
+        if (isMonthGloballyLocked(year, target)) { skipped.push(target); continue; }
+        newMonthly[target] = { ...row, [fieldName]: valueToCopy };
+        anyChange = true;
+      }
+      if (skipped.length > 0) {
+        console.log("[copy field to year end] skipped locked months:", { year, srcM, fieldName, skipped });
+      }
+      if (!anyChange) return null;
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [year]: { ...yearObj, monthly: newMonthly },
+          },
+        },
+      };
+    });
+  };
+
+  // 前月コピー（nested field key）: 例: allowanceAmounts[allowanceId] を prev → m へコピー。
+  //   parentField = "allowanceAmounts" | "deductionAmounts"、key = def.id。
+  //   将来、各 allowance / deduction セルに個別コピーボタンを追加する場合の helper。
+  const handleCopyNestedFieldKeyFromPrev = (year, m, parentField, key) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId) return;
+    if (!parentField || !key) return;
+    const num = parseInt(m, 10);
+    if (!Number.isFinite(num) || num < 2 || num > 12) return;
+    const prevKey = String(num - 1).padStart(2, "0");
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+      const yearObj = currentData.years?.[year] || createInitialYearData(year, settings);
+      const prevRow = yearObj.monthly?.[prevKey];
+      if (!prevRow) return null;
+      const targetRow = yearObj.monthly?.[m] || {};
+      if (targetRow.isLocked) return null;
+      if (isMonthGloballyLocked(year, m)) return null;
+      const prevNested = prevRow[parentField] || {};
+      const prevVal = prevNested[key];
+      const valToWrite = (prevVal == null || prevVal === "")
+        ? ""
+        : (typeof prevVal === "number" ? prevVal : Number(prevVal));
+      const newNested = { ...(targetRow[parentField] || {}), [key]: valToWrite };
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [year]: {
+              ...yearObj,
+              monthly: {
+                ...(yearObj.monthly || {}),
+                [m]: { ...targetRow, [parentField]: newNested },
+              },
+            },
+          },
+        },
+      };
+    });
+  };
+
+  // 12月まで一括コピー（nested field key）: 例: allowanceAmounts[allowanceId] を srcM → srcM+1〜12。
+  //   valueToCopy は呼び出し側で render-scope の値を渡す。
+  const handleCopyNestedFieldKeyToYearEnd = (year, srcM, parentField, key, valueToCopy) => {
+    if (isLockedYear(year) || !year) return;
+    if (!selectedEmployeeId) return;
+    if (!parentField || !key) return;
+    const startNum = parseInt(srcM, 10);
+    if (!Number.isFinite(startNum) || startNum < 1 || startNum > 11) return;
+    requestEmployeeSave(selectedTenantId, selectedEmployeeId, (currentData) => {
+      const yearObj = currentData.years?.[year] || createInitialYearData(year, settings);
+      const newMonthly = { ...(yearObj.monthly || {}) };
+      const skipped = [];
+      let anyChange = false;
+      for (let n = startNum + 1; n <= 12; n++) {
+        const target = String(n).padStart(2, "0");
+        const row = newMonthly[target] || {};
+        if (row.isLocked) { skipped.push(target); continue; }
+        if (isMonthGloballyLocked(year, target)) { skipped.push(target); continue; }
+        const newNested = { ...(row[parentField] || {}), [key]: valueToCopy };
+        newMonthly[target] = { ...row, [parentField]: newNested };
+        anyChange = true;
+      }
+      if (skipped.length > 0) {
+        console.log("[copy nested key to year end] skipped locked months:", { year, srcM, parentField, key, skipped });
+      }
+      if (!anyChange) return null;
+      return {
+        data: {
+          ...currentData,
+          years: {
+            ...(currentData.years || {}),
+            [year]: { ...yearObj, monthly: newMonthly },
+          },
+        },
+      };
+    });
+  };
+
   const updateManualOverride = (year, month, fieldKey, overrideObj) => {
     if (isLockedYear(year) || !year) return;
     if (!selectedEmployeeId || !data) return;
@@ -12247,32 +12415,57 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  step="0.5"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.workingDays ||
-                                    ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "workingDays",
-                                      e.target.value
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                {/* 常時表示: 健保/厚年 std cell と同じ absolute flex パターン。
+                                    absolute なので td 自然幅に影響せず、列幅は元のまま。 */}
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "workingDays")}
+                                    title="前月の労働日数をコピー"
+                                    aria-label="前月の労働日数をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = currentYearData.monthly[m]?.workingDays || "";
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "workingDays", valueToCopy);
+                                    }}
+                                    title="現在月の労働日数を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="労働日数を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]?.workingDays ||
+                                      ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "workingDays",
+                                        e.target.value
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
@@ -12291,32 +12484,55 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.workingHours ||
-                                    ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "workingHours",
-                                      e.target.value
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "workingHours")}
+                                    title="前月の総労働時間をコピー"
+                                    aria-label="前月の総労働時間をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = currentYearData.monthly[m]?.workingHours || "";
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "workingHours", valueToCopy);
+                                    }}
+                                    title="現在月の総労働時間を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="総労働時間を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]?.workingHours ||
+                                      ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "workingHours",
+                                        e.target.value
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
@@ -12335,32 +12551,55 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.overtimeHours ||
-                                    ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "overtimeHours",
-                                      e.target.value
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "overtimeHours")}
+                                    title="前月の時間外労働時間をコピー"
+                                    aria-label="前月の時間外労働時間をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = currentYearData.monthly[m]?.overtimeHours || "";
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "overtimeHours", valueToCopy);
+                                    }}
+                                    title="現在月の時間外労働時間を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="時間外労働時間を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]?.overtimeHours ||
+                                      ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "overtimeHours",
+                                        e.target.value
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
@@ -12379,32 +12618,55 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]
-                                      ?.lateNightHours || ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "lateNightHours",
-                                      e.target.value
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "lateNightHours")}
+                                    title="前月の深夜労働時間をコピー"
+                                    aria-label="前月の深夜労働時間をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = currentYearData.monthly[m]?.lateNightHours || "";
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "lateNightHours", valueToCopy);
+                                    }}
+                                    title="現在月の深夜労働時間を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="深夜労働時間を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]
+                                        ?.lateNightHours || ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "lateNightHours",
+                                        e.target.value
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
@@ -12423,32 +12685,55 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.holidayHours ||
-                                    ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "holidayHours",
-                                      e.target.value
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "holidayHours")}
+                                    title="前月の休日労働時間をコピー"
+                                    aria-label="前月の休日労働時間をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = currentYearData.monthly[m]?.holidayHours || "";
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "holidayHours", valueToCopy);
+                                    }}
+                                    title="現在月の休日労働時間を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="休日労働時間を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]?.holidayHours ||
+                                      ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "holidayHours",
+                                        e.target.value
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
@@ -12474,30 +12759,53 @@ const App = () => {
                             {MONTHS.map((m) => (
                               <td
                                 key={m}
-                                className="border border-gray-300 p-0.5"
+                                className="border border-gray-300 p-0.5 relative"
                               >
-                                <input
-                                  type="number"
-                                  disabled={
-                                    isMonthCellLocked(m)
-                                  }
-                                  value={
-                                    currentYearData.monthly[m]?.basePay || ""
-                                  }
-                                  onChange={(e) =>
-                                    updateMonthly(
-                                      selectedYear,
-                                      m,
-                                      "basePay",
-                                      Number(e.target.value)
-                                    )
-                                  }
-                                  className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                    isMonthCellLocked(m)
-                                      ? "cursor-not-allowed text-slate-400"
-                                      : ""
-                                  }`}
-                                />
+                                <div className="absolute inset-0 flex items-center gap-0.5">
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "01"}
+                                    onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "basePay")}
+                                    title="前月の基本給をコピー"
+                                    aria-label="前月の基本給をコピー"
+                                    className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <Copy size={9} />
+                                  </button>
+                                  <button
+                                    disabled={isMonthCellLocked(m) || m === "12"}
+                                    onClick={() => {
+                                      const valueToCopy = Number(currentYearData.monthly[m]?.basePay) || 0;
+                                      handleCopyScalarFieldToYearEnd(selectedYear, m, "basePay", valueToCopy);
+                                    }}
+                                    title="現在月の基本給を12月まで一括コピー（ロック済み月はスキップ）"
+                                    aria-label="基本給を12月までコピー"
+                                    className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                  >
+                                    <ChevronsRight size={9} />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    disabled={
+                                      isMonthCellLocked(m)
+                                    }
+                                    value={
+                                      currentYearData.monthly[m]?.basePay || ""
+                                    }
+                                    onChange={(e) =>
+                                      updateMonthly(
+                                        selectedYear,
+                                        m,
+                                        "basePay",
+                                        Number(e.target.value)
+                                      )
+                                    }
+                                    className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                      isMonthCellLocked(m)
+                                        ? "cursor-not-allowed text-slate-400"
+                                        : ""
+                                    }`}
+                                  />
+                                </div>
                               </td>
                             ))}
                             <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
@@ -12596,36 +12904,61 @@ const App = () => {
                               {MONTHS.map((m) => (
                                 <td
                                   key={m}
-                                  className="border border-gray-300 p-0.5 text-right"
+                                  className="border border-gray-300 p-0.5 text-right relative"
                                 >
-                                  <input
-                                    type="number"
-                                    disabled={
-                                      isMonthCellLocked(m)
-                                    }
-                                    value={
-                                      currentYearData.monthly[m]
-                                        ?.allowanceAmounts?.[def.id] || ""
-                                    }
-                                    onChange={(e) => {
-                                      const newMD = {
-                                        ...(currentYearData.monthly[m]
-                                          ?.allowanceAmounts || {}),
-                                        [def.id]: Number(e.target.value),
-                                      };
-                                      updateMonthly(
-                                        selectedYear,
-                                        m,
-                                        "allowanceAmounts",
-                                        newMD
-                                      );
-                                    }}
-                                    className={`w-full bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
-                                      isMonthCellLocked(m)
-                                        ? "cursor-not-allowed text-slate-400"
-                                        : ""
-                                    }`}
-                                  />
+                                  {/* 常時表示: 支給項目（allowance）の 1 key 単位コピー。
+                                      std cell 同等の absolute flex パターン。他項目は変更しない。 */}
+                                  <div className="absolute inset-0 flex items-center gap-0.5">
+                                    <button
+                                      disabled={isMonthCellLocked(m) || m === "01"}
+                                      onClick={() => handleCopyNestedFieldKeyFromPrev(selectedYear, m, "allowanceAmounts", def.id)}
+                                      title={`前月の「${def.name}」をコピー`}
+                                      aria-label={`前月の${def.name}をコピー`}
+                                      className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                    >
+                                      <Copy size={9} />
+                                    </button>
+                                    <button
+                                      disabled={isMonthCellLocked(m) || m === "12"}
+                                      onClick={() => {
+                                        const valueToCopy = Number(currentYearData.monthly[m]?.allowanceAmounts?.[def.id]) || 0;
+                                        handleCopyNestedFieldKeyToYearEnd(selectedYear, m, "allowanceAmounts", def.id, valueToCopy);
+                                      }}
+                                      title={`現在月の「${def.name}」を12月まで一括コピー（ロック済み月はスキップ）`}
+                                      aria-label={`${def.name}を12月までコピー`}
+                                      className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                    >
+                                      <ChevronsRight size={9} />
+                                    </button>
+                                    <input
+                                      type="number"
+                                      disabled={
+                                        isMonthCellLocked(m)
+                                      }
+                                      value={
+                                        currentYearData.monthly[m]
+                                          ?.allowanceAmounts?.[def.id] || ""
+                                      }
+                                      onChange={(e) => {
+                                        const newMD = {
+                                          ...(currentYearData.monthly[m]
+                                            ?.allowanceAmounts || {}),
+                                          [def.id]: Number(e.target.value),
+                                        };
+                                        updateMonthly(
+                                          selectedYear,
+                                          m,
+                                          "allowanceAmounts",
+                                          newMD
+                                        );
+                                      }}
+                                      className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
+                                        isMonthCellLocked(m)
+                                          ? "cursor-not-allowed text-slate-400"
+                                          : ""
+                                      }`}
+                                    />
+                                  </div>
                                 </td>
                               ))}
                               <td className="border border-gray-300 p-1.5 text-right font-bold bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
@@ -12933,11 +13266,34 @@ const App = () => {
                               return (
                                 <td
                                   key={m}
-                                  className={`border border-gray-300 p-0.5 text-right ${isOvRT ? "bg-amber-50" : ""}`}
+                                  className={`border border-gray-300 p-0.5 text-right relative ${isOvRT ? "bg-amber-50" : ""}`}
                                 >
-                                  <div className="flex items-center justify-end gap-0.5">
+                                  {/* 常時表示: 全ての button + input/span を 1 つの absolute flex に集約。
+                                      順序: [前月][12月][入力欄/上書値][手] */}
+                                  <div className="absolute inset-0 flex items-center gap-0.5">
+                                    <button
+                                      disabled={isMonthCellLocked(m) || m === "01"}
+                                      onClick={() => handleCopyScalarFieldFromPrev(selectedYear, m, "residentTax")}
+                                      title="前月の住民税をコピー"
+                                      aria-label="前月の住民税をコピー"
+                                      className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                    >
+                                      <Copy size={9} />
+                                    </button>
+                                    <button
+                                      disabled={isMonthCellLocked(m) || m === "12"}
+                                      onClick={() => {
+                                        const valueToCopy = Number(baseVal) || 0;
+                                        handleCopyScalarFieldToYearEnd(selectedYear, m, "residentTax", valueToCopy);
+                                      }}
+                                      title="現在月の住民税を12月まで一括コピー（ロック済み月はスキップ）"
+                                      aria-label="住民税を12月までコピー"
+                                      className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                    >
+                                      <ChevronsRight size={9} />
+                                    </button>
                                     {isOvRT ? (
-                                      <span className="font-mono text-amber-700 font-black text-[11px] px-0.5">
+                                      <span className="flex-1 min-w-0 font-mono text-amber-700 font-black text-[11px] px-0.5 text-right truncate">
                                         {formatCurrency(Number(ovRT.value) || 0)}
                                       </span>
                                     ) : (
@@ -12946,7 +13302,7 @@ const App = () => {
                                         disabled={isMonthCellLocked(m)}
                                         value={baseVal || ""}
                                         onChange={(e) => updateMonthly(selectedYear, m, "residentTax", Number(e.target.value))}
-                                        className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
+                                        className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
                                       />
                                     )}
                                     <button
@@ -13037,11 +13393,34 @@ const App = () => {
                                 return (
                                   <td
                                     key={m}
-                                    className={`border border-gray-300 p-0.5 text-right ${isOvD ? "bg-amber-50" : ""}`}
+                                    className={`border border-gray-300 p-0.5 text-right relative ${isOvD ? "bg-amber-50" : ""}`}
                                   >
-                                    <div className="flex items-center justify-end gap-0.5">
+                                    {/* 常時表示: 控除項目（deduction）の 1 key 単位コピー（前月/12月まで）。
+                                        既存の「手」上書きボタンは残す。allowance 行 / residentTax と同等の absolute flex パターン。 */}
+                                    <div className="absolute inset-0 flex items-center gap-0.5">
+                                      <button
+                                        disabled={isMonthCellLocked(m) || m === "01"}
+                                        onClick={() => handleCopyNestedFieldKeyFromPrev(selectedYear, m, "deductionAmounts", def.id)}
+                                        title={`前月の「${def.name}」をコピー`}
+                                        aria-label={`前月の${def.name}をコピー`}
+                                        className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                      >
+                                        <Copy size={9} />
+                                      </button>
+                                      <button
+                                        disabled={isMonthCellLocked(m) || m === "12"}
+                                        onClick={() => {
+                                          const valueToCopy = Number(currentYearData.monthly[m]?.deductionAmounts?.[def.id]) || 0;
+                                          handleCopyNestedFieldKeyToYearEnd(selectedYear, m, "deductionAmounts", def.id, valueToCopy);
+                                        }}
+                                        title={`現在月の「${def.name}」を12月まで一括コピー（ロック済み月はスキップ）`}
+                                        aria-label={`${def.name}を12月までコピー`}
+                                        className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
+                                      >
+                                        <ChevronsRight size={9} />
+                                      </button>
                                       {isOvD ? (
-                                        <span className="font-mono text-amber-700 font-black text-[11px] px-0.5">
+                                        <span className="flex-1 min-w-0 font-mono text-amber-700 font-black text-[11px] px-0.5 text-right truncate">
                                           {formatCurrency(Number(ovD.value) || 0)}
                                         </span>
                                       ) : (
@@ -13056,7 +13435,7 @@ const App = () => {
                                             };
                                             updateMonthly(selectedYear, m, "deductionAmounts", newMD);
                                           }}
-                                          className={`w-full bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
+                                          className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-red-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
                                         />
                                       )}
                                       <button
@@ -13434,17 +13813,12 @@ const App = () => {
                                         m === "01"
                                       }
                                       onClick={() => {
-                                        const prevKey = String(parseInt(m, 10) - 1).padStart(2, "0");
-                                        const prevRow = currentYearData.monthly[prevKey] || {};
-                                        const prevVal = (prevRow.stdAmountHealth != null && prevRow.stdAmountHealth !== "")
-                                          ? prevRow.stdAmountHealth
-                                          : ((prevRow.stdAmount != null && prevRow.stdAmount !== "") ? prevRow.stdAmount : "");
-                                        // 前月が空欄なら 0 ではなく "" を保存。0 と「未入力」を区別するため。
-                                        updateMonthly(selectedYear, m, "stdAmountHealth", prevVal === "" ? "" : Number(prevVal));
+                                        // 健保 標準報酬月額だけを前月からコピー（legacy stdAmount フォールバック付）。
+                                        handleCopyScalarFieldFromPrev(selectedYear, m, "stdAmountHealth", "stdAmount");
                                       }}
-                                      title="前月の標準報酬月額をコピー"
-                                      aria-label="前月の標準報酬月額をコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:border-blue-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
+                                      title="前月の健保 標準報酬月額をコピー"
+                                      aria-label="前月の健保 標準報酬月額をコピー"
+                                      className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
                                     >
                                       <Copy size={9} />
                                     </button>
@@ -13458,17 +13832,13 @@ const App = () => {
                                         m === "12"
                                       }
                                       onClick={() => {
+                                        // 健保 標準報酬月額だけを 12月まで一括コピー（atomic）。
                                         const valueToCopy = stdAmount === "" ? "" : Number(stdAmount);
-                                        const startNum = parseInt(m, 10);
-                                        for (let n = startNum; n <= 12; n++) {
-                                          const target = String(n).padStart(2, "0");
-                                          if (isMonthCellLocked(target)) continue;
-                                          updateMonthly(selectedYear, target, "stdAmountHealth", valueToCopy);
-                                        }
+                                        handleCopyScalarFieldToYearEnd(selectedYear, m, "stdAmountHealth", valueToCopy);
                                       }}
-                                      title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
-                                      aria-label="12月までコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
+                                      title="現在月の健保 標準報酬月額を12月まで一括コピー（ロック済み月はスキップ）"
+                                      aria-label="健保 標準報酬月額を12月までコピー"
+                                      className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
                                     >
                                       <ChevronsRight size={9} />
                                     </button>
@@ -13609,17 +13979,12 @@ const App = () => {
                                         m === "01"
                                       }
                                       onClick={() => {
-                                        const prevKey = String(parseInt(m, 10) - 1).padStart(2, "0");
-                                        const prevRow = currentYearData.monthly[prevKey] || {};
-                                        const prevVal = (prevRow.stdAmountPension != null && prevRow.stdAmountPension !== "")
-                                          ? prevRow.stdAmountPension
-                                          : ((prevRow.stdAmount != null && prevRow.stdAmount !== "") ? prevRow.stdAmount : "");
-                                        // 前月が空欄なら 0 ではなく "" を保存。0 と「未入力」を区別するため。
-                                        updateMonthly(selectedYear, m, "stdAmountPension", prevVal === "" ? "" : Number(prevVal));
+                                        // 厚年 標準報酬月額だけを前月からコピー（legacy stdAmount フォールバック付）。
+                                        handleCopyScalarFieldFromPrev(selectedYear, m, "stdAmountPension", "stdAmount");
                                       }}
-                                      title="前月の標準報酬月額をコピー"
-                                      aria-label="前月の標準報酬月額をコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:border-blue-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
+                                      title="前月の厚年 標準報酬月額をコピー"
+                                      aria-label="前月の厚年 標準報酬月額をコピー"
+                                      className="flex-shrink-0 p-px rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
                                     >
                                       <Copy size={9} />
                                     </button>
@@ -13633,17 +13998,13 @@ const App = () => {
                                         m === "12"
                                       }
                                       onClick={() => {
+                                        // 厚年 標準報酬月額だけを 12月まで一括コピー（atomic）。
                                         const valueToCopy = stdAmount === "" ? "" : Number(stdAmount);
-                                        const startNum = parseInt(m, 10);
-                                        for (let n = startNum; n <= 12; n++) {
-                                          const target = String(n).padStart(2, "0");
-                                          if (isMonthCellLocked(target)) continue;
-                                          updateMonthly(selectedYear, target, "stdAmountPension", valueToCopy);
-                                        }
+                                        handleCopyScalarFieldToYearEnd(selectedYear, m, "stdAmountPension", valueToCopy);
                                       }}
-                                      title="現在月の値をその月以降〜12月までへ一括コピー(ロック済み月はスキップ)"
-                                      aria-label="12月までコピー"
-                                      className="flex-shrink-0 p-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:border-transparent disabled:cursor-not-allowed"
+                                      title="現在月の厚年 標準報酬月額を12月まで一括コピー（ロック済み月はスキップ）"
+                                      aria-label="厚年 標準報酬月額を12月までコピー"
+                                      className="flex-shrink-0 p-px rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-30 disabled:bg-transparent disabled:text-slate-300 disabled:cursor-not-allowed"
                                     >
                                       <ChevronsRight size={9} />
                                     </button>

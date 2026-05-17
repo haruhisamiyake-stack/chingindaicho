@@ -21006,10 +21006,12 @@ const App = () => {
                   </label>
                   <input
                     value={editingMaster.employeeCode || ""}
+                    inputMode="numeric"
                     onChange={(e) =>
                       setEditingMaster({
                         ...editingMaster,
-                        employeeCode: e.target.value,
+                        // 半角数字以外は即時除去。type="number" は使わない (前ゼロ "001" を保つため)。
+                        employeeCode: e.target.value.replace(/[^0-9]/g, ""),
                       })
                     }
                     className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-emerald-500 font-mono"

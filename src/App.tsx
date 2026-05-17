@@ -871,6 +871,24 @@ const isInNursingTargetPeriod = (dobStr, yearStr, mStr) => {
   const reach65YM = getReachYM(65);
   return currentYM >= reach40YM && currentYM < reach65YM;
 };
+
+// 対象年度の年末（12月31日）時点の年齢を返す pure helper。
+//   - dobStr: 生年月日 ISO 文字列（例 "1985-05-15"）
+//   - yearStr: 対象年度（例 "R08"）。reiwaToWestern と同じ変換 (2018 + R番号)。
+//   - 戻り値: 年齢（整数）。dob / yearStr が不正 or 負年齢になる場合は null。
+//   - 仕様: 12月31日時点なので、その年の誕生日は必ず通過済とみなし「西暦 - dob年」で算出。
+//   - 表示用のみ。計算ロジック・社保判定には使用しない。
+const getAgeAtEndOfTargetYear = (dobStr, yearStr) => {
+  if (!dobStr || !yearStr) return null;
+  const dob = new Date(dobStr);
+  if (isNaN(dob.getTime())) return null;
+  const yNum = Number(String(yearStr).replace("R", ""));
+  if (isNaN(yNum)) return null;
+  const targetWesternYear = 2018 + yNum;
+  const age = targetWesternYear - dob.getFullYear();
+  if (age < 0) return null;
+  return age;
+};
 // 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
 const getEffectiveTaxTable = (taxTables, yearStr, type) => {
   if (!taxTables || !yearStr) return null;
@@ -12011,6 +12029,27 @@ const App = () => {
                           <span className="text-sm font-mono font-black text-slate-700">
                             {master.employeeCode || "---"}
                           </span>
+                        </div>
+                        <div className="flex flex-col">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            生年月日
+                          </span>
+                          <div className="flex items-baseline gap-1">
+                            <span className="text-sm font-mono font-black text-slate-700">
+                              {master.dob || "---"}
+                            </span>
+                            {(() => {
+                              // 対象年度末(12月31日)時点の年齢。表示用のみ。
+                              // dob 未設定 / selectedYear 不正の場合は null → 何も表示しない。
+                              // 印刷時は print:hidden で非表示（生年月日本体は印刷される）。
+                              const _ageAtYE = getAgeAtEndOfTargetYear(master?.dob, selectedYear);
+                              return _ageAtYE != null ? (
+                                <span className="text-[10px] font-bold text-slate-500 print:hidden">
+                                  ({_ageAtYE}歳)
+                                </span>
+                              ) : null;
+                            })()}
+                          </div>
                         </div>
                         <div className="flex flex-col">
                           <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">

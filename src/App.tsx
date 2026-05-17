@@ -889,6 +889,22 @@ const getAgeAtEndOfTargetYear = (dobStr, yearStr) => {
   if (age < 0) return null;
   return age;
 };
+
+// "YYYY-MM-DD" 形式の日付文字列を「YYYY年M月D日」表記に変換する pure helper。
+//   表示用のみ。dob 本体データ (Firestore 保存形式) は触らない。
+//   不正入力 (null/undefined/フォーマット不一致/範囲外) は null を返してフォールバックを呼出側に委ねる。
+//   ゼロパディングは行わない (例 "1977-03-27" → "1977年3月27日")。
+const formatDateJapanese = (dateStr) => {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const m = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d = parseInt(m[3], 10);
+  if (isNaN(y) || isNaN(mo) || isNaN(d)) return null;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${y}年${mo}月${d}日`;
+};
 // 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
 const getEffectiveTaxTable = (taxTables, yearStr, type) => {
   if (!taxTables || !yearStr) return null;
@@ -12036,7 +12052,7 @@ const App = () => {
                           </span>
                           <div className="flex items-baseline gap-1">
                             <span className="text-sm font-mono font-black text-slate-700">
-                              {master.dob || "---"}
+                              {formatDateJapanese(master.dob) || master.dob || "---"}
                             </span>
                             {(() => {
                               // 対象年度末(12月31日)時点の年齢。表示用のみ。
@@ -12045,7 +12061,7 @@ const App = () => {
                               const _ageAtYE = getAgeAtEndOfTargetYear(master?.dob, selectedYear);
                               return _ageAtYE != null ? (
                                 <span className="text-[10px] font-bold text-slate-500 print:hidden">
-                                  ({_ageAtYE}歳)
+                                  ({_ageAtYE}歳 ※{selectedYear}年12/31時点)
                                 </span>
                               ) : null;
                             })()}

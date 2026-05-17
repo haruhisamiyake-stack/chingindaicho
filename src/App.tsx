@@ -843,6 +843,34 @@ const getNursingAlert = (dobStr, yearStr, mStr) => {
   );
   return nursing ? nursing.label : null;
 };
+
+// 介護保険料 徴収対象期間判定（表示用 pure helper）。
+//   法令: 40歳到達日(誕生日の前日)が属する月から徴収開始、65歳到達日が属する月から徴収終了。
+//   対象期間 = [reach40YM, reach65YM) の半開区間。
+//   reach40YM = 「対象月の社保料から介護保険料の徴収開始」となる月
+//   reach65YM = 「同月の社保料から介護保険料を徴収しない」=対象外となる月
+// 戻り値:
+//   true  → 対象期間内（介護保険料徴収対象年齢に該当する可能性）
+//   false → 対象期間外、または dob 不正
+// 健康保険加入有無 / 現在の hasNursingIns 値は呼出側で判定する（この helper は年齢判定のみ）。
+// 表示用途のみ。書込・自動更新には一切使用しない。
+const isInNursingTargetPeriod = (dobStr, yearStr, mStr) => {
+  if (!dobStr || !yearStr || !mStr) return false;
+  const dob = new Date(dobStr);
+  if (isNaN(dob.getTime())) return false;
+  const getReachYM = (age) => {
+    const d = new Date(dob.getFullYear() + age, dob.getMonth(), dob.getDate());
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+  const yNum = Number(yearStr.replace("R", ""));
+  const y = isNaN(yNum) ? new Date().getFullYear() : 2018 + yNum;
+  const m = Number(mStr);
+  const currentYM = `${y}-${String(m).padStart(2, "0")}`;
+  const reach40YM = getReachYM(40);
+  const reach65YM = getReachYM(65);
+  return currentYM >= reach40YM && currentYM < reach65YM;
+};
 // 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
 const getEffectiveTaxTable = (taxTables, yearStr, type) => {
   if (!taxTables || !yearStr) return null;
@@ -9227,9 +9255,31 @@ const App = () => {
       currentYearDataObj.monthly[targetMonth]?.hasNursingIns === 1 ? 0 : 1;
     const newMonthly = { ...currentYearDataObj.monthly };
     const startIndex = MONTHS.indexOf(targetMonth);
+    // ★事故防止: target+1〜12月のループ内でロック月を skip する。
+    // 年度ロック (isLockedYear) は関数冒頭で短絡済みのためループ内では再判定しない。
+    // target 月自身も上の早期 return で除外済みだが、ループは startIndex 以降を全件回るため、
+    // 各月で row.isLocked / isMonthGloballyLocked を都度評価する。
+    // 既存仕様（target 月の値を target〜12月へ一括反映）は維持し、ロック済み月だけを skip する。
+    const skippedMonths = [];
     for (let i = startIndex; i < MONTHS.length; i++) {
       const m = MONTHS[i];
+      if (newMonthly[m]?.isLocked === true) {
+        skippedMonths.push({ month: m, reason: "row.isLocked" });
+        continue;
+      }
+      if (isMonthGloballyLocked(year, m)) {
+        skippedMonths.push({ month: m, reason: "isMonthGloballyLocked" });
+        continue;
+      }
       newMonthly[m] = { ...(newMonthly[m] || {}), hasNursingIns: newValue };
+    }
+    if (skippedMonths.length > 0) {
+      console.log("[toggleNursingIns] locked months skipped", {
+        year,
+        targetMonth,
+        newValue,
+        skipped: skippedMonths,
+      });
     }
     const newData = {
       ...data,
@@ -14186,13 +14236,24 @@ const App = () => {
                                 selectedYear,
                                 m
                               );
+                              // 継続未加入アラート: 介護保険料徴収対象期間内 ([reach40YM, reach65YM))・
+                              // 健康保険加入中・hasNursingIns !== 1 のとき表示。
+                              // 既存の到達月アラート (nursing40/nursing65/pension70/health75) とは独立した
+                              // 「継続状態」シグナル。表示のみで、書込・自動更新は一切行わない。
+                              const _ncHasHealth = master?.healthIns !== undefined
+                                ? master.healthIns === 1
+                                : master?.socialIns === 1;
+                              const _ncShowContinued =
+                                isInNursingTargetPeriod(master?.dob, selectedYear, m) &&
+                                _ncHasHealth &&
+                                (currentYearData.monthly[m]?.hasNursingIns !== 1);
                               return (
                                 <td
                                   key={m}
                                   className="border border-gray-300 p-0.5 text-center bg-white relative"
                                 >
                                   <div className="flex flex-col items-center justify-center">
-                                    {alerts.length > 0 && (
+                                    {(alerts.length > 0 || _ncShowContinued) && (
                                       <div className="flex flex-col gap-0.5 mb-1 w-full px-0.5">
                                         {alerts.map((alert, i) => (
                                           <span
@@ -14207,15 +14268,40 @@ const App = () => {
                                             {alert.label}
                                           </span>
                                         ))}
+                                        {_ncShowContinued && (
+                                          <span
+                                            className="text-[7px] font-black whitespace-nowrap leading-tight border px-0.5 py-0.5 rounded-sm w-full shadow-sm text-rose-600 bg-rose-50 border-rose-200"
+                                            title="40歳以上65歳未満かつ健康保険加入中で、この月の介護保険加入区分が「未」となっています。介護保険料徴収対象年齢に該当する可能性があります。実際の徴収月は会社の運用により異なる場合があります。加入区分はご確認ください。"
+                                          >
+                                            介護未加入確認
+                                          </span>
+                                        )}
                                       </div>
                                     )}
                                     <button
                                       disabled={
                                         isMonthCellLocked(m)
                                       }
-                                      onClick={() =>
-                                        toggleNursingIns(selectedYear, m)
-                                      }
+                                      onClick={() => {
+                                        // 軽量事故防止: toggleNursingIns は target 月〜12月を一括反映する
+                                        // 既存仕様のため、誤クリックによる多月変更を防ぐ目的で
+                                        // window.confirm で 1 段確認を挟む。書込ロジック・ロック仕様・
+                                        // 賞与計算経路 (bonusMonthRow.hasNursingIns) は一切変更しない。
+                                        const mNum = parseInt(m, 10);
+                                        const curVal =
+                                          currentYearData.monthly[m]
+                                            ?.hasNursingIns === 1
+                                            ? 1
+                                            : 0;
+                                        const newVal = curVal === 1 ? 0 : 1;
+                                        const msg =
+                                          `${mNum}月〜12月の介護保険加入区分を ${curVal} → ${newVal} に変更します。\n` +
+                                          `（既存仕様により、対象月以降12月までが一括で同じ値になります）\n` +
+                                          `賞与の支給月が対象月と一致する場合、その賞与の介護保険料の計算結果が変わる場合があります。\n\n` +
+                                          `実行しますか？`;
+                                        if (!window.confirm(msg)) return;
+                                        toggleNursingIns(selectedYear, m);
+                                      }}
                                       className={`w-full py-0.5 text-[10px] font-black rounded-sm border ${
                                         currentYearData.monthly[m]
                                           ?.hasNursingIns === 1

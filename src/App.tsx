@@ -2748,6 +2748,12 @@ const createInitialEmployee = (
       joinDate: "",
       retireDate: "",
       status: "active",
+      // 雇用区分 (属性): 給与/賞与明細の「基本給」「賞与」ラベルを役員向けに切り替える根拠。
+      //   "executive"   → 役員報酬 / 役員賞与
+      //   "employee"    → 給料手当 / 賞与 (デフォルト・正社員)
+      //   "part_time"   → 給料手当 / 賞与 (パート・アルバイト)
+      // 既存社員 (フィールド未定義) は renderPayslip 側で undefined を「役員以外」として安全フォールバック。
+      employmentType: "employee",
       dob: "1990-01-01",
       closingDay: "末",
       paymentDay: "翌月15",
@@ -10445,8 +10451,16 @@ const App = () => {
   ];
 
   // 賞与時は基本給ラベルを「賞与」に変更。月次専用の手当は 0 円なら非表示（賞与で値があれば残す）。
+  // 雇用区分 (employmentType) によりラベルを切り替え:
+  //   役員 (executive)        賞与 → 役員賞与 / 月給 → 役員報酬
+  //   それ以外 / undefined    賞与 → 賞与     / 月給 → 給料手当
+  // master.employmentType が未定義の旧データは `=== "executive"` が false に倒れるため "賞与"/"給料手当" にフォールバック。
+  const _isExecutive = emp.master?.employmentType === "executive";
+  const _basePayLabel = isBonus
+    ? (_isExecutive ? "役員賞与" : "賞与")
+    : (_isExecutive ? "役員報酬" : "給料手当");
   const paymentItems = [
-    { label: isBonus ? "賞与" : "基本給", value: formatCurrency(rowData.basePay) },
+    { label: _basePayLabel, value: formatCurrency(rowData.basePay) },
     ...allowanceDefs
       .filter(def => !isBonus || (Number(rowData.allowanceAmounts?.[def.id]) || 0) !== 0)
       .map(def => ({ label: def.name, value: formatCurrency(rowData.allowanceAmounts?.[def.id]) }))
@@ -21201,6 +21215,28 @@ const App = () => {
                     <option value="male">男</option>
                     <option value="female">女</option>
                     <option value="other">その他</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">
+                    属性
+                  </label>
+                  {/* 雇用区分 (属性): 役員/正社員/パート の 3 区分。フィールド未定義の既存社員は
+                      `|| "employee"` で「正社員」を初期表示するが、ユーザーが選択するまで
+                      state へは書き込まれないため "暗黙の一括移行" は発生しない (保存時のみ反映)。 */}
+                  <select
+                    value={editingMaster.employmentType || "employee"}
+                    onChange={(e) =>
+                      setEditingMaster({
+                        ...editingMaster,
+                        employmentType: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-emerald-500"
+                  >
+                    <option value="executive">役員</option>
+                    <option value="employee">正社員</option>
+                    <option value="part_time">パート・アルバイト</option>
                   </select>
                 </div>
                 <div className="space-y-1">

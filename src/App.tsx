@@ -957,6 +957,112 @@ const CurrencyInput = ({ value, onChange, disabled, className, placeholder, titl
   );
 };
 
+// 60進法 (時:分) 入力欄。勤怠の時間系項目 (総労働/時間外/深夜/休日) 用。
+//   - type="text" inputMode="numeric" でカンマ表示や桁数制限のない自由テキスト入力。
+//     type="time" は 24時間上限のため 24h を超える月間累計時間を入力できず採用不可。
+//   - 「1330」と打って blur すれば「13:30」に自動整形。「13:30」とコロン付きで打った場合も同形に正規化。
+//   - 10進法 (小数点) は混在禁止。"." を含む入力は不正とみなして空文字へリジェクト
+//     (data layer に小数 / 60進法が混在しない強い保証を作るため)。
+//   - onChange は整形後文字列 (例 "13:30" / "" / "100:00") を親に返す。
+//   - 既存データに decimal ("13.5" 等) が残っている場合、非フォーカス時は空表示になるが、
+//     edited フラグでガードしているため "フォーカス→ブラー" だけでは値を破壊しない (実際にキー入力した時のみ更新)。
+//
+// formatToHHMM(raw): pure helper. 不正/空はすべて "" に倒す safe fallback。
+//   入力種別:
+//     - 空/null/undefined → ""
+//     - "." を含む(小数) → "" (リジェクト)
+//     - ":" を含む → "H:MM" に正規化 (分が 0-59 範囲外なら "")
+//     - 数字のみ → 最後の 2 桁を分、残りを時として "H:MM" に整形 (分 60 以上は "")
+const formatToHHMM = (raw) => {
+  if (raw === null || raw === undefined) return "";
+  const s = String(raw).trim();
+  if (s === "") return "";
+  // 小数 (10進法) が含まれる場合は 60進法へ自動変換。
+  //   過去に decimal 文字列 ("13.5" / "0.25" 等) で保存されたデータが Firestore に残っている前提で、
+  //   非フォーカス時の表示時に「整数時間 + (小数部 × 60) 分」へ正規化し、空表示にしない。
+  //   - 13.5   → 13 + round(0.5  × 60) = 30 → "13:30"
+  //   - 0.25   → 0  + round(0.25 × 60) = 15 → "0:15"
+  //   - 13.333 → 13 + round(0.333× 60) = round(19.98) = 20 → "13:20" (分は必ず整数)
+  //   - 13.999 → 13 + round(0.999× 60) = 60 → 桁上げして "14:00" (分=60 は時に繰り上げる)
+  //   parseFloat で数値化できないもの (例 "abc.def") や負の値は安全のため "" にリジェクト。
+  if (s.includes(".")) {
+    const dec = parseFloat(s);
+    if (!Number.isFinite(dec) || dec < 0) return "";
+    let hNum = Math.floor(dec);
+    let mNum = Math.round((dec - hNum) * 60);
+    if (mNum >= 60) {
+      hNum += 1;
+      mNum = 0;
+    }
+    return `${hNum}:${String(mNum).padStart(2, "0")}`;
+  }
+  if (s.includes(":")) {
+    const parts = s.split(":");
+    if (parts.length !== 2) return "";
+    const hNum = parseInt(parts[0], 10);
+    const mNum = parseInt(parts[1], 10);
+    if (!Number.isFinite(hNum) || !Number.isFinite(mNum)) return "";
+    if (hNum < 0 || mNum < 0 || mNum >= 60) return "";
+    return `${hNum}:${String(mNum).padStart(2, "0")}`;
+  }
+  // 数字のみのケース。文字列の末尾 2 桁を分、先頭を時として解釈。
+  const digits = s.replace(/[^\d]/g, "");
+  if (digits === "") return "";
+  const mPart = digits.length >= 2 ? digits.slice(-2) : digits;
+  const hPart = digits.length >= 2 ? (digits.slice(0, -2) || "0") : "0";
+  const hNum = parseInt(hPart, 10);
+  const mNum = parseInt(mPart, 10);
+  if (!Number.isFinite(hNum) || !Number.isFinite(mNum)) return "";
+  if (hNum < 0 || mNum < 0 || mNum >= 60) return "";
+  return `${hNum}:${String(mNum).padStart(2, "0")}`;
+};
+
+const TimeInput = ({ value, onChange, disabled, className, placeholder, title, ...rest }) => {
+  const [isFocused, setIsFocused] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [edited, setEdited] = useState(false);
+
+  // 非フォーカス時: 整形済み表示。整形不能 (legacy decimal 等) なら空表示。
+  // フォーカス時: draft をそのまま表示してユーザーの編集を妨げない。
+  const displayValue = isFocused ? draft : formatToHHMM(value);
+
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode="numeric"
+      disabled={disabled}
+      className={className}
+      placeholder={placeholder}
+      title={title}
+      value={displayValue}
+      onFocus={(e) => {
+        setIsFocused(true);
+        // 編集開始時は現在の value をそのまま draft に積む(空/未定義は空文字)。
+        setDraft(value === null || value === undefined ? "" : String(value));
+        setEdited(false);
+        rest.onFocus && rest.onFocus(e);
+      }}
+      onBlur={(e) => {
+        // 「フォーカスして何もせず外す」操作で legacy データを意図せず破壊しないよう、
+        // ユーザーが実際に onChange を踏んだ (edited=true) ときのみ親へ書き戻す。
+        if (edited) {
+          const formatted = formatToHHMM(draft);
+          onChange(formatted);
+        }
+        setIsFocused(false);
+        setDraft("");
+        setEdited(false);
+        rest.onBlur && rest.onBlur(e);
+      }}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        setEdited(true);
+      }}
+    />
+  );
+};
+
 // 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
 const getEffectiveTaxTable = (taxTables, yearStr, type) => {
   if (!taxTables || !yearStr) return null;
@@ -12673,9 +12779,7 @@ const App = () => {
                                   >
                                     <ChevronsRight size={9} />
                                   </button>
-                                  <input
-                                    type="number"
-                                    step="0.1"
+                                  <TimeInput
                                     disabled={
                                       isMonthCellLocked(m)
                                     }
@@ -12683,12 +12787,12 @@ const App = () => {
                                       currentYearData.monthly[m]?.workingHours ||
                                       ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(s) =>
                                       updateMonthly(
                                         selectedYear,
                                         m,
                                         "workingHours",
-                                        e.target.value
+                                        s
                                       )
                                     }
                                     className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
@@ -12740,9 +12844,7 @@ const App = () => {
                                   >
                                     <ChevronsRight size={9} />
                                   </button>
-                                  <input
-                                    type="number"
-                                    step="0.1"
+                                  <TimeInput
                                     disabled={
                                       isMonthCellLocked(m)
                                     }
@@ -12750,12 +12852,12 @@ const App = () => {
                                       currentYearData.monthly[m]?.overtimeHours ||
                                       ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(s) =>
                                       updateMonthly(
                                         selectedYear,
                                         m,
                                         "overtimeHours",
-                                        e.target.value
+                                        s
                                       )
                                     }
                                     className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
@@ -12807,9 +12909,7 @@ const App = () => {
                                   >
                                     <ChevronsRight size={9} />
                                   </button>
-                                  <input
-                                    type="number"
-                                    step="0.1"
+                                  <TimeInput
                                     disabled={
                                       isMonthCellLocked(m)
                                     }
@@ -12817,12 +12917,12 @@ const App = () => {
                                       currentYearData.monthly[m]
                                         ?.lateNightHours || ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(s) =>
                                       updateMonthly(
                                         selectedYear,
                                         m,
                                         "lateNightHours",
-                                        e.target.value
+                                        s
                                       )
                                     }
                                     className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
@@ -12874,9 +12974,7 @@ const App = () => {
                                   >
                                     <ChevronsRight size={9} />
                                   </button>
-                                  <input
-                                    type="number"
-                                    step="0.1"
+                                  <TimeInput
                                     disabled={
                                       isMonthCellLocked(m)
                                     }
@@ -12884,12 +12982,12 @@ const App = () => {
                                       currentYearData.monthly[m]?.holidayHours ||
                                       ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(s) =>
                                       updateMonthly(
                                         selectedYear,
                                         m,
                                         "holidayHours",
-                                        e.target.value
+                                        s
                                       )
                                     }
                                     className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${

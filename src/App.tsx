@@ -14198,7 +14198,11 @@ const App = () => {
                                           <span
                                             key={i}
                                             className={`text-[7px] font-black whitespace-nowrap leading-tight border px-0.5 py-0.5 rounded-sm w-full animate-pulse shadow-sm ${alert.color}`}
-                                            title="将来の拡張でワンクリック確認機能を追加予定です"
+                                            title={
+                                              (alert.type === "nursing40" || alert.type === "nursing65")
+                                                ? "生年月日と対象月から、介護保険対象年齢（40歳以上65歳未満）に関する確認月に該当する可能性があります。実際の徴収月は会社の運用により異なる場合があります。加入区分はご確認ください。"
+                                                : "将来の拡張でワンクリック確認機能を追加予定です"
+                                            }
                                           >
                                             {alert.label}
                                           </span>

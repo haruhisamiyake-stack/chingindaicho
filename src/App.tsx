@@ -905,6 +905,58 @@ const formatDateJapanese = (dateStr) => {
   if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
   return `${y}年${mo}月${d}日`;
 };
+
+// 金額入力欄: フォーカス時はカンマなしの数値、フォーカス外は toLocaleString のカンマ区切りで表示する。
+//   onChange は カンマを除去した「純粋な数値」(空入力時は 0) を親に渡す。
+//   従来の `<input type="number">` の置き換え目的のため、計算ロジック側からは値の型(数値)が
+//   変わらないよう、Number(e.target.value) 相当の値を直接渡している。
+//   type="number" は使わず type="text" + inputMode="numeric" にすることでカンマ表示を可能にする。
+//   className / disabled / placeholder / title などのパススルー props はそのまま <input> に渡す。
+const CurrencyInput = ({ value, onChange, disabled, className, placeholder, title, ...rest }) => {
+  const [isFocused, setIsFocused] = useState(false);
+
+  const isEmpty = value === null || value === undefined || value === "";
+  const numericString = isEmpty ? "" : String(value).replace(/,/g, "");
+
+  let displayValue;
+  if (isEmpty) {
+    displayValue = "";
+  } else if (isFocused) {
+    displayValue = numericString;
+  } else {
+    const num = Number(numericString);
+    displayValue = Number.isFinite(num) ? num.toLocaleString() : numericString;
+  }
+
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode="numeric"
+      disabled={disabled}
+      className={className}
+      placeholder={placeholder}
+      title={title}
+      value={displayValue}
+      onFocus={(e) => {
+        setIsFocused(true);
+        rest.onFocus && rest.onFocus(e);
+      }}
+      onBlur={(e) => {
+        setIsFocused(false);
+        rest.onBlur && rest.onBlur(e);
+      }}
+      onChange={(e) => {
+        // 半角数字以外(カンマ含む)を除去してから Number 化。空入力は 0 として親に返し、
+        // 既存の `Number(e.target.value)` ベース(空 → 0)と同等の保存挙動を維持する。
+        const cleaned = e.target.value.replace(/[^\d]/g, "");
+        const num = cleaned === "" ? 0 : Number(cleaned);
+        onChange(num);
+      }}
+    />
+  );
+};
+
 // 指定された年度において、適用可能な最新の税額表を探すヘルパー関数
 const getEffectiveTaxTable = (taxTables, yearStr, type) => {
   if (!taxTables || !yearStr) return null;
@@ -3972,6 +4024,18 @@ const App = () => {
 
   const [isLedgerPrintOpen, setIsLedgerPrintOpen] = useState(false); // ★追加: 賃金台帳の印刷モーダル状態
   const [isResidentTaxModalOpen, setIsResidentTaxModalOpen] = useState(false); // ★追加: 住民税管理モーダル状態
+  // 住民税モーダル「新年度分を一括で流し込む」用の入力 state。
+  //   従来は document.getElementById("bulk-june"/"bulk-rem").value で DOM 直接参照していたが、
+  //   <CurrencyInput> 化に伴い React state で管理する。"" を初期値とし、CurrencyInput の
+  //   isEmpty 判定で空表示。モーダル close 時にリセットして「次に開いたとき空欄」の従来 UX を維持する。
+  const [bulkJuneAmount, setBulkJuneAmount] = useState("");
+  const [bulkRemAmount, setBulkRemAmount] = useState("");
+  useEffect(() => {
+    if (!isResidentTaxModalOpen) {
+      setBulkJuneAmount("");
+      setBulkRemAmount("");
+    }
+  }, [isResidentTaxModalOpen]);
 
   const [aggMode, setAggMode] = useState("special1"); // ★追加: 集計モード (monthly / special1 / special2)
   const [aggMonth, setAggMonth] = useState("01"); // ★追加: 集計対象月 (毎月納付の場合)
@@ -11853,17 +11917,16 @@ const App = () => {
                                    {" "}
                               <td className="border border-slate-200 p-1 bg-amber-50/30">
                                                              {" "}
-                                <input
+                                <CurrencyInput
                                   disabled={isDisabled}
-                                  type="number"
                                   value={rowData.basePay || ""}
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateEmployeeMonthly(
                                       empId,
                                       selectedYear,
                                       ledgerSelectedMonth,
                                       "basePay",
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${
@@ -11882,20 +11945,19 @@ const App = () => {
                                   className="border border-slate-200 p-1 bg-white"
                                 >
                                                                  {" "}
-                                  <input
+                                  <CurrencyInput
                                     disabled={isDisabled}
-                                    type="number"
                                     value={
                                       rowData.allowanceAmounts?.[def.id] || ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(num) =>
                                       updateEmployeeMonthlyObject(
                                         empId,
                                         selectedYear,
                                         ledgerSelectedMonth,
                                         "allowanceAmounts",
                                         def.id,
-                                        Number(e.target.value)
+                                        num
                                       )
                                     }
                                     className={`w-full bg-transparent text-right outline-none font-mono focus:ring-1 ring-indigo-400 rounded py-1 ${
@@ -11932,17 +11994,16 @@ const App = () => {
                                    {" "}
                               <td className="border border-slate-200 p-1 bg-white">
                                                              {" "}
-                                <input
+                                <CurrencyInput
                                   disabled={isDisabled}
-                                  type="number"
                                   value={rowData.residentTax || ""}
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateEmployeeMonthly(
                                       empId,
                                       selectedYear,
                                       ledgerSelectedMonth,
                                       "residentTax",
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-mono text-orange-600 focus:ring-1 ring-indigo-400 rounded py-1 ${
@@ -11960,20 +12021,19 @@ const App = () => {
                                   className="border border-slate-200 p-1 bg-white"
                                 >
                                                                  {" "}
-                                  <input
+                                  <CurrencyInput
                                     disabled={isDisabled}
-                                    type="number"
                                     value={
                                       rowData.deductionAmounts?.[def.id] || ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(num) =>
                                       updateEmployeeMonthlyObject(
                                         empId,
                                         selectedYear,
                                         ledgerSelectedMonth,
                                         "deductionAmounts",
                                         def.id,
-                                        Number(e.target.value)
+                                        num
                                       )
                                     }
                                     className={`w-full bg-transparent text-right outline-none font-mono text-red-600 focus:ring-1 ring-indigo-400 rounded py-1 ${
@@ -12888,20 +12948,19 @@ const App = () => {
                                   >
                                     <ChevronsRight size={9} />
                                   </button>
-                                  <input
-                                    type="number"
+                                  <CurrencyInput
                                     disabled={
                                       isMonthCellLocked(m)
                                     }
                                     value={
                                       currentYearData.monthly[m]?.basePay || ""
                                     }
-                                    onChange={(e) =>
+                                    onChange={(num) =>
                                       updateMonthly(
                                         selectedYear,
                                         m,
                                         "basePay",
-                                        Number(e.target.value)
+                                        num
                                       )
                                     }
                                     className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-[11px] px-0.5 ${
@@ -12917,17 +12976,16 @@ const App = () => {
                               {formatCurrency(results.sums.basePay)}
                             </td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={currentYearData.bonus?.basePay || ""}
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus",
                                     "basePay",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -12938,17 +12996,16 @@ const App = () => {
                               />
                             </td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={currentYearData.bonus2?.basePay || ""}
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus2",
                                     "basePay",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13035,8 +13092,7 @@ const App = () => {
                                     >
                                       <ChevronsRight size={9} />
                                     </button>
-                                    <input
-                                      type="number"
+                                    <CurrencyInput
                                       disabled={
                                         isMonthCellLocked(m)
                                       }
@@ -13044,11 +13100,11 @@ const App = () => {
                                         currentYearData.monthly[m]
                                           ?.allowanceAmounts?.[def.id] || ""
                                       }
-                                      onChange={(e) => {
+                                      onChange={(num) => {
                                         const newMD = {
                                           ...(currentYearData.monthly[m]
                                             ?.allowanceAmounts || {}),
-                                          [def.id]: Number(e.target.value),
+                                          [def.id]: num,
                                         };
                                         updateMonthly(
                                           selectedYear,
@@ -13072,21 +13128,20 @@ const App = () => {
                                 )}
                               </td>
                               <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                                <input
-                                  type="number"
+                                <CurrencyInput
                                   disabled={isYearLocked}
                                   value={
                                     currentYearData.bonus?.allowanceAmounts?.[
                                       def.id
                                     ] || ""
                                   }
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateBonus(
                                       selectedYear,
                                       "bonus",
                                       "allowanceAmounts",
                                       def.id,
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13097,21 +13152,20 @@ const App = () => {
                                 />
                               </td>
                               <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                                <input
-                                  type="number"
+                                <CurrencyInput
                                   disabled={isYearLocked}
                                   value={
                                     currentYearData.bonus2?.allowanceAmounts?.[
                                       def.id
                                     ] || ""
                                   }
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateBonus(
                                       selectedYear,
                                       "bonus2",
                                       "allowanceAmounts",
                                       def.id,
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13297,19 +13351,18 @@ const App = () => {
                               {formatCurrency(results.sums.incomeTax)}
                             </td>
                             <td className={`border border-gray-300 p-0.5 text-right sticky right-[270px] z-25 ${results.bonus1?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked || !results.bonus1?.manualRequired}
                                 title={!results.bonus1?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
                                 value={results.bonus1?.incomeTax ?? ""}
-                                onChange={(e) => {
+                                onChange={(num) => {
                                   if (!results.bonus1?.manualRequired) return;
                                   updateBonus(
                                     selectedYear,
                                     "bonus",
                                     "incomeTax",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   );
                                 }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13323,19 +13376,18 @@ const App = () => {
                               {results.bonus1?.incomeTax === null && <div className="text-[8px] text-red-600 text-center font-black pb-0.5 pointer-events-none">計算不可</div>}
                             </td>
                             <td className={`border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 ${results.bonus2?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked || !results.bonus2?.manualRequired}
                                 title={!results.bonus2?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
                                 value={results.bonus2?.incomeTax ?? ""}
-                                onChange={(e) => {
+                                onChange={(num) => {
                                   if (!results.bonus2?.manualRequired) return;
                                   updateBonus(
                                     selectedYear,
                                     "bonus2",
                                     "incomeTax",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   );
                                 }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13402,11 +13454,10 @@ const App = () => {
                                         {formatCurrency(Number(ovRT.value) || 0)}
                                       </span>
                                     ) : (
-                                      <input
-                                        type="number"
+                                      <CurrencyInput
                                         disabled={isMonthCellLocked(m)}
                                         value={baseVal || ""}
-                                        onChange={(e) => updateMonthly(selectedYear, m, "residentTax", Number(e.target.value))}
+                                        onChange={(num) => updateMonthly(selectedYear, m, "residentTax", num)}
                                         className={`flex-1 min-w-0 bg-transparent text-right outline-none font-mono text-orange-600 text-[11px] px-0.5 ${isMonthCellLocked(m) ? "cursor-not-allowed text-slate-400" : ""}`}
                                       />
                                     )}
@@ -13428,17 +13479,16 @@ const App = () => {
                               {formatCurrency(results.sums.residentTax)}
                             </td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={currentYearData.bonus?.residentTax || ""}
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus",
                                     "residentTax",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13449,19 +13499,18 @@ const App = () => {
                               />
                             </td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={
                                   currentYearData.bonus2?.residentTax || ""
                                 }
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus2",
                                     "residentTax",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13529,14 +13578,13 @@ const App = () => {
                                           {formatCurrency(Number(ovD.value) || 0)}
                                         </span>
                                       ) : (
-                                        <input
-                                          type="number"
+                                        <CurrencyInput
                                           disabled={isMonthCellLocked(m)}
                                           value={baseValD || ""}
-                                          onChange={(e) => {
+                                          onChange={(num) => {
                                             const newMD = {
                                               ...(currentYearData.monthly[m]?.deductionAmounts || {}),
-                                              [def.id]: Number(e.target.value),
+                                              [def.id]: num,
                                             };
                                             updateMonthly(selectedYear, m, "deductionAmounts", newMD);
                                           }}
@@ -13563,21 +13611,20 @@ const App = () => {
                                 )}
                               </td>
                               <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                                <input
-                                  type="number"
+                                <CurrencyInput
                                   disabled={isYearLocked}
                                   value={
                                     currentYearData.bonus?.deductionAmounts?.[
                                       def.id
                                     ] || ""
                                   }
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateBonus(
                                       selectedYear,
                                       "bonus",
                                       "deductionAmounts",
                                       def.id,
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13588,21 +13635,20 @@ const App = () => {
                                 />
                               </td>
                               <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                                <input
-                                  type="number"
+                                <CurrencyInput
                                   disabled={isYearLocked}
                                   value={
                                     currentYearData.bonus2?.deductionAmounts?.[
                                       def.id
                                     ] || ""
                                   }
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateBonus(
                                       selectedYear,
                                       "bonus2",
                                       "deductionAmounts",
                                       def.id,
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className={`w-full bg-transparent text-right outline-none font-bold text-indigo-700 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -13947,19 +13993,18 @@ const App = () => {
                                     >
                                       <ChevronsRight size={9} />
                                     </button>
-                                    <input
-                                      type="number"
+                                    <CurrencyInput
                                       disabled={
                                         isMonthCellLocked(m) ||
                                         !isApplicable
                                       }
                                       value={stdAmount || ""}
-                                      onChange={(e) =>
+                                      onChange={(num) =>
                                         updateMonthly(
                                           selectedYear,
                                           m,
                                           "stdAmountHealth",
-                                          Number(e.target.value)
+                                          num
                                         )
                                       }
                                       className={`flex-1 min-w-0 text-right outline-none font-black font-mono text-[11px] px-0.5 bg-transparent ${
@@ -14113,19 +14158,18 @@ const App = () => {
                                     >
                                       <ChevronsRight size={9} />
                                     </button>
-                                    <input
-                                      type="number"
+                                    <CurrencyInput
                                       disabled={
                                         isMonthCellLocked(m) ||
                                         !isApplicable
                                       }
                                       value={stdAmount || ""}
-                                      onChange={(e) =>
+                                      onChange={(num) =>
                                         updateMonthly(
                                           selectedYear,
                                           m,
                                           "stdAmountPension",
-                                          Number(e.target.value)
+                                          num
                                         )
                                       }
                                       className={`flex-1 min-w-0 text-right outline-none font-black font-mono text-[11px] px-0.5 bg-transparent ${
@@ -14182,20 +14226,19 @@ const App = () => {
                             ))}
                             <td className="border border-gray-300 p-1.5 sticky right-[350px] z-25 shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[270px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={
                                   currentYearData.bonus?.manualPriorHealthStd ||
                                   ""
                                 }
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus",
                                     "manualPriorHealthStd",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -14207,20 +14250,19 @@ const App = () => {
                               />
                             </td>
                             <td className="border border-gray-300 p-0.5 text-right bg-white sticky right-[190px] z-25">
-                              <input
-                                type="number"
+                              <CurrencyInput
                                 disabled={isYearLocked}
                                 value={
                                   currentYearData.bonus2
                                     ?.manualPriorHealthStd || ""
                                 }
-                                onChange={(e) =>
+                                onChange={(num) =>
                                   updateBonus(
                                     selectedYear,
                                     "bonus2",
                                     "manualPriorHealthStd",
                                     null,
-                                    Number(e.target.value)
+                                    num
                                   )
                                 }
                                 className={`w-full bg-transparent text-right outline-none font-bold text-indigo-600 focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
@@ -14855,21 +14897,20 @@ const App = () => {
                             />
                           </td>
                           <td className="border border-slate-200 p-1 bg-white">
-                            <input
+                            <CurrencyInput
                               disabled={isDisabled}
-                              type="number"
                               value={rowData.basePay || ""}
-                              onChange={(e) => {
+                              onChange={(num) => {
                                 if (isBonusList) {
                                   // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
-                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "basePay", null, Number(e.target.value));
+                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "basePay", null, num);
                                 } else {
                                   updateEmployeeMonthly(
                                     empId,
                                     selectedYear,
                                     selectedListMonth,
                                     "basePay",
-                                    Number(e.target.value)
+                                    num
                                   );
                                 }
                               }}
@@ -14887,16 +14928,15 @@ const App = () => {
                                 key={def.id}
                                 className="border border-slate-200 p-1 bg-white"
                               >
-                                <input
+                                <CurrencyInput
                                   disabled={isDisabled}
-                                  type="number"
                                   value={
                                     rowData.allowanceAmounts?.[def.id] || ""
                                   }
-                                  onChange={(e) => {
+                                  onChange={(num) => {
                                     if (isBonusList) {
                                       // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
-                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "allowanceAmounts", def.id, Number(e.target.value));
+                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "allowanceAmounts", def.id, num);
                                     } else {
                                       updateEmployeeMonthlyObject(
                                         empId,
@@ -14904,7 +14944,7 @@ const App = () => {
                                         selectedListMonth,
                                         "allowanceAmounts",
                                         def.id,
-                                        Number(e.target.value)
+                                        num
                                       );
                                     }
                                   }}
@@ -14960,21 +15000,20 @@ const App = () => {
                           </td>
 
                           <td className="border border-slate-200 p-1 bg-white relative">
-                            <input
+                            <CurrencyInput
                               disabled={isDisabled}
-                              type="number"
                               value={rowData.residentTax || ""}
-                              onChange={(e) => {
+                              onChange={(num) => {
                                 if (isBonusList) {
                                   // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
-                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "residentTax", null, Number(e.target.value));
+                                  updateEmployeeBonus(empId, selectedYear, selectedListMonth, "residentTax", null, num);
                                 } else {
                                   updateEmployeeMonthly(
                                     empId,
                                     selectedYear,
                                     selectedListMonth,
                                     "residentTax",
-                                    Number(e.target.value)
+                                    num
                                   );
                                 }
                               }}
@@ -15007,16 +15046,15 @@ const App = () => {
                                 className="border border-slate-200 p-1 bg-white"
                               >
                                                                {" "}
-                                <input
+                                <CurrencyInput
                                   disabled={isDisabled}
-                                  type="number"
                                   value={
                                     rowData.deductionAmounts?.[def.id] || ""
                                   }
-                                  onChange={(e) => {
+                                  onChange={(num) => {
                                     if (isBonusList) {
                                       // ★ 保存入口は requestEmployeeSave に統一（updateEmployeeBonus 経由）。
-                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "deductionAmounts", def.id, Number(e.target.value));
+                                      updateEmployeeBonus(empId, selectedYear, selectedListMonth, "deductionAmounts", def.id, num);
                                     } else {
                                       updateEmployeeMonthlyObject(
                                         empId,
@@ -15024,7 +15062,7 @@ const App = () => {
                                         selectedListMonth,
                                         "deductionAmounts",
                                         def.id,
-                                        Number(e.target.value)
+                                        num
                                       );
                                     }
                                   }}
@@ -20919,10 +20957,9 @@ const App = () => {
         <div className="flex flex-col gap-3 mb-5">
           <div>
             <label className="text-xs font-bold text-slate-600 mb-1 block">手入力値</label>
-            <input
-              type="number"
+            <CurrencyInput
               value={overrideInputValue}
-              onChange={(e) => setOverrideInputValue(e.target.value)}
+              onChange={(num) => setOverrideInputValue(num)}
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
               placeholder="0"
               autoFocus
@@ -22010,9 +22047,9 @@ const App = () => {
                       <label className="text-[10px] font-bold text-slate-500">
                         6月支給分の額
                       </label>
-                      <input
-                        type="number"
-                        id="bulk-june"
+                      <CurrencyInput
+                        value={bulkJuneAmount}
+                        onChange={(num) => setBulkJuneAmount(num)}
                         placeholder="例: 15500"
                         className="w-full border border-orange-200 rounded-lg px-3 py-2 outline-none focus:ring-2 ring-orange-300 font-mono font-bold text-orange-700"
                       />
@@ -22021,9 +22058,9 @@ const App = () => {
                       <label className="text-[10px] font-bold text-slate-500">
                         7月〜翌5月の月額
                       </label>
-                      <input
-                        type="number"
-                        id="bulk-rem"
+                      <CurrencyInput
+                        value={bulkRemAmount}
+                        onChange={(num) => setBulkRemAmount(num)}
                         placeholder="例: 15000"
                         className="w-full border border-orange-200 rounded-lg px-3 py-2 outline-none focus:ring-2 ring-orange-300 font-mono font-bold text-orange-700"
                       />
@@ -22031,14 +22068,17 @@ const App = () => {
                   </div>
                   <button
                     onClick={() => {
-                      const jun = document.getElementById("bulk-june").value;
-                      const rem = document.getElementById("bulk-rem").value;
-                      if (!jun || !rem) return alert("金額を入力してください");
+                      // 既存仕様の踏襲: 「未入力 (""")」のみアラート対象。"0" 入力は許容して保存する。
+                      //   元コードでは DOM 直接参照 (document.getElementById) で string を取得していたため、
+                      //   !jun / !rem (空文字のみ true) と等価になるよう、ここでも空文字判定にする。
+                      if (bulkJuneAmount === "" || bulkRemAmount === "") {
+                        return alert("金額を入力してください");
+                      }
                       handleSaveResidentTaxBulk(
                         selectedEmployeeId,
                         selectedYear,
-                        Number(jun),
-                        Number(rem)
+                        Number(bulkJuneAmount),
+                        Number(bulkRemAmount)
                       );
                     }}
                     className="w-full mt-3 bg-orange-600 text-white py-2 rounded-lg font-black text-xs hover:bg-orange-700 transition-colors shadow-sm"
@@ -22114,16 +22154,15 @@ const App = () => {
                                 {item.y}年 {parseInt(item.m, 10)}月
                               </td>
                               <td className="p-1">
-                                <input
-                                  type="number"
+                                <CurrencyInput
                                   value={currentVal || ""}
-                                  onChange={(e) =>
+                                  onChange={(num) =>
                                     updateEmployeeMonthly(
                                       selectedEmployeeId,
                                       item.y,
                                       item.m,
                                       "residentTax",
-                                      Number(e.target.value)
+                                      num
                                     )
                                   }
                                   className="w-full bg-transparent text-right pr-4 outline-none font-mono font-bold text-indigo-600 focus:bg-white"

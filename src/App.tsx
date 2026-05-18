@@ -334,6 +334,12 @@ const DEFAULT_SETTINGS = {
   paymentDay: "翌月15",
   editableYear: "R08",
   taxCalcMethod: "taxTable", // ★追加：所得税計算方式 (taxTable or densan)
+  // 賞与表示名 (UI / 印刷 / 仕訳摘要 / 弥生取込ファイル名で表示する文言)。
+  //   内部キー bonus / bonus2 (Firestore 保存パス・currentYearData.bonus / bonus2・results.bonus1 /
+  //   bonus2・monthKey 分岐) は絶対に変更しない。あくまで「画面に出す文字列」だけを上書きする目的。
+  //   空欄保存時は getBonusLabel ヘルパが標準名 "賞与1" / "賞与2" にフォールバックする (UI が落ちない)。
+  //   仕訳摘要に長い表示名を使うと弥生取込時に 30 文字制限で切り詰められる点に注意 (truncateYayoiDescription)。
+  bonusLabels: { bonus: "賞与1", bonus2: "賞与2" },
   // 賃金台帳 (全年ビュー / 月別ビュー) の手当・控除行の表示順設定。
   //   allowances: 手当定義ID の表示順 (空配列なら allowanceDefinitions の元順をそのまま使用)
   //   deductions: 控除定義ID の表示順 (空配列なら deductionDefinitions の元順をそのまま使用)
@@ -430,6 +436,22 @@ const DEFAULT_SETTINGS = {
     allowances: {},
     deductions: {},
   },
+};
+
+// 賞与表示名 取得 helper (純関数)。
+//   bonusKey === "bonus"  → settings.bonusLabels.bonus  (空欄/未保存なら "賞与1")
+//   bonusKey === "bonus2" → settings.bonusLabels.bonus2 (空欄/未保存なら "賞与2")
+//   それ以外 → "" (異常系のフォールバック。呼出側で月次ラベル等を別途処理する想定)
+// 用途: 賃金台帳 / 賞与計算画面 / 月次締めステータス / 仕訳プレビューモーダル / 仕訳摘要 /
+//       弥生取込テキストのファイル名 / 印刷プレビュー・実印刷 など、すべての画面表示。
+// 内部キー (bonus / bonus2) は変更せず、表示文字列だけを上書きする目的。
+// 既存テナントが bonusLabels を保存していなくても settings?. 連鎖と || "賞与1/2" で安全動作。
+// 空文字 ("") を明示保存していた場合も trim()→空判定→標準名にフォールバック。
+const getBonusLabel = (settings, bonusKey) => {
+  const labels = (settings && settings.bonusLabels) || {};
+  if (bonusKey === "bonus")  return (String(labels.bonus  || "").trim()) || "賞与1";
+  if (bonusKey === "bonus2") return (String(labels.bonus2 || "").trim()) || "賞与2";
+  return "";
 };
 
 // 賃金台帳 (全年ビュー / 月別ビュー) 用 表示順並び替え helper。
@@ -3348,7 +3370,11 @@ const buildMonthlyActions = ({ isNoData, isLocked, isStale, errorCount, warningC
 // 4. メイン統合関数
 const buildMonthlyCloseStatus = ({ monthKey, selectedYear, employees, monthlyCheckResults, monthlyLocks, settings, effectiveSettings, taxTables, calcCache }) => {
   const isBonusList = monthKey === "bonus" || monthKey === "bonus2";
-  const monthLabel = monthKey === "bonus" ? "賞与①" : monthKey === "bonus2" ? "賞与②" : `${parseInt(monthKey, 10)}月支給分`;
+  // 賞与の monthLabel は settings.bonusLabels を反映 (会社共通設定の「賞与表示名」)。
+  // 未保存 / 空欄なら標準名 "賞与1" / "賞与2" にフォールバック (getBonusLabel)。
+  const monthLabel = isBonusList
+    ? getBonusLabel(settings, monthKey)
+    : `${parseInt(monthKey, 10)}月支給分`;
 
   // depsの受け渡しを廃止
   const aggregates = calculateMonthlyAggregates({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache });
@@ -4146,11 +4172,14 @@ const buildBonusJournalPreview = ({
   const allowanceDefs = settings?.allowanceDefinitions || [];
   const deductionDefs = settings?.deductionDefinitions || [];
 
-  const bonusLabel = bonusKey === "bonus" ? "賞与1" : "賞与2";
-  // 摘要先頭。賞与1/賞与2の区別は moonth-base ではなく bonusKey ベースで付ける。
+  // 賞与表示名: 会社共通設定 settings.bonusLabels で会社ごとに変更可能 (例: "夏季賞与" / "冬季賞与")。
+  // 未保存 / 空欄なら標準名 "賞与1" / "賞与2" にフォールバック (getBonusLabel)。
+  // 内部キー bonus / bonus2 は不変。あくまで表示文字列・摘要・itemLabel での識別用。
+  const bonusLabel = getBonusLabel(settings, bonusKey);
+  // 摘要先頭。賞与1/賞与2の区別は month-base ではなく bonusKey ベース + 表示名で付ける。
   // 「年月分」相当の月部分は賞与支給日 (payDate) があれば payDate の月、無ければ helper の "12" fallback。
-  // 月次の "R08年03月分 給与" と並べたとき視覚的に賞与だと分かるよう、末尾に「賞与1/賞与2」を入れる。
-  // (摘要例: "R08年06月分 賞与1 山田太郎 社会保険料")
+  // 月次の "R08年03月分 給与" と並べたとき視覚的に賞与だと分かるよう、末尾に表示名を入れる。
+  // (摘要例: "R08年06月分 夏季賞与 山田太郎 社会保険料")
 
   // 日付混在検知用
   let firstPayDate = null;
@@ -4417,7 +4446,9 @@ const buildBonusJournalPreview = ({
 
   // ===== 集約 / 従業員別 (月次と同じキー戦略) =====
   // 賞与の "差引支給額" 判定は itemLabel が `${bonusLabel} 差引支給額` で終わる行を最後に並べる。
-  // (会社が勘定科目名を「未払金」等に変更しても、内部ラベル "賞与1 差引支給額" / "賞与2 差引支給額" は不変)。
+  // 1 回の build 内では addRow と sort 比較で同じ bonusLabel 変数を参照するため、表示名を会社共通
+  // 設定で変更しても (例: "夏季賞与 差引支給額") 並び替えは整合する。会社が勘定科目名を「未払金」等に
+  // 変更しても、itemLabel の "(bonusLabel) 差引支給額" サフィックス自体は build 内で一意に確定する。
   const isNetRowItem = (r) => r.itemLabel === `${bonusLabel} 差引支給額`;
 
   let outRows;
@@ -5037,21 +5068,25 @@ const buildYayoiJournalText = ({ previewRows, mode, year, monthKey }) => {
   };
 };
 
-// 弥生取込テキスト ファイル名生成。Windows 不可文字は除去。拡張子は .txt 固定。
+// 弥生取込テキスト ファイル名生成。Windows 不可文字は除去 (_safe)。拡張子は .txt 固定。
 // 例:
 //   給与仕訳_R08_05_合算_弥生取込.txt          (月次)
 //   給与仕訳_R08_05_従業員別_弥生取込.txt      (月次)
-//   賞与1仕訳_R08_bonus_合算_弥生取込.txt      (賞与1)
-//   賞与2仕訳_R08_bonus2_従業員別_弥生取込.txt (賞与2)
-// monthKey が "bonus" / "bonus2" のときは「賞与1仕訳」/「賞与2仕訳」プレフィックスにし、
-// それ以外 (月次キー "01"〜"12") は従来通り「給与仕訳」プレフィックスのまま。
-const buildYayoiTextFilename = (year, monthKey, mode) => {
+//   賞与1仕訳_R08_bonus_合算_弥生取込.txt      (賞与1 / 表示名未保存)
+//   夏季賞与仕訳_R08_bonus_合算_弥生取込.txt   (賞与1 / settings.bonusLabels.bonus = "夏季賞与")
+//   冬季賞与仕訳_R08_bonus2_従業員別_弥生取込.txt (賞与2 / settings.bonusLabels.bonus2 = "冬季賞与")
+// monthKey が "bonus" / "bonus2" のときは settings.bonusLabels を反映した表示名 + "仕訳" を prefix にし、
+// それ以外 (月次キー "01"〜"12") は従来通り "給与仕訳" prefix のまま (settings は参照しない)。
+// 第4引数 settings は optional。後方互換のため、未指定時は標準名 ("賞与1"/"賞与2") にフォールバックする。
+const buildYayoiTextFilename = (year, monthKey, mode, settings) => {
   const _safe = (s) => String(s || "").replace(/[\\/:*?"<>|]/g, "");
   const _mLabel = mode === "byEmployee" ? "従業員別" : "合算";
-  const _prefix =
-    monthKey === "bonus"  ? "賞与1仕訳" :
-    monthKey === "bonus2" ? "賞与2仕訳" :
-                            "給与仕訳";
+  let _prefix = "給与仕訳";
+  if (monthKey === "bonus" || monthKey === "bonus2") {
+    // getBonusLabel は settings 未指定 / bonusLabels 未保存 / 空欄保存 のいずれでも安全に標準名を返す。
+    // _safe で Windows 不可文字 (/ \ : * ? " < > |) を除去してファイル名に組み込む。
+    _prefix = `${_safe(getBonusLabel(settings, monthKey))}仕訳`;
+  }
   return `${_prefix}_${_safe(year)}_${_safe(monthKey)}_${_mLabel}_弥生取込.txt`;
 };
 
@@ -5116,15 +5151,15 @@ const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onU
                 onClick={() => onPreviewJournal(status.monthKey)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-sky-600 hover:bg-sky-50 border border-sky-200 shadow-sm"
                 title={
-                  status.monthKey === "bonus"  ? "賞与1 の仕訳プレビューを表示し、弥生取込テキストを出力します"
-                  : status.monthKey === "bonus2" ? "賞与2 の仕訳プレビューを表示し、弥生取込テキストを出力します"
-                  : "月次給与の仕訳プレビューを表示します"
+                  (status.monthKey === "bonus" || status.monthKey === "bonus2")
+                    ? `${status.monthLabel} の仕訳プレビューを表示し、弥生取込テキストを出力します`
+                    : "月次給与の仕訳プレビューを表示します"
                 }
               >
                 <Search size={14} />{" "}
-                {status.monthKey === "bonus"  ? "賞与1 仕訳プレビュー"
-                 : status.monthKey === "bonus2" ? "賞与2 仕訳プレビュー"
-                 : "仕訳プレビュー"}
+                {(status.monthKey === "bonus" || status.monthKey === "bonus2")
+                  ? `${status.monthLabel} 仕訳プレビュー`
+                  : "仕訳プレビュー"}
               </button>
             )}
           </>
@@ -5190,7 +5225,7 @@ const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onU
 // ============================================================================
 // [UIコンポーネント] ロック・解除履歴
 // ============================================================================
-const MonthlyLockHistory = ({ monthlyLocks, showLockHistoryKey, setShowLockHistoryKey }) => {
+const MonthlyLockHistory = ({ monthlyLocks, showLockHistoryKey, setShowLockHistoryKey, settings }) => {
   if (!monthlyLocks || Object.keys(monthlyLocks).length === 0) return null;
   return (
     <div className="mt-8 pt-4 border-t border-slate-200">
@@ -5198,7 +5233,10 @@ const MonthlyLockHistory = ({ monthlyLocks, showLockHistoryKey, setShowLockHisto
       <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
         {Object.entries(monthlyLocks).flatMap(([yr, months]) =>
           Object.entries(months).map(([mk, info]) => {
-            const mLabel = mk === "bonus" ? "賞与1" : mk === "bonus2" ? "賞与2" : `${parseInt(mk, 10)}月`;
+            // 賞与の表示名は会社共通設定 settings.bonusLabels を反映 (未保存なら "賞与1"/"賞与2")。
+            const mLabel = (mk === "bonus" || mk === "bonus2")
+              ? getBonusLabel(settings, mk)
+              : `${parseInt(mk, 10)}月`;
             const key = `${yr}_${mk}`;
             return (
               <div key={key} className="flex flex-wrap items-center gap-3 text-xs bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
@@ -5247,6 +5285,8 @@ const MonthlyCloseDashboard = React.memo(({
   setMonthlyClosePrintMode, setCheckModalData,
   monthlyLocks, showLockHistoryKey, setShowLockHistoryKey,
   openJournalPreview,
+  // 賞与表示名 (会社共通設定 settings.bonusLabels) を子コンポーネントの dropdown / lock 履歴 / モーダルへ伝搬。
+  settings,
 }) => {
   const actions = useMonthlyCloseActions({
     selectedYear, setMonthlyCloseMonth, handleMonthlyCheck, handleLockMonth, handleUnlockMonth,
@@ -5283,8 +5323,9 @@ const MonthlyCloseDashboard = React.memo(({
           <div className="flex items-center gap-2 mb-4">
             <select value={monthlyCloseMonth} onChange={(e) => setMonthlyCloseMonth(e.target.value)} className="bg-slate-50 border border-slate-300 rounded px-2 py-1 text-sm font-bold text-slate-700 outline-none">
               {MONTHS.map((m) => <option key={m} value={m}>{parseInt(m, 10)}月支給分</option>)}
-              <option value="bonus">賞与①</option>
-              <option value="bonus2">賞与②</option>
+              {/* 内部キー value="bonus"/"bonus2" は不変、表示は settings.bonusLabels を反映 */}
+              <option value="bonus">{getBonusLabel(settings, "bonus")}</option>
+              <option value="bonus2">{getBonusLabel(settings, "bonus2")}</option>
             </select>
             <button onClick={() => actions.handleCheck(monthlyCloseMonth)} className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow-sm transition-colors">
               <ShieldCheck size={16} /> 実行
@@ -5364,7 +5405,7 @@ const MonthlyCloseDashboard = React.memo(({
               />
             ))}
           </div>
-          <MonthlyLockHistory monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey} />
+          <MonthlyLockHistory monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey} settings={settings} />
         </div>
       </div>
     </div>
@@ -12404,7 +12445,7 @@ const App = () => {
     });
     const empName = emp.master?.name || "未設定";
     const monthLabel = isBonusList
-      ? (monthKey === "bonus" ? "賞与①" : "賞与②")
+      ? getBonusLabel(effectiveSettings, monthKey)
       : `${parseInt(monthKey, 10)}月支給分`;
     setLogModalData({
       title: `${empName}　${monthLabel} 計算ログ`,
@@ -13181,7 +13222,9 @@ const App = () => {
       return null;
     }).filter(Boolean);
 
-    const monthStr = isBonus ? (targetMonth === "bonus" ? "賞与1" : "賞与2") : `${parseInt(targetMonth, 10)}月支給分`;
+    const monthStr = isBonus
+      ? getBonusLabel(effectiveSettings, targetMonth)
+      : `${parseInt(targetMonth, 10)}月支給分`;
 
     return (
       <div className="w-full max-w-[297mm] bg-white shadow-xl mx-auto p-6 text-slate-800 slip-page print:w-full print:max-w-none print:shadow-none print:p-0 print:border-none landscape-print">
@@ -14228,7 +14271,9 @@ const App = () => {
                   </button>
                   <button
                     onClick={() => {
-                      const monthStr = ledgerSelectedMonth === "bonus" ? "賞与1" : ledgerSelectedMonth === "bonus2" ? "賞与2" : `${parseInt(ledgerSelectedMonth, 10)}月分`;
+                      const monthStr = (ledgerSelectedMonth === "bonus" || ledgerSelectedMonth === "bonus2")
+                        ? getBonusLabel(effectiveSettings, ledgerSelectedMonth)
+                        : `${parseInt(ledgerSelectedMonth, 10)}月分`;
                       const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
                       const originalTitle = document.title;
                       document.title = fileName;
@@ -14861,7 +14906,7 @@ const App = () => {
                             </th>
                             <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky top-[2px] right-[270px] z-40 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
-                                賞与①
+                                {getBonusLabel(effectiveSettings, "bonus")}
                               </div>
                               <div className="text-[8px] text-slate-500 text-center font-normal mb-0.5">
                                 支給日
@@ -14913,7 +14958,7 @@ const App = () => {
                             </th>
                             <th className="border border-gray-300 p-1.5 min-w-[80px] w-[80px] bg-white text-indigo-600 sticky top-[2px] right-[190px] z-40 font-black border-t-[3px] border-t-indigo-400 align-bottom text-[10px]">
                               <div className="text-center border-b border-indigo-100 pb-1 mb-1">
-                                賞与②
+                                {getBonusLabel(effectiveSettings, "bonus2")}
                               </div>
                               <div className="text-[8px] text-slate-500 text-center font-normal mb-0.5">
                                 支給日
@@ -16309,7 +16354,7 @@ const App = () => {
                                 <button
                                   onClick={() =>
                                     setLogModalData({
-                                      title: `賞与① 計算ログ`,
+                                      title: `${getBonusLabel(effectiveSettings, "bonus")} 計算ログ`,
                                       log: results.bonus1.calcLog,
                                     })
                                   }
@@ -16324,7 +16369,7 @@ const App = () => {
                                 <button
                                   onClick={() =>
                                     setLogModalData({
-                                      title: `賞与② 計算ログ`,
+                                      title: `${getBonusLabel(effectiveSettings, "bonus2")} 計算ログ`,
                                       log: results.bonus2.calcLog,
                                     })
                                   }
@@ -17158,8 +17203,9 @@ const App = () => {
                         {parseInt(m, 10)}月支給 (給与)
                       </option>
                     ))}
-                    <option value="bonus">賞与①</option>
-                    <option value="bonus2">賞与②</option>
+                    {/* 内部キーは "bonus"/"bonus2" 不変、表示名は settings.bonusLabels を反映 */}
+                    <option value="bonus">{getBonusLabel(effectiveSettings, "bonus")}</option>
+                    <option value="bonus2">{getBonusLabel(effectiveSettings, "bonus2")}</option>
                   </select>
                 </div>
                 {/* ▼ 主操作: 月次チェック / 一括印刷（タイトル・年度・対象月の直後に配置） ▼ */}
@@ -18524,6 +18570,78 @@ const App = () => {
                             </div>
                           ));
                         })()}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* 4.6 賞与表示名設定 (UI / 印刷 / 仕訳摘要 / 弥生取込ファイル名の表示文言のみ・データキー bonus/bonus2 は不変) */}
+                <section>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b pb-2">
+                    <h3 className="text-sm font-bold text-slate-700">
+                      賞与表示名設定
+                    </h3>
+                  </div>
+                  <div className="bg-sky-50 border border-sky-200 text-sky-700 p-3 rounded-lg mb-4 text-xs font-bold">
+                    <p className="flex items-center gap-1 mb-1">
+                      <Info size={14} /> 内部データキー <span className="font-mono">bonus</span> / <span className="font-mono">bonus2</span> は変更せず、画面・印刷・仕訳摘要・弥生取込ファイル名に表示する名称だけを変更します。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 空欄にした場合は標準名「賞与1」「賞与2」にフォールバックします。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 表示名が長い場合、弥生取込テキストの摘要は 30 文字で切り詰められます (truncateYayoiDescription)。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 賞与計算ロジック・保存済みデータ構造・Firestore パスには影響しません。
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-bold text-slate-500 block mb-1">
+                          賞与1 表示名（内部キー: <span className="font-mono">bonus</span>）
+                        </label>
+                        <input
+                          type="text"
+                          value={settings?.bonusLabels?.bonus ?? ""}
+                          onChange={(e) => {
+                            // settings.bonusLabels をネスト shallow merge で更新。
+                            // 内部キー bonus / bonus2 のデータには触れない (表示名のみ)。
+                            const cur = settings?.bonusLabels || {};
+                            handleSettingChange("bonusLabels", {
+                              ...cur,
+                              bonus: e.target.value,
+                            });
+                          }}
+                          className="text-sm font-bold bg-white border border-slate-200 rounded px-3 py-2 outline-none focus:border-sky-500 w-full"
+                          placeholder="例: 夏季賞与 (空欄なら「賞与1」)"
+                        />
+                        <p className="text-[10px] text-slate-500 mt-1 font-normal">
+                          現在の表示: <span className="font-bold text-slate-700">{getBonusLabel(settings, "bonus")}</span>
+                        </p>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-bold text-slate-500 block mb-1">
+                          賞与2 表示名（内部キー: <span className="font-mono">bonus2</span>）
+                        </label>
+                        <input
+                          type="text"
+                          value={settings?.bonusLabels?.bonus2 ?? ""}
+                          onChange={(e) => {
+                            const cur = settings?.bonusLabels || {};
+                            handleSettingChange("bonusLabels", {
+                              ...cur,
+                              bonus2: e.target.value,
+                            });
+                          }}
+                          className="text-sm font-bold bg-white border border-slate-200 rounded px-3 py-2 outline-none focus:border-sky-500 w-full"
+                          placeholder="例: 冬季賞与 (空欄なら「賞与2」)"
+                        />
+                        <p className="text-[10px] text-slate-500 mt-1 font-normal">
+                          現在の表示: <span className="font-bold text-slate-700">{getBonusLabel(settings, "bonus2")}</span>
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -22820,8 +22938,8 @@ const App = () => {
                   }
                 };
 
-                aggBonus("bonus", "賞与①");
-                aggBonus("bonus2", "賞与②");
+                aggBonus("bonus",  getBonusLabel(effectiveSettings, "bonus"));
+                aggBonus("bonus2", getBonusLabel(effectiveSettings, "bonus2"));
               });
             }
             const incomeTaxTotal = salaryIncomeTaxTotal + bonusIncomeTaxTotal;
@@ -23630,6 +23748,7 @@ const App = () => {
               startBulkPrint={startBulkPrint} BULK_PRINT_TYPES={BULK_PRINT_TYPES}
               setMonthlyClosePrintMode={setMonthlyClosePrintMode} setCheckModalData={setCheckModalData}
               monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey}
+              settings={effectiveSettings}
               openJournalPreview={(monthKey) =>
                 setJournalPreview((p) => {
                   // 賞与は支給日基準で計上するのが一般的なため、bonus / bonus2 を開いたときは
@@ -23726,8 +23845,9 @@ const App = () => {
                       {MONTHS.map((m) => (
                         <option key={m} value={m}>{parseInt(m, 10)}月支給分</option>
                       ))}
-                      <option value="bonus">賞与①</option>
-                      <option value="bonus2">賞与②</option>
+                      {/* 内部キーは "bonus"/"bonus2" 不変、表示名は settings.bonusLabels を反映 */}
+                      <option value="bonus">{getBonusLabel(effectiveSettings, "bonus")}</option>
+                      <option value="bonus2">{getBonusLabel(effectiveSettings, "bonus2")}</option>
                     </select>
                   </div>
                 )}
@@ -23773,7 +23893,9 @@ const App = () => {
                             return;
                           }
                           if (printDocType === "monthlySummary") {
-                            const monthStr = printTargetMonth === "bonus" ? "賞与1" : printTargetMonth === "bonus2" ? "賞与2" : `${parseInt(printTargetMonth, 10)}月分`;
+                            const monthStr = (printTargetMonth === "bonus" || printTargetMonth === "bonus2")
+                              ? getBonusLabel(effectiveSettings, printTargetMonth)
+                              : `${parseInt(printTargetMonth, 10)}月分`;
                             const fileName = `${selectedYear}_${monthStr}_支給控除一覧表`;
                             printWithTitle(fileName);
                             return;
@@ -23924,7 +24046,7 @@ const App = () => {
                               ))}
                               <th className="border border-black p-1 text-center font-bold bg-gray-200">給与累計</th>
                               <th className="border border-black p-1 text-center font-bold">
-                                <div>賞与①</div>
+                                <div>{getBonusLabel(effectiveSettings, "bonus")}</div>
                                 <div className="text-[7px] font-normal">
                                   {currentYearData.bonus?.payDate
                                     ? currentYearData.bonus?.payDate.replace("-", "/").replace("-", "/")
@@ -23932,7 +24054,7 @@ const App = () => {
                                 </div>
                               </th>
                               <th className="border border-black p-1 text-center font-bold">
-                                <div>賞与②</div>
+                                <div>{getBonusLabel(effectiveSettings, "bonus2")}</div>
                                 <div className="text-[7px] font-normal">
                                   {currentYearData.bonus2?.payDate
                                     ? currentYearData.bonus2?.payDate.replace("-", "/").replace("-", "/")
@@ -24626,7 +24748,9 @@ const App = () => {
                 )}
                 <button
                   onClick={() => {
-                    const monthStr = selectedListMonth === "bonus" ? "賞与1" : selectedListMonth === "bonus2" ? "賞与2" : `${parseInt(selectedListMonth, 10)}月分`;
+                    const monthStr = (selectedListMonth === "bonus" || selectedListMonth === "bonus2")
+                      ? getBonusLabel(effectiveSettings, selectedListMonth)
+                      : `${parseInt(selectedListMonth, 10)}月分`;
                     const fileName = `${selectedYear}年度_${monthStr}_${_emp.master?.name || "未設定"}_給与明細`;
                     printWithTitle(fileName);
                   }}
@@ -24835,7 +24959,7 @@ const App = () => {
                         給与累計
                       </th>
                       <th className="border border-black p-1 text-center font-bold">
-                        <div>賞与①</div>
+                        <div>{getBonusLabel(effectiveSettings, "bonus")}</div>
                         <div className="text-[7px] font-normal">
                           {currentYearData.bonus?.payDate
                             ? currentYearData.bonus?.payDate
@@ -24845,7 +24969,7 @@ const App = () => {
                         </div>
                       </th>
                       <th className="border border-black p-1 text-center font-bold">
-                        <div>賞与②</div>
+                        <div>{getBonusLabel(effectiveSettings, "bonus2")}</div>
                         <div className="text-[7px] font-normal">
                           {currentYearData.bonus2?.payDate
                             ? currentYearData.bonus2?.payDate
@@ -25581,7 +25705,7 @@ const App = () => {
             });
         const _closeJp = () => setJournalPreview((p) => ({ ...p, open: false, textResult: null }));
         const _mLabel = _isBonusPreview
-          ? (journalPreview.monthKey === "bonus" ? "賞与1" : "賞与2")
+          ? getBonusLabel(effectiveSettings, journalPreview.monthKey)
           : (journalPreview.monthKey ? `${parseInt(journalPreview.monthKey, 10)}月` : "");
 
         // 弥生取込テキスト出力ハンドラ: プレビュー rows を直接渡して再計算しない。
@@ -25604,7 +25728,9 @@ const App = () => {
           const _filename = buildYayoiTextFilename(
             journalPreview.year,
             journalPreview.monthKey,
-            journalPreview.mode
+            journalPreview.mode,
+            // 賞与時に settings.bonusLabels を反映するため effectiveSettings を渡す (月次は無視される)。
+            effectiveSettings
           );
           // 文字コードは Shift-JIS / CP932 固定 (弥生公式仕様)。
           // ブラウザ標準 TextEncoder は UTF-8 のみのため、encoding-japanese で SJIS バイト列に変換。
@@ -25939,10 +26065,8 @@ const App = () => {
                            {" "}
               <h2 className="font-black text-sm flex items-center gap-2 tracking-widest">
                                 <ShieldCheck size={18} />               {" "}
-                {checkModalData.month === "bonus"
-                  ? "賞与①"
-                  : checkModalData.month === "bonus2"
-                  ? "賞与②"
+                {(checkModalData.month === "bonus" || checkModalData.month === "bonus2")
+                  ? getBonusLabel(effectiveSettings, checkModalData.month)
                   : `${parseInt(checkModalData.month, 10)}月支給分`}{" "}
                                 月次チェック結果              {" "}
               </h2>

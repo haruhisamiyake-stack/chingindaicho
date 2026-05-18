@@ -581,7 +581,16 @@ const JOURNAL_TAX_CATEGORIES = [
 
 // 仕訳マッピング 固定項目の表示順とラベル定義。
 // 設定 UI のテーブル生成 / 将来の仕訳生成ロジックの双方から参照される一覧 (単一情報源)。
-const JOURNAL_FIXED_ITEMS = [
+// === ブロック分け (UI 表示用) ===
+//   * JOURNAL_MONTHLY_FIXED_ITEMS : 月次給与仕訳の固定項目 (basePayEmployee 〜 netPay の 10 件)
+//   * JOURNAL_BONUS_FIXED_ITEMS   : 賞与仕訳の固定項目 (bonusPay 〜 bonusNetPay の 8 件)
+//   * JOURNAL_FIXED_ITEMS         : 上記 2 配列を結合した既存名 (後方互換のため残置)。
+//                                    全 18 件をまとめて参照する既存呼出はそのまま使える。
+// 月次キー (health/pension/incomeTax/netPay 等) と賞与キー (bonusHealth/bonusPension/bonusIncomeTax/
+// bonusNetPay 等) は完全に別キーで管理し、流用しない。賞与用は項目名の先頭に「賞与」を付けて UI 上で
+// 混同しないようにしてある。
+// settings.journalMapping の保存構造はフラット (monthly / bonus などのネスト構造には変更しない)。
+const JOURNAL_MONTHLY_FIXED_ITEMS = [
   { key: "basePayEmployee",  label: "基本給（一般社員・パート等）", group: "debit"  },
   { key: "basePayExecutive", label: "基本給（役員）",                group: "debit"  },
   { key: "health",           label: "健康保険料 本人負担",           group: "credit" },
@@ -592,9 +601,10 @@ const JOURNAL_FIXED_ITEMS = [
   { key: "incomeTax",        label: "源泉所得税",                    group: "credit" },
   { key: "residentTax",      label: "住民税",                        group: "credit" },
   { key: "netPay",           label: "差引支給額",                    group: "credit" },
-  // --- 賞与用固定項目 (今回追加。月次キー health/pension/incomeTax/netPay 等を流用せず別キーで管理) ---
-  // ラベルは全て先頭に「賞与」を付けて月次項目と混同しないようにする。
-  // 賞与仕訳プレビュー / 弥生取込テキスト出力の生成ロジックは別タスクで実装 (今回は設定UI表示までで停止)。
+];
+// 賞与用固定項目 (月次キーを流用せず別キーで管理。ラベル先頭に「賞与」を付けて月次と区別)。
+// 仕訳生成は buildBonusJournalPreview (bonusKey ベース) / 出力は buildYayoiJournalText で完結。
+const JOURNAL_BONUS_FIXED_ITEMS = [
   { key: "bonusPay",         label: "賞与",                          group: "debit"  },
   { key: "bonusHealth",      label: "賞与 健康保険料 本人負担",       group: "credit" },
   { key: "bonusPension",     label: "賞与 厚生年金保険料 本人負担",   group: "credit" },
@@ -603,6 +613,11 @@ const JOURNAL_FIXED_ITEMS = [
   { key: "bonusEmployment",  label: "賞与 雇用保険料 本人負担",       group: "credit" },
   { key: "bonusIncomeTax",   label: "賞与 源泉所得税",                group: "credit" },
   { key: "bonusNetPay",      label: "賞与 差引支給額",                group: "credit" },
+];
+// 既存呼出 (全 18 件まとめて参照する経路) との互換のため結合配列として残置。
+const JOURNAL_FIXED_ITEMS = [
+  ...JOURNAL_MONTHLY_FIXED_ITEMS,
+  ...JOURNAL_BONUS_FIXED_ITEMS,
 ];
 
 // --- CSV行パース関数（ダブルクォート・エスケープ対応） ---
@@ -14647,27 +14662,40 @@ const App = () => {
                             {master.employeeCode || "---"}
                           </span>
                         </div>
-                        <div className="flex flex-col">
-                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
-                            生年月日
-                          </span>
-                          <div className="flex items-baseline gap-1">
-                            <span className="text-sm font-mono font-black text-slate-700">
-                              {formatDateJapanese(master.dob) || master.dob || "---"}
-                            </span>
-                            {(() => {
-                              // 対象年度末(12月31日)時点の年齢。表示用のみ。
-                              // dob 未設定 / selectedYear 不正の場合は null → 何も表示しない。
-                              // 印刷時は print:hidden で非表示（生年月日本体は印刷される）。
-                              const _ageAtYE = getAgeAtEndOfTargetYear(master?.dob, selectedYear);
-                              return _ageAtYE != null ? (
-                                <span className="text-[10px] font-bold text-slate-500 print:hidden">
-                                  ({_ageAtYE}歳 ※{selectedYear}年12/31時点)
+                        {/* 生年月日 + 対象年度末時点の年齢を 2 列 2 段グリッドで表示。
+                              左上: 「生年月日」ラベル / 左下: 生年月日 (例: 1981年3月9日)
+                              右上: 「Rxx年12/31時点」基準日表記 / 右下: 「nn歳」 (年齢)
+                            年齢が表示できない場合 (dob 未入力 / selectedYear 不正) は右列だけ非表示にし、
+                            左列 (生年月日) のみ表示する。
+                            右列は従来通り print:hidden を維持 (印刷物には生年月日本体だけ出す)。
+                            計算は getAgeAtEndOfTargetYear に委譲 (本表示は受け取った値を表示するだけ)。 */}
+                        {(() => {
+                          const _ageAtYE = getAgeAtEndOfTargetYear(master?.dob, selectedYear);
+                          return (
+                            <div className="grid grid-cols-[auto_auto] items-end gap-x-4 leading-tight">
+                              {/* 左上: ラベル「生年月日」 */}
+                              <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                                生年月日
+                              </span>
+                              {/* 右上: 基準日 (年齢が出せない場合は右列非表示) */}
+                              {_ageAtYE != null ? (
+                                <span className="text-[9px] text-slate-400 text-center print:hidden">
+                                  {selectedYear}年12/31時点
                                 </span>
-                              ) : null;
-                            })()}
-                          </div>
-                        </div>
+                              ) : <span className="print:hidden" />}
+                              {/* 左下: 生年月日 (例: 1981年3月9日) — 既存の formatDateJapanese を維持 */}
+                              <span className="text-sm font-mono font-black text-slate-700">
+                                {formatDateJapanese(master.dob) || master.dob || "---"}
+                              </span>
+                              {/* 右下: 年齢 (「年齢nn歳」ではなく「nn歳」のみ) */}
+                              {_ageAtYE != null ? (
+                                <span className="text-sm font-black text-slate-800 text-center print:hidden">
+                                  {_ageAtYE}歳
+                                </span>
+                              ) : <span className="print:hidden" />}
+                            </div>
+                          );
+                        })()}
                         <div className="flex flex-col">
                           <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">
                             入社日
@@ -18794,8 +18822,18 @@ const App = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {/* 固定項目 */}
-                        {JOURNAL_FIXED_ITEMS.map((item) => {
+                        {/* 固定項目: 「月次給与仕訳」と「賞与仕訳」の 2 ブロックに分けて表示する。
+                            行 JSX は共通の renderFixedItemRow IIFE で組み立て、JOURNAL_MONTHLY_FIXED_ITEMS と
+                            JOURNAL_BONUS_FIXED_ITEMS で分けて map する。
+                            データ構造 (settings.journalMapping) と updateJournalMappingFixed の保存仕様、
+                            旧値救済 / 削除済み部門 option など既存編集 UI はすべて維持。 */}
+                        {/* === 小見出し: 月次給与仕訳 === */}
+                        <tr>
+                          <td colSpan={8} className="bg-sky-50 text-sky-700 font-bold px-2 py-1 text-[11px] border border-slate-200">
+                            月次給与仕訳 — 毎月の給与仕訳で使用する固定項目です。
+                          </td>
+                        </tr>
+                        {JOURNAL_MONTHLY_FIXED_ITEMS.map((item) => {
                           const jm = settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
                           const cur =
                             jm[item.key] ||
@@ -18901,6 +18939,134 @@ const App = () => {
                                 </select>
                               </td>
                               {/* 集約グループ: 仕訳プレビュー上で同名+同会計属性の行を 1 本に集約する補助設定。 */}
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.groupLabel || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { groupLabel: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="（任意）例: 社会保険料"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* === 小見出し: 賞与仕訳 ===
+                            行 JSX は月次給与ブロックと完全同一 (同じ updateJournalMappingFixed / 同じ列構成 /
+                            同じ旧値救済・削除済み部門救済 option を使用)。
+                            キー差分のみ JOURNAL_BONUS_FIXED_ITEMS (bonusPay / bonusHealth / ... / bonusNetPay) で
+                            ループし、項目ラベルは「賞与 ...」表記で月次と区別する。 */}
+                        <tr>
+                          <td colSpan={8} className="bg-amber-50 text-amber-700 font-bold px-2 py-1 text-[11px] border border-slate-200">
+                            賞与仕訳 — 賞与1・賞与2 の仕訳で使用する固定項目です。
+                          </td>
+                        </tr>
+                        {JOURNAL_BONUS_FIXED_ITEMS.map((item) => {
+                          const jm = settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
+                          const cur =
+                            jm[item.key] ||
+                            DEFAULT_SETTINGS.journalMapping[item.key] ||
+                            JOURNAL_DEFAULT_ALLOWANCE;
+                          return (
+                            <tr key={item.key} className="bg-white hover:bg-amber-50/40 transition-colors">
+                              <td className="border border-slate-200 px-2 py-1.5 font-bold text-slate-700">
+                                {item.label}
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.dc || "debit"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { dc: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  <option value="debit">借方</option>
+                                  <option value="credit">貸方</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.account || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { account: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="勘定科目"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.subAccount || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { subAccount: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="補助科目（任意）"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.taxCategory || "対象外"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { taxCategory: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  {JOURNAL_TAX_CATEGORIES.map((tc) => (
+                                    <option key={tc} value={tc}>{tc}</option>
+                                  ))}
+                                  {/* 既存データに候補外の値が残っていた場合の救済 (表記揺れ・旧データの保護)。 */}
+                                  {cur.taxCategory && !JOURNAL_TAX_CATEGORIES.includes(cur.taxCategory) && (
+                                    <option value={cur.taxCategory}>{cur.taxCategory}（旧値）</option>
+                                  )}
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.departmentMode || "none"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, {
+                                      departmentMode: e.target.value,
+                                    })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  <option value="employee">社員部門</option>
+                                  <option value="none">部門なし</option>
+                                  <option value="fixed">固定部門</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.fixedDepartmentId || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, {
+                                      fixedDepartmentId: e.target.value,
+                                    })
+                                  }
+                                  disabled={cur.departmentMode !== "fixed"}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500 disabled:bg-slate-100 disabled:text-slate-400"
+                                >
+                                  <option value="">(未選択)</option>
+                                  {(settings.departments || []).map((d) => (
+                                    <option key={d.id} value={d.id}>
+                                      {d.code ? `${d.code} ` : ""}{d.name || "(無題)"}
+                                    </option>
+                                  ))}
+                                  {/* 削除済み部門ID救済 (月次ブロックと同じ仕様)。 */}
+                                  {cur.fixedDepartmentId &&
+                                    !(settings.departments || []).some(
+                                      (d) => d.id === cur.fixedDepartmentId
+                                    ) && (
+                                      <option value={cur.fixedDepartmentId}>
+                                        (削除済み: {cur.fixedDepartmentId})
+                                      </option>
+                                    )}
+                                </select>
+                              </td>
+                              {/* 集約グループ: 賞与仕訳プレビュー上で同名+同会計属性の行を 1 本に集約する補助設定。 */}
                               <td className="border border-slate-200 px-2 py-1.5">
                                 <input
                                   value={cur.groupLabel || ""}

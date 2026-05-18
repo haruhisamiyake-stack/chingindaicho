@@ -404,6 +404,27 @@ const DEFAULT_SETTINGS = {
     incomeTax:       { account: "預り金",     subAccount: "所得税", taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
     residentTax:     { account: "預り金",     subAccount: "住民税", taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
     netPay:          { account: "未払費用",   subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    // 賞与用 固定項目 (設定 UI 表示・「標準設定に戻す」用の標準値のみ。賞与仕訳プレビュー / 弥生取込
+    // テキスト出力の生成ロジックは今回スコープ外で別タスク)。
+    //   * bonusPay        : 賞与本体 (借方)。groupLabel="賞与" で 1 行に集約する方針。
+    //   * bonusHealth     : 賞与にかかる健康保険料 本人負担 (貸方、法定福利費)。月次の health とは別キー。
+    //   * bonusPension    : 賞与にかかる厚生年金保険料 本人負担 (貸方、法定福利費)。月次 pension とは別キー。
+    //   * bonusNursing    : 賞与にかかる介護保険料 本人負担 (貸方、法定福利費)。月次 nursing とは別キー。
+    //   * bonusChildCare  : 賞与にかかる子ども・子育て支援金 本人負担 (貸方、法定福利費)。月次 childCare とは別キー。
+    //   * bonusEmployment : 賞与にかかる雇用保険料 本人負担 (貸方、法定福利費)。月次 employment とは別キー。
+    //   * bonusIncomeTax  : 賞与にかかる源泉所得税 (貸方、預り金/所得税)。月次 incomeTax とは別キー。
+    //   * bonusNetPay     : 賞与の差引支給額 (貸方、未払費用)。月次 netPay とは別キー。
+    // groupLabel の方針は月次と同一: 社保系5キーは "社会保険料" で 1 行集約、bonusPay は "賞与"、
+    // 残り (bonusIncomeTax / bonusNetPay) は摘要を個別に出す方針で空欄。
+    // 賞与の住民税・会社負担分社会保険料は今回標準では追加しない (実務上、賞与から住民税徴収しない会社が多数のため)。
+    bonusPay:        { account: "賞与",       subAccount: "",       taxCategory: "対象外", dc: "debit",  departmentMode: "none", fixedDepartmentId: "", groupLabel: "賞与"     },
+    bonusHealth:     { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    bonusPension:    { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    bonusNursing:    { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    bonusChildCare:  { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    bonusEmployment: { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    bonusIncomeTax:  { account: "預り金",     subAccount: "所得税", taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    bonusNetPay:     { account: "未払費用",   subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
     // 動的: settings.allowanceDefinitions / deductionDefinitions に登録された項目ごとに
     //       allowances[id] / deductions[id] が生成される (未登録時は JOURNAL_DEFAULT_* を使用)。
     allowances: {},
@@ -549,6 +570,17 @@ const JOURNAL_FIXED_ITEMS = [
   { key: "incomeTax",        label: "源泉所得税",                    group: "credit" },
   { key: "residentTax",      label: "住民税",                        group: "credit" },
   { key: "netPay",           label: "差引支給額",                    group: "credit" },
+  // --- 賞与用固定項目 (今回追加。月次キー health/pension/incomeTax/netPay 等を流用せず別キーで管理) ---
+  // ラベルは全て先頭に「賞与」を付けて月次項目と混同しないようにする。
+  // 賞与仕訳プレビュー / 弥生取込テキスト出力の生成ロジックは別タスクで実装 (今回は設定UI表示までで停止)。
+  { key: "bonusPay",         label: "賞与",                          group: "debit"  },
+  { key: "bonusHealth",      label: "賞与 健康保険料 本人負担",       group: "credit" },
+  { key: "bonusPension",     label: "賞与 厚生年金保険料 本人負担",   group: "credit" },
+  { key: "bonusNursing",     label: "賞与 介護保険料 本人負担",       group: "credit" },
+  { key: "bonusChildCare",   label: "賞与 子ども・子育て支援金 本人負担", group: "credit" },
+  { key: "bonusEmployment",  label: "賞与 雇用保険料 本人負担",       group: "credit" },
+  { key: "bonusIncomeTax",   label: "賞与 源泉所得税",                group: "credit" },
+  { key: "bonusNetPay",      label: "賞与 差引支給額",                group: "credit" },
 ];
 
 // --- CSV行パース関数（ダブルクォート・エスケープ対応） ---
@@ -4059,6 +4091,441 @@ const buildMonthlyJournalPreview = ({
 };
 
 // ============================================================================
+// [弥生会計連携・第2弾b] 賞与 仕訳プレビュー pure helper
+// ----------------------------------------------------------------------------
+// 月次給与用 buildMonthlyJournalPreview と戻り値形式・rows 構造・モード仕様を完全に揃え、
+// 既存の仕訳プレビューモーダル / 弥生取込前チェック / 集計フッタをそのまま使えるようにする。
+// 賞与計算ロジック (calculateBonusResult / calculateBonusIncomeTax / getBonusTaxRate) は
+// 変更せず、戻り値を読み取って rows を組み立てるだけにする (本タスクは設定→プレビュー導線まで)。
+//
+// 引数:
+//   employees:    { [empId]: { master, data } }
+//   settings:     会社共通設定 (journalMapping.bonus* / departments)
+//   taxTables:    所得税額表 (calculateBonusResult が要求)
+//   monthlyLocks: 月次全体ロック state (bonus / bonus2 にもロック状態を読む)
+//   year:         "R08" 等
+//   bonusKey:     "bonus" | "bonus2" (それ以外は警告して空 rows)
+//   mode:         "aggregate" (合算) | "byEmployee" (従業員別)
+//   dateMode:     "payDate" (支給日 = 賞与の既定) | "periodEnd" | "monthEnd"
+// 戻り値:
+//   { rows, debitTotal, creditTotal, diff, warnings }
+//
+// === 賞与仕訳の基本形 (本タスクスコープ) ===
+//   借方 1 件 + 貸方 7 件 (社保系5 + 所得税 + 差引支給額):
+//     借方: bonusPay (賞与本体 = grossPay)
+//     貸方: bonusHealth / bonusPension / bonusNursing / bonusChildCare / bonusEmployment
+//           bonusIncomeTax / bonusNetPay (= calculateBonusResult.netPay)
+//   今回スコープ外: 賞与の住民税 / 会社負担分社会保険料 / 賞与手当 (借方分離) / 賞与控除 (貸方分離)
+//   集約方針: 月次と同一 (groupLabel + 借/貸 全属性 + 摘要 + (byEmployee は employeeId))。
+//             社保系 5 キーは全て groupLabel="社会保険料" のため 1 行に集約される。
+//   netPay 配置: 月次同様、出力の最後に固定 (itemLabel === "賞与 差引支給額" を判定)。
+// ============================================================================
+const buildBonusJournalPreview = ({
+  employees,
+  settings,
+  taxTables,
+  monthlyLocks,
+  year,
+  bonusKey,
+  mode = "aggregate",
+  // 賞与は支給日基準で計上するのが一般的なため、既定は payDate にする。
+  dateMode = "payDate",
+}) => {
+  const warnings = [];
+  if (!year || !bonusKey) {
+    warnings.push("対象年度・賞与キーが未指定です。");
+    return { rows: [], debitTotal: 0, creditTotal: 0, diff: 0, warnings };
+  }
+  if (bonusKey !== "bonus" && bonusKey !== "bonus2") {
+    warnings.push("賞与プレビューは bonus / bonus2 のみ対応です。");
+    return { rows: [], debitTotal: 0, creditTotal: 0, diff: 0, warnings };
+  }
+
+  const jm = (settings && settings.journalMapping) || DEFAULT_SETTINGS.journalMapping;
+  const departments = (settings && settings.departments) || [];
+  const allowanceDefs = settings?.allowanceDefinitions || [];
+  const deductionDefs = settings?.deductionDefinitions || [];
+
+  const bonusLabel = bonusKey === "bonus" ? "賞与1" : "賞与2";
+  // 摘要先頭。賞与1/賞与2の区別は moonth-base ではなく bonusKey ベースで付ける。
+  // 「年月分」相当の月部分は賞与支給日 (payDate) があれば payDate の月、無ければ helper の "12" fallback。
+  // 月次の "R08年03月分 給与" と並べたとき視覚的に賞与だと分かるよう、末尾に「賞与1/賞与2」を入れる。
+  // (摘要例: "R08年06月分 賞与1 山田太郎 社会保険料")
+
+  // 日付混在検知用
+  let firstPayDate = null;
+  let firstPeriodEnd = null;
+  let payDateMixed = false;
+  let periodEndMixed = false;
+  let periodEndMissing = false;
+
+  const seenDeletedDepts = new Set();
+  const rawRows = [];
+
+  Object.entries(employees || {}).forEach(([empId, emp]) => {
+    if (!emp || !emp.master) return;
+    const yd = emp.data?.years?.[year];
+    if (!yd) return;
+    const bonusRow = yd[bonusKey];
+    if (!bonusRow) return;
+
+    // 賞与計算 (calculateBonusResult は無変更で呼び出すだけ)。
+    // monthKeyForRates は getBonusRateMonth() で payDate から取得 (既存呼出経路と同一)。
+    const bonusResult = calculateBonusResult({
+      master: emp.master,
+      bonusRow,
+      bonusKey,
+      settings,
+      yearData: yd,
+      allYears: emp.data?.years || null,
+      allowanceDefs,
+      deductionDefs,
+      monthKeyForRates: getBonusRateMonth(bonusRow),
+      yearStr: year,
+      taxTables: taxTables || {},
+      monthlyLocks: monthlyLocks || {},
+    });
+
+    // 賞与の対象社員判定: 支給実績・本人負担社保・所得税・差引支給額のいずれかが正の値である社員を含める。
+    //   * 退職者でも対象賞与に支給実績があれば含める (status は明示判定しない)
+    //   * 0 円賞与 (空入力) は除外
+    const _gross    = Number(bonusResult?.grossPay)   || 0;
+    const _health   = Number(bonusResult?.health)     || 0;
+    const _pension  = Number(bonusResult?.pension)    || 0;
+    const _nursing  = Number(bonusResult?.nursing)    || 0;
+    const _child    = Number(bonusResult?.childCare)  || 0;
+    const _emp      = Number(bonusResult?.employment) || 0;
+    const _tax      = Number(bonusResult?.incomeTax)  || 0;
+    const _net      = Number(bonusResult?.netPay)     || 0;
+    const _hasAny = _gross > 0 || _health > 0 || _pension > 0 || _nursing > 0 || _child > 0 || _emp > 0 || _tax > 0 || _net > 0;
+    if (!_hasAny) return;
+
+    // 計算未完了 (calculateBonusResult が manualRequired=true / isBlocking=true で社保系を null で返した) ケース。
+    // 仕訳行は出さず、警告を 1 件出して次の社員へ。
+    if (bonusResult?.manualRequired === true || bonusResult?.isBlocking === true) {
+      warnings.push(
+        `${emp.master.name || empId}: 賞与計算が未完了 (${bonusResult?.taxWarning || "前月給与/所得税未確定"}) のため、仕訳行を生成しませんでした。`
+      );
+      return;
+    }
+
+    // 社員別 取引日決定 (月次と同じパターン)。賞与は periodEnd が未入力フィールドのため、
+    // dateMode=periodEnd では payDate を fallback として使い warnings に追加する。
+    let txDate = "";
+    if (dateMode === "payDate") {
+      txDate = bonusRow.payDate || "";
+      if (txDate) {
+        if (firstPayDate === null) firstPayDate = txDate;
+        else if (txDate !== firstPayDate) payDateMixed = true;
+      }
+    } else if (dateMode === "periodEnd") {
+      const _pe = bonusRow.periodEnd || "";
+      if (_pe) {
+        txDate = _pe;
+        if (firstPeriodEnd === null) firstPeriodEnd = _pe;
+        else if (_pe !== firstPeriodEnd) periodEndMixed = true;
+      } else {
+        // periodEnd 未入力 → payDate 優先、なければ月末を使う安全フォールバック
+        const _pd = bonusRow.payDate || "";
+        const _bm = getBonusRateMonth(bonusRow);
+        txDate = _pd || getMonthEndDateStr(year, _bm);
+        periodEndMissing = true;
+      }
+    } else {
+      // monthEnd: 賞与支給月の月末。payDate が無ければ getBonusRateMonth の fallback "12" を使う。
+      txDate = getMonthEndDateStr(year, getBonusRateMonth(bonusRow));
+    }
+
+    // 支給日未設定の安全 fallback
+    if (!txDate) {
+      txDate = getMonthEndDateStr(year, getBonusRateMonth(bonusRow));
+      warnings.push(`${emp.master.name || empId}: 賞与の支給日が未設定のため取引日として ${txDate || "(算出不可)"} を仮使用しました。`);
+    }
+
+    const empName = emp.master.name || `(社員ID:${empId})`;
+
+    // 摘要組立 helper (月次と同形式: "年月分 賞与1 [従業員名 ]ラベル")。
+    // 年月部分は txDate を元に "Rxx年mm月分" で組み立てる (txDate が無ければ year+monthKeyForRates フォールバック)。
+    const _txYear = year;
+    let _txMonthStr = "00";
+    if (txDate && /^\d{4}-(\d{2})-\d{2}$/.test(txDate)) {
+      _txMonthStr = txDate.slice(5, 7);
+    } else {
+      _txMonthStr = getBonusRateMonth(bonusRow);
+    }
+    const descBase = `${_txYear}年${_txMonthStr}月分 ${bonusLabel}`;
+    const buildDescription = (shortLabel) => {
+      const parts = [descBase];
+      if (mode === "byEmployee") parts.push(empName);
+      const sl = (shortLabel || "").toString().trim();
+      if (sl) parts.push(sl);
+      return parts.join(" ");
+    };
+
+    // 部門解決 helper (月次と同一)。
+    const resolveDept = (mapping, itemLabel) => {
+      if (!mapping) return "";
+      if (mapping.departmentMode === "none") return "";
+      if (mapping.departmentMode === "fixed") {
+        const n = getDepartmentDisplayName(mapping.fixedDepartmentId, departments);
+        if (n === null) {
+          const k = `fixed:${mapping.fixedDepartmentId}`;
+          if (!seenDeletedDepts.has(k)) {
+            seenDeletedDepts.add(k);
+            warnings.push(`「${itemLabel}」の固定部門ID(${mapping.fixedDepartmentId})が部門マスタに存在しません (部門なし扱い)。`);
+          }
+          return "";
+        }
+        return n;
+      }
+      const did = emp.master.departmentId || "";
+      if (!did) return "";
+      const n = getDepartmentDisplayName(did, departments);
+      if (n === null) {
+        const k = `emp:${empId}:${did}`;
+        if (!seenDeletedDepts.has(k)) {
+          seenDeletedDepts.add(k);
+          warnings.push(`${empName}: 所属部門ID(${did})が部門マスタに存在しません (部門なし扱い)。`);
+        }
+        return "";
+      }
+      return n;
+    };
+
+    // 仕訳行追加 helper (月次の addRow と同等)。
+    const addRow = ({ kind, amount, mapping, itemLabel, shortLabel, fallbackAccount }) => {
+      let amt = Number(amount);
+      if (!Number.isFinite(amt)) {
+        warnings.push(`${empName}: 「${itemLabel}」の金額が数値化できませんでした (0 扱い)。`);
+        amt = 0;
+      }
+      if (!amt) return;
+      const m = mapping || {};
+      const account = (m.account || "").toString().trim();
+      const subAccount = m.subAccount || "";
+      const taxCategory = m.taxCategory || "対象外";
+      const dept = resolveDept(m, itemLabel);
+      const dc = m.dc || (kind === "credit" ? "credit" : "debit");
+      if (!account) {
+        warnings.push(`「${itemLabel}」の勘定科目が未設定です (既定値「${fallbackAccount || "(未設定)"}」で生成)。`);
+      }
+      const accountFinal = account || (fallbackAccount || "(未設定)");
+      const groupLabel = ((m.groupLabel || "") + "").trim();
+      const effectiveLabel = groupLabel || shortLabel || "";
+      rawRows.push({
+        date: txDate,
+        debitAccount:     dc === "debit"  ? accountFinal : "",
+        debitSubAccount:  dc === "debit"  ? subAccount   : "",
+        debitDepartment:  dc === "debit"  ? dept         : "",
+        debitAmount:      dc === "debit"  ? amt          : 0,
+        creditAccount:    dc === "credit" ? accountFinal : "",
+        creditSubAccount: dc === "credit" ? subAccount   : "",
+        creditDepartment: dc === "credit" ? dept         : "",
+        creditAmount:     dc === "credit" ? amt          : 0,
+        taxCategory,
+        description: buildDescription(effectiveLabel),
+        employeeId: empId,
+        employeeName: empName,
+        itemLabel,
+        shortLabel: shortLabel || "",
+        groupLabel,
+      });
+    };
+
+    // === 借方: 賞与本体 (grossPay = basePay + bonus allowances)。
+    //   月次と異なり、basePayEmployee/basePayExecutive のような雇用区分別キーは設けない (賞与は単一キー bonusPay)。
+    addRow({
+      kind: "debit",
+      amount: _gross,
+      mapping: jm.bonusPay || DEFAULT_SETTINGS.journalMapping.bonusPay,
+      itemLabel: `${bonusLabel} 賞与`,
+      shortLabel: bonusLabel,
+      fallbackAccount: "賞与",
+    });
+
+    // === 貸方: 社保系本人負担 / 所得税 ===
+    //   月次の health/pension/... ではなく、賞与専用キー (bonusHealth 等) を必ず使う。
+    //   groupLabel="社会保険料" で 1 行集約される (会計属性が違えば自然に別行に戻る)。
+    const creditFixed = [
+      { amount: _health,  key: "bonusHealth",     label: `${bonusLabel} 健康保険料 本人負担`,           fb: "法定福利費", short: "健保"    },
+      { amount: _pension, key: "bonusPension",    label: `${bonusLabel} 厚生年金保険料 本人負担`,       fb: "法定福利費", short: "厚年"    },
+      { amount: _nursing, key: "bonusNursing",    label: `${bonusLabel} 介護保険料 本人負担`,           fb: "法定福利費", short: "介護"    },
+      { amount: _child,   key: "bonusChildCare",  label: `${bonusLabel} 子ども・子育て支援金 本人負担`, fb: "法定福利費", short: "子育て"  },
+      { amount: _emp,     key: "bonusEmployment", label: `${bonusLabel} 雇用保険料 本人負担`,           fb: "法定福利費", short: "雇用"    },
+      { amount: _tax,     key: "bonusIncomeTax",  label: `${bonusLabel} 源泉所得税`,                    fb: "預り金",     short: "所得税"  },
+    ];
+    creditFixed.forEach((ci) => {
+      addRow({
+        kind: "credit",
+        amount: ci.amount,
+        mapping: jm[ci.key] || DEFAULT_SETTINGS.journalMapping[ci.key],
+        itemLabel: ci.label,
+        shortLabel: ci.short,
+        fallbackAccount: ci.fb,
+      });
+    });
+
+    // === 貸方: 賞与の任意控除・その他控除 (settings.deductionDefinitions 駆動) ===
+    //   賞与専用の deductionMapping は作らず、月次と共通の jm.deductions[def.id] を流用する。
+    //   理由: 任意控除 (立替金 / 親睦会費 / 組合費 等) は月次と賞与で同じ勘定科目を使うことが多いため。
+    //   月次固定キー (incomeTax/residentTax/netPay) は使わず、動的控除 mapping だけを使う点に注意。
+    //   並び順は「所得税の後 / 差引支給額の前」になるよう、本ループは creditFixed の直後・netPay の直前に置く。
+    //   未払費用 (差引支給額) の最後固定は isNetRowItem 判定 (itemLabel === `${bonusLabel} 差引支給額`) で守られるため、
+    //   ここで作る itemLabel には "差引支給額" を含めない (`${bonusLabel} 控除: ${name}` 形式)。
+    //   未定義 (settings.deductionDefinitions に無い) の deductionAmounts キーは本ループでは無視 (definitions 駆動)。
+    deductionDefs.forEach((def) => {
+      if (!def || !def.id) return;
+      const amount = Number(bonusRow.deductionAmounts?.[def.id]) || 0;
+      if (amount <= 0) return;
+      const dm = (jm.deductions || {})[def.id];
+      addRow({
+        kind: "credit",
+        amount,
+        mapping: dm || JOURNAL_DEFAULT_DEDUCTION,
+        itemLabel: `${bonusLabel} 控除: ${def.name || "(無題)"}`,
+        shortLabel: shortenJournalDynamicLabel(def.name || ""),
+        fallbackAccount: "預り金",
+      });
+    });
+
+    // === 貸方: 差引支給額 (必ず最後に並ぶよう、itemLabel に "賞与 差引支給額" サフィックスを使う) ===
+    //   bonusNetPay は calculateBonusResult.netPay をそのまま使う。
+    //   任意控除を上で貸方行として出すようになったため、custom 控除がある賞与でも
+    //   借方 grossPay = 貸方 (社保 + 所得税 + 任意控除 + netPay) で原理上一致する。
+    addRow({
+      kind: "credit",
+      amount: _net,
+      mapping: jm.bonusNetPay || DEFAULT_SETTINGS.journalMapping.bonusNetPay,
+      itemLabel: `${bonusLabel} 差引支給額`,
+      shortLabel: "差引",
+      fallbackAccount: "未払費用",
+    });
+  });
+
+  if (rawRows.length === 0) {
+    warnings.push(`対象${bonusLabel}データがありません (支給実績のある社員が見つかりませんでした)。`);
+  }
+  if (payDateMixed) {
+    warnings.push(`社員ごとに賞与支給日が異なります。代表日 ${firstPayDate} で表示しています。`);
+  }
+  if (periodEndMixed) {
+    warnings.push(`社員ごとに賞与計算期間終了日が異なります。代表日 ${firstPeriodEnd} で表示しています。`);
+  }
+  if (periodEndMissing) {
+    warnings.push("一部社員の賞与に periodEnd が未入力のため、支給日 (または月末) を代用しました。");
+  }
+
+  // ===== 集約 / 従業員別 (月次と同じキー戦略) =====
+  // 賞与の "差引支給額" 判定は itemLabel が `${bonusLabel} 差引支給額` で終わる行を最後に並べる。
+  // (会社が勘定科目名を「未払金」等に変更しても、内部ラベル "賞与1 差引支給額" / "賞与2 差引支給額" は不変)。
+  const isNetRowItem = (r) => r.itemLabel === `${bonusLabel} 差引支給額`;
+
+  let outRows;
+  if (mode === "aggregate") {
+    const aggDate =
+      dateMode === "payDate"   ? (firstPayDate   || "")
+    : dateMode === "periodEnd" ? (firstPeriodEnd || (rawRows[0]?.date || ""))
+    : (rawRows[0]?.date || "");
+    const map = new Map();
+    rawRows.forEach((r) => {
+      const key = [
+        r.debitAccount,  r.debitSubAccount,  r.debitDepartment,
+        r.creditAccount, r.creditSubAccount, r.creditDepartment,
+        r.taxCategory,
+        r.description,
+      ].join("|");
+      if (!map.has(key)) {
+        map.set(key, {
+          date: aggDate || r.date,
+          debitAccount: r.debitAccount, debitSubAccount: r.debitSubAccount, debitDepartment: r.debitDepartment,
+          debitAmount: 0,
+          creditAccount: r.creditAccount, creditSubAccount: r.creditSubAccount, creditDepartment: r.creditDepartment,
+          creditAmount: 0,
+          taxCategory: r.taxCategory,
+          description: r.description,
+          employeeId: "",
+          employeeName: "",
+          itemLabel: r.itemLabel,
+          shortLabel: r.shortLabel,
+          groupLabel: r.groupLabel || "",
+        });
+      }
+      const acc = map.get(key);
+      acc.debitAmount  += r.debitAmount;
+      acc.creditAmount += r.creditAmount;
+    });
+    outRows = Array.from(map.values())
+      .filter((r) => r.debitAmount > 0 || r.creditAmount > 0)
+      .sort((a, b) => {
+        const aIsNet = isNetRowItem(a);
+        const bIsNet = isNetRowItem(b);
+        if (aIsNet !== bIsNet) return aIsNet ? 1 : -1;
+        const sideA = a.debitAmount > 0 ? 0 : 1;
+        const sideB = b.debitAmount > 0 ? 0 : 1;
+        if (sideA !== sideB) return sideA - sideB;
+        return (a.debitAccount || a.creditAccount).localeCompare(b.debitAccount || b.creditAccount, "ja");
+      });
+  } else {
+    // 従業員別: 社員ごとに集約し、社員バケット内で 借方 → 貸方 (差引以外) → 差引 の順に並べる。
+    const grouped = new Map();
+    rawRows.forEach((r) => {
+      const key = [
+        r.employeeId,
+        r.debitAccount,  r.debitSubAccount,  r.debitDepartment,
+        r.creditAccount, r.creditSubAccount, r.creditDepartment,
+        r.taxCategory,
+        r.description,
+      ].join("|");
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          date: r.date,
+          debitAccount: r.debitAccount, debitSubAccount: r.debitSubAccount, debitDepartment: r.debitDepartment,
+          debitAmount: 0,
+          creditAccount: r.creditAccount, creditSubAccount: r.creditSubAccount, creditDepartment: r.creditDepartment,
+          creditAmount: 0,
+          taxCategory: r.taxCategory,
+          description: r.description,
+          employeeId: r.employeeId,
+          employeeName: r.employeeName,
+          itemLabel: r.itemLabel,
+          shortLabel: r.shortLabel,
+          groupLabel: r.groupLabel || "",
+        });
+      }
+      const acc = grouped.get(key);
+      acc.debitAmount  += r.debitAmount;
+      acc.creditAmount += r.creditAmount;
+    });
+    const byEmp = new Map();
+    Array.from(grouped.values()).forEach((r) => {
+      const k = r.employeeId;
+      if (!byEmp.has(k)) byEmp.set(k, []);
+      byEmp.get(k).push(r);
+    });
+    outRows = [];
+    byEmp.forEach((arr) => {
+      const debits  = arr.filter((r) => r.debitAmount  > 0 && !isNetRowItem(r));
+      const credits = arr.filter((r) => r.creditAmount > 0 && !isNetRowItem(r));
+      const netRows = arr.filter((r) => isNetRowItem(r));
+      outRows.push(...debits, ...credits, ...netRows);
+    });
+  }
+
+  const debitTotal  = outRows.reduce((s, r) => s + (r.debitAmount  || 0), 0);
+  const creditTotal = outRows.reduce((s, r) => s + (r.creditAmount || 0), 0);
+  const diff = debitTotal - creditTotal;
+  if (outRows.length > 0 && diff !== 0) {
+    // 任意控除を上で貸方行として反映済みのため、通常は diff===0 になる想定。
+    // それでも差額が出る場合は: 月次手動上書きで netPay が乖離している / 計算結果の整数化端数 /
+    // 定義に存在しない古い deductionAmounts キー (本ループでは無視) などが原因。
+    // 賞与の allowanceAmounts は grossPay に含まれているため、ここでは差額要因にはならない (借方 賞与 = grossPay)。
+    warnings.push(`借方合計 (${debitTotal.toLocaleString()}円) と貸方合計 (${creditTotal.toLocaleString()}円) が一致しません (差額: ${diff.toLocaleString()}円)。`);
+  }
+
+  return { rows: outRows, debitTotal, creditTotal, diff, warnings };
+};
+
+// ============================================================================
 // [弥生会計連携・第3弾(改)] 月次給与 弥生取込テキスト出力 (.txt / カンマ区切り / 25列)
 // ----------------------------------------------------------------------------
 // 弥生会計の取込形式は実体として「カンマ区切りのテキストファイル」。
@@ -4398,10 +4865,14 @@ const buildYayoiJournalText = ({ previewRows, mode, year, monthKey }) => {
     errors.push("仕訳行が0件のため、取込テキストを出力できません。");
     return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
   }
-  if (monthKey === "bonus" || monthKey === "bonus2") {
-    errors.push("賞与仕訳の取込テキスト出力は今回スコープ外です。");
-    return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
-  }
+  // 弥生会計連携・第3弾b: 賞与 (bonus / bonus2) も月次給与と同じ previewRows 経路で出力可能にする。
+  //   previewRows は buildBonusJournalPreview 側で既に
+  //     借方 賞与本体 / 貸方 社保系・所得税・任意控除 / 貸方 差引支給額 (最後)
+  //   の順に整形済み (差額0で整合)。Yayoi 側では再集計せず、月次と完全に同じ
+  //   groupPreviewRowsToVouchers → toYayoiTextRow の流れに通す。
+  //   25列構成・識別フラグ (2000/2110/2100/2101)・Shift-JIS 出力・和暦日付・摘要30文字制限・
+  //   20行制限・借貸一致チェック・日付混在チェック・勘定科目未設定チェックは月次と同一適用。
+  //   ※ 旧ガード「賞与仕訳の取込テキスト出力は今回スコープ外」は本フェーズで解除。
 
   const vouchers = groupPreviewRowsToVouchers(previewRows, mode);
 
@@ -4567,11 +5038,21 @@ const buildYayoiJournalText = ({ previewRows, mode, year, monthKey }) => {
 };
 
 // 弥生取込テキスト ファイル名生成。Windows 不可文字は除去。拡張子は .txt 固定。
-// 例: 給与仕訳_R08_05_合算_弥生取込.txt / 給与仕訳_R08_05_従業員別_弥生取込.txt
+// 例:
+//   給与仕訳_R08_05_合算_弥生取込.txt          (月次)
+//   給与仕訳_R08_05_従業員別_弥生取込.txt      (月次)
+//   賞与1仕訳_R08_bonus_合算_弥生取込.txt      (賞与1)
+//   賞与2仕訳_R08_bonus2_従業員別_弥生取込.txt (賞与2)
+// monthKey が "bonus" / "bonus2" のときは「賞与1仕訳」/「賞与2仕訳」プレフィックスにし、
+// それ以外 (月次キー "01"〜"12") は従来通り「給与仕訳」プレフィックスのまま。
 const buildYayoiTextFilename = (year, monthKey, mode) => {
   const _safe = (s) => String(s || "").replace(/[\\/:*?"<>|]/g, "");
   const _mLabel = mode === "byEmployee" ? "従業員別" : "合算";
-  return `給与仕訳_${_safe(year)}_${_safe(monthKey)}_${_mLabel}_弥生取込.txt`;
+  const _prefix =
+    monthKey === "bonus"  ? "賞与1仕訳" :
+    monthKey === "bonus2" ? "賞与2仕訳" :
+                            "給与仕訳";
+  return `${_prefix}_${_safe(year)}_${_safe(monthKey)}_${_mLabel}_弥生取込.txt`;
 };
 
 // ============================================================================
@@ -4627,15 +5108,23 @@ const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onU
             <button onClick={() => onPrintPayslip(status.monthKey)} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-indigo-600 hover:bg-indigo-50 border border-indigo-200 shadow-sm">
               <Printer size={14} /> 給与明細
             </button>
-            {/* 弥生会計連携・第2弾: 仕訳プレビュー (画面表示のみ。CSV出力・仕訳保存は未実装)。
-                月次給与の対象のみ。賞与は将来対応。 */}
-            {onPreviewJournal && status.monthKey !== "bonus" && status.monthKey !== "bonus2" && (
+            {/* 弥生会計連携・第2弾: 仕訳プレビュー (画面表示のみ)。
+                月次給与に加え、賞与1/賞与2 もプレビュー表示に対応 (第2弾b)。
+                ただし賞与の弥生取込テキスト出力は未解禁 (モーダル側でボタンを disabled にする)。 */}
+            {onPreviewJournal && (
               <button
                 onClick={() => onPreviewJournal(status.monthKey)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-sky-600 hover:bg-sky-50 border border-sky-200 shadow-sm"
-                title="月次給与の仕訳プレビューを表示します (CSV出力は未実装)"
+                title={
+                  status.monthKey === "bonus"  ? "賞与1 の仕訳プレビューを表示し、弥生取込テキストを出力します"
+                  : status.monthKey === "bonus2" ? "賞与2 の仕訳プレビューを表示し、弥生取込テキストを出力します"
+                  : "月次給与の仕訳プレビューを表示します"
+                }
               >
-                <Search size={14} /> 仕訳プレビュー
+                <Search size={14} />{" "}
+                {status.monthKey === "bonus"  ? "賞与1 仕訳プレビュー"
+                 : status.monthKey === "bonus2" ? "賞与2 仕訳プレビュー"
+                 : "仕訳プレビュー"}
               </button>
             )}
           </>
@@ -23142,13 +23631,20 @@ const App = () => {
               setMonthlyClosePrintMode={setMonthlyClosePrintMode} setCheckModalData={setCheckModalData}
               monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey}
               openJournalPreview={(monthKey) =>
-                setJournalPreview((p) => ({
-                  ...p,
-                  open: true,
-                  year: selectedYear,
-                  monthKey,
-                  textResult: null, // 前回の取込テキスト出力結果は持ち越さない
-                }))
+                setJournalPreview((p) => {
+                  // 賞与は支給日基準で計上するのが一般的なため、bonus / bonus2 を開いたときは
+                  // 既定 dateMode を "payDate" にする (月次は既存通り "periodEnd" のまま)。
+                  // ユーザーが取引日付トグルで変更すればその値を尊重する (この初期化は開く時の1回のみ)。
+                  const _isBonus = monthKey === "bonus" || monthKey === "bonus2";
+                  return {
+                    ...p,
+                    open: true,
+                    year: selectedYear,
+                    monthKey,
+                    dateMode: _isBonus ? "payDate" : "periodEnd",
+                    textResult: null, // 前回の取込テキスト出力結果は持ち越さない
+                  };
+                })
               }
             />
             {monthlyClosePrintMode === "monthlySummary" && !isBulkPrintOpen && !slipEmployeeId && !isLedgerPrintOpen && (
@@ -25059,20 +25555,34 @@ const App = () => {
             {/* ▼▼▼ 追加：月次チェック モーダル ▼▼▼ */}     {" "}
       {/* ▼▼▼ 追加: 月次給与 仕訳プレビュー モーダル (弥生会計連携・第2弾) ▼▼▼ */}
       {journalPreview.open && (() => {
-        const _preview = buildMonthlyJournalPreview({
-          employees,
-          settings: effectiveSettings,
-          taxTables,
-          monthlyLocks,
-          year: journalPreview.year,
-          monthKey: journalPreview.monthKey,
-          mode: journalPreview.mode,
-          dateMode: journalPreview.dateMode,
-        });
+        // 賞与 (bonus / bonus2) と 月次給与 (01〜12) で helper を切り替える。
+        // 戻り値の形は揃えてあるため、以降のモーダル/取込前チェック/フッタは共通コードで動く。
+        const _isBonusPreview = journalPreview.monthKey === "bonus" || journalPreview.monthKey === "bonus2";
+        const _preview = _isBonusPreview
+          ? buildBonusJournalPreview({
+              employees,
+              settings: effectiveSettings,
+              taxTables,
+              monthlyLocks,
+              year: journalPreview.year,
+              bonusKey: journalPreview.monthKey,
+              mode: journalPreview.mode,
+              dateMode: journalPreview.dateMode,
+            })
+          : buildMonthlyJournalPreview({
+              employees,
+              settings: effectiveSettings,
+              taxTables,
+              monthlyLocks,
+              year: journalPreview.year,
+              monthKey: journalPreview.monthKey,
+              mode: journalPreview.mode,
+              dateMode: journalPreview.dateMode,
+            });
         const _closeJp = () => setJournalPreview((p) => ({ ...p, open: false, textResult: null }));
-        const _mLabel = journalPreview.monthKey
-          ? `${parseInt(journalPreview.monthKey, 10)}月`
-          : "";
+        const _mLabel = _isBonusPreview
+          ? (journalPreview.monthKey === "bonus" ? "賞与1" : "賞与2")
+          : (journalPreview.monthKey ? `${parseInt(journalPreview.monthKey, 10)}月` : "");
 
         // 弥生取込テキスト出力ハンドラ: プレビュー rows を直接渡して再計算しない。
         // 結果 (errors / warnings / success) は journalPreview.textResult に保存し、モーダル上に表示。
@@ -25141,7 +25651,9 @@ const App = () => {
               <div className="bg-sky-600 p-4 text-white flex justify-between items-center">
                 <h2 className="font-black text-sm flex items-center gap-2 tracking-widest">
                   <Search size={18} />
-                  {journalPreview.year}年 {_mLabel}分 給与仕訳プレビュー（弥生会計連携・画面表示のみ）
+                  {_isBonusPreview
+                    ? `${journalPreview.year}年 ${_mLabel} 仕訳プレビュー（弥生会計連携）`
+                    : `${journalPreview.year}年 ${_mLabel}分 給与仕訳プレビュー（弥生会計連携）`}
                 </h2>
                 <button onClick={_closeJp} className="text-white/80 hover:text-white transition-colors" title="閉じる">
                   <X size={18} />
@@ -25389,6 +25901,9 @@ const App = () => {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {/* 第3弾b: 賞与 (bonus / bonus2) も月次給与と同じ previewRows 経路で
+                      弥生取込テキスト出力可能になったため、賞与限定の disabled / amber バッジ /
+                      「次ステップで対応予定」 title は解除した。月次と同一の出力ボタンを共通使用する。 */}
                   <button
                     onClick={_handleExportYayoiText}
                     className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"

@@ -3007,70 +3007,129 @@ const calculateBonusResult = ({
     }
   }
 
-  // 前月給与データが特定できないケース。
-  //   - payDate 未入力 → 前月 YYYY-MM を算出できない
-  //   - 年度またぎ検索で該当年度オブジェクトが data.years に存在しない (真の "未取得")
-  //  → 0円扱いせず、manualRequired=true として返し UI 側で所得税の手入力を促す。
-  //    (社保系の表示は既存失敗パスと同じ null に倒し、計算ログでも参照対象年月を明示する)
+  // 【賞与税率判定用 前月給与情報 (手入力フォールバック)】
+  // ユーザーが賞与画面で入力する "前月給与データが取れない場合の代替値" を取得・検証する。
+  //   フィールド (任意保存):
+  //     - manualPriorPayrollGrossPay              : 前月給与の総支給額
+  //     - manualPriorPayrollSocialInsurance       : 前月社会保険料 (健保+厚年+介護+子育て等の合算)
+  //     - manualPriorPayrollEmploymentInsurance   : 前月雇用保険料
+  //   有効条件 (すべて満たす):
+  //     1) 総支給額 > 0
+  //     2) 社会保険料 >= 0
+  //     3) 雇用保険料 >= 0
+  //     4) 社会保険料 + 雇用保険料 <= 総支給額
+  //     5) 計算後 (総支給額 - 社会保険料 - 雇用保険料) > 0
+  //   いずれかを満たさない / 空欄 / NaN / マイナス は使用しない (= 既存の manualRequired 経路へ)。
+  //   ※ "netPay" 等の名称は使わず、"前月給与の社保控除後額" として 3 項目から算出する方式に統一。
+  //     これは「手取り」と混同しないため (所得税・住民税・任意控除は引かない)。
+  const _mpGross = Number(b.manualPriorPayrollGrossPay);
+  const _mpSoc   = Number(b.manualPriorPayrollSocialInsurance);
+  const _mpEmp   = Number(b.manualPriorPayrollEmploymentInsurance);
+  const _mpComputed = (Number.isFinite(_mpGross) ? _mpGross : 0) - (Number.isFinite(_mpSoc) ? _mpSoc : 0) - (Number.isFinite(_mpEmp) ? _mpEmp : 0);
+  const _mpValid =
+    Number.isFinite(_mpGross) && Number.isFinite(_mpSoc) && Number.isFinite(_mpEmp) &&
+    _mpGross > 0 && _mpSoc >= 0 && _mpEmp >= 0 &&
+    (_mpSoc + _mpEmp) <= _mpGross &&
+    _mpComputed > 0;
+
+  // === 前月給与データの分岐 ===
+  //   1) prevRow あり        → 既存通り calculateMonthlyResult で socialTotal を算出 (自動取得値優先)
+  //   2) prevRow なし & 手入力情報 有効 → 手入力 3 項目から lastMonthSalaryAfterSocial を確定し計算続行
+  //   3) prevRow なし & 手入力情報 無効/未入力 → 既存通り manualRequired=true で return
+  //   ※ 自動取得値が取れた場合は手入力値より自動値を優先する (古い手入力値による誤計算防止)。
+  let manualPriorPayrollUsed = false;
+  let lastMonthSalaryAfterSocial; // calculateBonusCore.ins.lastMonthSalaryAfterSocial に渡す確定値
+
   if (!prevRow) {
-    const _bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
-    if (prevYearMonth) {
-      calcLog.push(`⚠ 前月給与データ (${prevYearMonth}) が見つかりません → 賞与所得税は手入力で確認してください。`);
+    if (_mpValid) {
+      // ケース 2): 手入力情報を採用して計算続行
+      lastMonthSalaryAfterSocial = _mpComputed;
+      manualPriorPayrollUsed = true;
+      calcLog.push("【賞与所得税率判定】");
+      if (prevYearMonth) {
+        calcLog.push(`- 前月給与データ: 未取得 (探索キー=${prevYearMonth})`);
+      } else {
+        calcLog.push("- 前月給与データ: 未取得 (賞与支給日 payDate 未入力)");
+      }
+      calcLog.push(`- 手入力された前月給与の総支給額: ${formatCurrency(_mpGross)}円`);
+      calcLog.push(`- 手入力された前月社会保険料: ${formatCurrency(_mpSoc)}円`);
+      calcLog.push(`- 手入力された前月雇用保険料: ${formatCurrency(_mpEmp)}円`);
+      calcLog.push(`- 税率判定に使用する前月給与の社保控除後額: ${formatCurrency(_mpComputed)}円`);
     } else {
-      calcLog.push("⚠ 賞与支給日 (payDate) が未入力のため前月給与を特定できません → 賞与所得税は手入力で確認してください。");
+      // ケース 3): 既存 return manualRequired=true パス (手入力情報なし or 不正値)
+      const _bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
+      if (prevYearMonth) {
+        calcLog.push(`⚠ 前月給与データ (${prevYearMonth}) が見つかりません → 賞与所得税は手入力で確認してください。`);
+      } else {
+        calcLog.push("⚠ 賞与支給日 (payDate) が未入力のため前月給与を特定できません → 賞与所得税は手入力で確認してください。");
+      }
+      calcLog.push("  ※ 「賞与税率判定用 前月給与情報」 (総支給額/社保/雇用保険) を入力すると、税率判定を自動計算で進められます。");
+      // 手入力値が既に入っていれば、その値で incomeTax を表示する (UI 上で「入力済み手入力値」を可視化)。
+      // 入っていなければ null のままにし、UI は "計算不可" + 入力欄活性化 (manualRequired=true 経由) を出す。
+      const _manualIncomeTax = Number(b.incomeTax) || 0;
+      return {
+        basePay: Number(b.basePay) || 0,
+        grossPay: _bGross,
+        health: null, pension: null, nursing: null, childCare: null,
+        employment: null, socialTotal: null,
+        incomeTax: _manualIncomeTax > 0 ? _manualIncomeTax : null,
+        totalDeductions: null, netPay: null,
+        isBlocking: true,
+        manualRequired: true,
+        taxWarning: prevYearMonth
+          ? `前月給与データ (${prevYearMonth}) が見つからないため賞与所得税は手入力で確認してください`
+          : "賞与支給日が未入力のため前月給与を特定できません",
+        calcLog,
+      };
     }
-    // 手入力値が既に入っていれば、その値で incomeTax を表示する (UI 上で「入力済み手入力値」を可視化)。
-    // 入っていなければ null のままにし、UI は "計算不可" + 入力欄活性化 (manualRequired=true 経由) を出す。
-    const _manualIncomeTax = Number(b.incomeTax) || 0;
-    return {
-      basePay: Number(b.basePay) || 0,
-      grossPay: _bGross,
-      health: null, pension: null, nursing: null, childCare: null,
-      employment: null, socialTotal: null,
-      incomeTax: _manualIncomeTax > 0 ? _manualIncomeTax : null,
-      totalDeductions: null, netPay: null,
-      isBlocking: true,
-      manualRequired: true,
-      taxWarning: prevYearMonth
-        ? `前月給与データ (${prevYearMonth}) が見つからないため賞与所得税は手入力で確認してください`
-        : "賞与支給日が未入力のため前月給与を特定できません",
-      calcLog,
-    };
   }
 
-  // 参照月年がどこから来たかを計算ログに残す (デバッグ・監査用)。
-  calcLog.push(`- 参照した前月給与年月: ${prevLookupYearStr}年度 ${prevLookupMonthKey}月 (検索ソース: ${prevLookupSource}${prevYearMonth ? `, 探索キー=${prevYearMonth}` : ""})`);
+  // ケース 1): prevRow がある (自動取得値を最優先で使う)。
+  // ※ ケース 2) で manualPriorPayrollUsed=true の場合は本ブロックを skip し、手入力値で確定済み。
+  if (!manualPriorPayrollUsed) {
+    // 参照月年がどこから来たかを計算ログに残す (デバッグ・監査用)。
+    calcLog.push(`- 参照した前月給与年月: ${prevLookupYearStr}年度 ${prevLookupMonthKey}月 (検索ソース: ${prevLookupSource}${prevYearMonth ? `, 探索キー=${prevYearMonth}` : ""})`);
 
-  let prevTaxableAlw = 0;
-  allowanceDefs.forEach((def) => {
-    if (def.isTaxable)
-      prevTaxableAlw += Number(prevRow.allowanceAmounts?.[def.id]) || 0;
-  });
-  const prevTaxableGross = (Number(prevRow.basePay) || 0) + prevTaxableAlw;
-  const prevMonthResult = calculateMonthlyResult(
-    master,
-    prevRow,
-    settings,
-    prevLookupMonthKey,
-    prevLookupYearStr,
-    taxTables,
-    monthlyLocks
-  );
-  if (!prevMonthResult || prevMonthResult.calcSuccess !== true) {
-    calcLog.push("⚠ 前月給与の計算未完了のため、賞与所得税の計算を中断しました。");
-    const bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
-    return {
-      basePay: Number(b.basePay) || 0,
-      grossPay: bGross,
-      health: null, pension: null, nursing: null, childCare: null,
-      employment: null, socialTotal: null,
-      incomeTax: null, totalDeductions: null, netPay: null,
-      isBlocking: true,
-      taxWarning: "前月給与の社保控除後金額が計算不可です",
-      calcLog,
-    };
+    let prevTaxableAlw = 0;
+    allowanceDefs.forEach((def) => {
+      if (def.isTaxable)
+        prevTaxableAlw += Number(prevRow.allowanceAmounts?.[def.id]) || 0;
+    });
+    const prevTaxableGross = (Number(prevRow.basePay) || 0) + prevTaxableAlw;
+    const prevMonthResult = calculateMonthlyResult(
+      master,
+      prevRow,
+      settings,
+      prevLookupMonthKey,
+      prevLookupYearStr,
+      taxTables,
+      monthlyLocks
+    );
+    if (!prevMonthResult || prevMonthResult.calcSuccess !== true) {
+      // prevRow は取れたが prevMonthResult 計算が失敗。
+      // ここでは手入力フォールバックを使わない (取得できた前月給与が "壊れている" 状態 = ユーザーに
+      // 前月給与の修正を促すべき。サイレントに手入力値で進むと誤計算を隠してしまう)。
+      calcLog.push("⚠ 前月給与の計算未完了のため、賞与所得税の計算を中断しました。");
+      const bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
+      return {
+        basePay: Number(b.basePay) || 0,
+        grossPay: bGross,
+        health: null, pension: null, nursing: null, childCare: null,
+        employment: null, socialTotal: null,
+        incomeTax: null, totalDeductions: null, netPay: null,
+        isBlocking: true,
+        taxWarning: "前月給与の社保控除後金額が計算不可です",
+        calcLog,
+      };
+    }
+    // 既存仕様: prevMonthResult.socialTotal = health + pension + nursing + childCare + employment
+    // (= 社会保険料 + 雇用保険料 の合算) を使って社保控除後額を算出。
+    lastMonthSalaryAfterSocial = Math.max(0, prevTaxableGross - prevMonthResult.socialTotal);
+    // 手入力情報が残っていても、自動取得値が取れたため自動値を優先している旨を明示。
+    if (_mpValid) {
+      calcLog.push("- 手入力された前月給与情報も入力されていますが、前月給与データが取得できたため自動取得値を優先しました。");
+    }
   }
-  const lastMonthSalaryAfterSocial = Math.max(0, prevTaxableGross - prevMonthResult.socialTotal);
 
   const bResidentTax = Number(b.residentTax) || 0;
   // 賞与計算期間が6カ月超かどうか。bonusRow.over6Months===true のときだけ true。
@@ -6251,6 +6310,15 @@ const App = () => {
   const [overrideModal, setOverrideModal] = useState(null); // { month, fieldKey, fieldLabel, calcValue }
   const [overrideInputValue, setOverrideInputValue] = useState("");
   const [overrideInputMemo, setOverrideInputMemo] = useState("");
+
+  // 賞与税率判定用 前月給与情報モーダル state (UI 専用)。
+  // 開く時のシェイプ: { bonusKey: "bonus" | "bonus2", bonusLabel: string, gross, soc, emp }
+  //   gross / soc / emp は編集中のローカル値 ("" or 数値)。
+  //   保存 → updateBonus 経由で currentYearData.bonus[bonusKey].manualPriorPayrollXxx に書き込み。
+  //   キャンセル → ローカル値破棄。
+  //   入力をクリア → 3 フィールドを null/undefined 相当で保存。
+  // モーダル外 (null) のときは閉じている状態。
+  const [priorPayrollModal, setPriorPayrollModal] = useState(null);
 
   // 会社個別設定タブ (activeTab === "settings") のカテゴリ折りたたみ state (UI 専用)。
   //   * Firestore / settings には保存しない (UI 表示状態のみ)
@@ -15973,6 +16041,46 @@ const App = () => {
                                     : ""
                                 }`}
                               />
+                              {/* 「前月給与情報」モーダルを開く小ボタン。表示条件:
+                                (a) 賞与所得税が計算不可 (manualRequired=true) → 目立つ橙色「前月情報を入力」ボタン
+                                (b) 既に手入力情報が保存済み → 控えめな緑色「前月情報 手入力あり」ボタン (編集兼用)
+                                (c) 上記いずれでもない (前月給与データ自動取得が成功) → 非表示
+                              保存先フィールド名は変更しないため、モーダルから updateBonus 経由で
+                              manualPriorPayroll{GrossPay/SocialInsurance/EmploymentInsurance} を書き換える。 */}
+                              {(() => {
+                                // 賞与1 が 0 円 (未入力) の場合は前月情報ボタン自体を非表示にする。
+                                // 過去に手入力情報が残っていても、対象賞与が 0 円なら税率判定は不要のため UI を出さない。
+                                // results.bonus1.grossPay は calculateBonusResult の戻り値 (basePay + 手当合計)。
+                                const _bonusGross = Number(results.bonus1?.grossPay) || 0;
+                                if (_bonusGross <= 0) return null;
+                                const _mr = results.bonus1?.manualRequired === true;
+                                const _br = currentYearData.bonus || {};
+                                const _hasManual =
+                                  (Number(_br.manualPriorPayrollGrossPay)            > 0) ||
+                                  (Number(_br.manualPriorPayrollSocialInsurance)     > 0) ||
+                                  (Number(_br.manualPriorPayrollEmploymentInsurance) > 0);
+                                if (!_mr && !_hasManual) return null;
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPriorPayrollModal({
+                                      bonusKey: "bonus",
+                                      bonusLabel: getBonusLabel(effectiveSettings, "bonus"),
+                                      gross: _br.manualPriorPayrollGrossPay ?? "",
+                                      soc:   _br.manualPriorPayrollSocialInsurance ?? "",
+                                      emp:   _br.manualPriorPayrollEmploymentInsurance ?? "",
+                                    })}
+                                    title="賞与税率判定用の前月給与情報を入力します"
+                                    className={`w-full mt-0.5 text-[9px] font-bold px-1 py-0.5 rounded border transition-colors leading-tight ${
+                                      _mr
+                                        ? "bg-orange-50 hover:bg-orange-100 text-orange-700 border-orange-300"
+                                        : "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200"
+                                    }`}
+                                  >
+                                    {_mr ? "前月情報を入力" : "前月情報 手入力あり"}
+                                  </button>
+                                );
+                              })()}
                             </td>
                             {/* 賞与2 所得税セル: 賞与1 と同じく「－」div を削除して行高段差を解消。詳細は賞与1 側のコメント参照。 */}
                             <td className="border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 bg-white">
@@ -15998,6 +16106,41 @@ const App = () => {
                                     : ""
                                 }`}
                               />
+                              {/* 賞与2 用「前月給与情報」ボタン。賞与1 と同じ表示条件・動作 (詳細は賞与1 側コメント参照)。 */}
+                              {(() => {
+                                // 賞与2 が 0 円 (未入力) の場合は前月情報ボタン自体を非表示にする。
+                                // 過去に手入力情報が残っていても、対象賞与が 0 円なら税率判定は不要のため UI を出さない。
+                                // results.bonus2.grossPay は calculateBonusResult の戻り値 (basePay + 手当合計)。
+                                const _bonusGross = Number(results.bonus2?.grossPay) || 0;
+                                if (_bonusGross <= 0) return null;
+                                const _mr = results.bonus2?.manualRequired === true;
+                                const _br = currentYearData.bonus2 || {};
+                                const _hasManual =
+                                  (Number(_br.manualPriorPayrollGrossPay)            > 0) ||
+                                  (Number(_br.manualPriorPayrollSocialInsurance)     > 0) ||
+                                  (Number(_br.manualPriorPayrollEmploymentInsurance) > 0);
+                                if (!_mr && !_hasManual) return null;
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPriorPayrollModal({
+                                      bonusKey: "bonus2",
+                                      bonusLabel: getBonusLabel(effectiveSettings, "bonus2"),
+                                      gross: _br.manualPriorPayrollGrossPay ?? "",
+                                      soc:   _br.manualPriorPayrollSocialInsurance ?? "",
+                                      emp:   _br.manualPriorPayrollEmploymentInsurance ?? "",
+                                    })}
+                                    title="賞与税率判定用の前月給与情報を入力します"
+                                    className={`w-full mt-0.5 text-[9px] font-bold px-1 py-0.5 rounded border transition-colors leading-tight ${
+                                      _mr
+                                        ? "bg-orange-50 hover:bg-orange-100 text-orange-700 border-orange-300"
+                                        : "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200"
+                                    }`}
+                                  >
+                                    {_mr ? "前月情報を入力" : "前月情報 手入力あり"}
+                                  </button>
+                                );
+                              })()}
                             </td>
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
                               {formatCurrency(results.bonusTotal.incomeTax)}
@@ -16894,6 +17037,10 @@ const App = () => {
                             <td className="border border-gray-300 p-1.5 sticky right-0 z-30 bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.02),rgba(0,0,0,0.02)_4px,transparent_4px,transparent_8px)]"></td>
                           </tr>
                           {/* ▲▲▲ ここまで追加 ▲▲▲ */}
+
+                          {/* 賞与税率判定用 前月給与情報は、賞与所得税セルの「前月情報」ボタンからモーダルで入力する方式に変更。
+                              ここでの常時 4 行表示はやめて、画面の縦スクロールを節約する。
+                              モーダルは priorPayrollModal state + ファイル末尾の <PriorPayrollModal/> 相当ブロック。 */}
 
                           {/* ▼ 追加: 月額変更（随時改定）アラート行 ▼ */}
                           <tr className="bg-rose-50/30">
@@ -24734,6 +24881,144 @@ const App = () => {
       </div>
     </div>
   )}
+
+  {/* ＝＝＝ 賞与税率判定用 前月給与情報モーダル ＝＝＝
+      賞与1 / 賞与2 の所得税セルに表示される「前月情報」ボタンから開く。
+      入力 3 項目 (総支給額 / 社会保険料 / 雇用保険料) をローカル state で編集 → 保存ボタンで
+      updateBonus 経由で manualPriorPayroll{GrossPay/SocialInsurance/EmploymentInsurance} に書き込む。
+      キャンセル → ローカル値破棄。
+      入力をクリア → 3 フィールドを null で保存 (フィールド削除相当)。
+      計算ロジック (calculateBonusResult) には触れず、保存フィールド名・優先順位を維持。 */}
+  {priorPayrollModal && (() => {
+    const _g = Number(priorPayrollModal.gross);
+    const _s = Number(priorPayrollModal.soc);
+    const _e = Number(priorPayrollModal.emp);
+    const _gOk = Number.isFinite(_g) && _g > 0;
+    const _sOk = !priorPayrollModal.soc || (Number.isFinite(_s) && _s >= 0);
+    const _eOk = !priorPayrollModal.emp || (Number.isFinite(_e) && _e >= 0);
+    const _sumOver = _gOk && (Number.isFinite(_s) ? _s : 0) + (Number.isFinite(_e) ? _e : 0) > _g;
+    const _after = _gOk ? _g - (Number.isFinite(_s) ? _s : 0) - (Number.isFinite(_e) ? _e : 0) : null;
+    const _afterOk = _gOk && _after !== null && _after > 0 && !_sumOver && _sOk && _eOk;
+
+    // 入力チェックメッセージ (複数該当時は最初の1件)
+    let _errMsg = "";
+    if (priorPayrollModal.gross !== "" && !_gOk)                       _errMsg = "総支給額は 0 円より大きい値を入力してください";
+    else if (!_sOk || _s < 0)                                          _errMsg = "社会保険料にマイナス値は入力できません";
+    else if (!_eOk || _e < 0)                                          _errMsg = "雇用保険料にマイナス値は入力できません";
+    else if (_sumOver)                                                 _errMsg = "社会保険料と雇用保険料の合計が総支給額を超えています";
+    else if (_gOk && _after !== null && _after <= 0)                   _errMsg = "社保控除後額が 0 円以下になります";
+
+    const _close = () => setPriorPayrollModal(null);
+    const _save = () => {
+      // 数値化して保存。空欄は null (フィールド削除相当)。
+      // 「全部空欄での保存」は実質クリアと同じになるが、エラー値以外なら保存自体は許容する
+      // (計算側 _mpValid で空/不正は自動的に無視される)。
+      if (_errMsg) { alert(_errMsg); return; }
+      const _toSave = (v) => (v === "" || v === null || v === undefined) ? null : (Number.isFinite(Number(v)) ? Number(v) : null);
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollGrossPay",            null, _toSave(priorPayrollModal.gross));
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollSocialInsurance",     null, _toSave(priorPayrollModal.soc));
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollEmploymentInsurance", null, _toSave(priorPayrollModal.emp));
+      _close();
+    };
+    const _clear = () => {
+      if (!window.confirm("入力された前月給与情報をクリアします。よろしいですか？")) return;
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollGrossPay",            null, null);
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollSocialInsurance",     null, null);
+      updateBonus(selectedYear, priorPayrollModal.bonusKey, "manualPriorPayrollEmploymentInsurance", null, null);
+      _close();
+    };
+
+    return (
+      <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50" onClick={_close}>
+        <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+          <h3 className="text-base font-black text-slate-800 mb-1">
+            賞与税率判定用 前月給与情報（{priorPayrollModal.bonusLabel}）
+          </h3>
+          <p className="text-[11px] text-slate-600 mb-3 leading-snug">
+            前月給与の総支給額から、社会保険料と雇用保険料を控除した金額を賞与の税率判定に使用します。<br />
+            <span className="font-bold text-rose-600">所得税・住民税・その他控除後の金額（手取り）ではありません。</span>
+          </p>
+          <div className="bg-slate-50 rounded-lg px-3 py-2 mb-4 text-[10px] text-slate-500 leading-snug">
+            ※ 前月給与データが取得できる場合は、この入力値は無視され、自動取得値が優先されます (古い手入力による誤計算防止)。
+          </div>
+
+          <div className="flex flex-col gap-3 mb-4">
+            <div>
+              <label className="text-xs font-bold text-slate-600 mb-1 block">前月給与の総支給額</label>
+              <CurrencyInput
+                value={priorPayrollModal.gross}
+                onChange={(num) => setPriorPayrollModal((p) => ({ ...p, gross: num }))}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="例: 300000"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-600 mb-1 block">前月社会保険料 <span className="text-[10px] font-normal text-slate-400">(健保+厚年+介護+子育て)</span></label>
+              <CurrencyInput
+                value={priorPayrollModal.soc}
+                onChange={(num) => setPriorPayrollModal((p) => ({ ...p, soc: num }))}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="例: 43500"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-600 mb-1 block">前月雇用保険料</label>
+              <CurrencyInput
+                value={priorPayrollModal.emp}
+                onChange={(num) => setPriorPayrollModal((p) => ({ ...p, emp: num }))}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                placeholder="例: 1650"
+              />
+            </div>
+          </div>
+
+          {/* 自動計算表示 */}
+          <div className={`rounded-lg px-3 py-2 mb-4 text-sm flex items-center justify-between ${_errMsg ? "bg-rose-50 border border-rose-200" : _afterOk ? "bg-emerald-50 border border-emerald-200" : "bg-slate-50 border border-slate-200"}`}>
+            <span className={`text-xs font-bold ${_errMsg ? "text-rose-700" : _afterOk ? "text-emerald-700" : "text-slate-500"}`}>
+              前月給与の社保控除後額（税率判定に使用）
+            </span>
+            <span className={`font-mono font-black text-base ${_errMsg ? "text-rose-700" : _afterOk ? "text-emerald-700" : "text-slate-400"}`}>
+              {_errMsg ? "—" : (_afterOk ? `${formatCurrency(_after)}円` : "(未入力)")}
+            </span>
+          </div>
+
+          {_errMsg && (
+            <div className="text-[11px] text-rose-700 font-bold bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-4">
+              ⚠ {_errMsg}
+            </div>
+          )}
+
+          <div className="flex justify-between gap-3">
+            <button
+              type="button"
+              onClick={_clear}
+              className="px-4 py-2 text-sm font-bold text-rose-600 border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors"
+            >
+              入力をクリア
+            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={_close}
+                className="px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={_save}
+                disabled={!!_errMsg}
+                className={`px-4 py-2 text-sm font-bold text-white rounded-lg transition-colors ${_errMsg ? "bg-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500"}`}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  })()}
 
   {/* ＝＝＝ 社員マスター編集 モーダル ＝＝＝ */}
       {editingEmployeeId && editingMaster && (

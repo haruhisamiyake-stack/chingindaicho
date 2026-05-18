@@ -15213,13 +15213,28 @@ const App = () => {
                               const isUncalc = calcVal === null || calcVal === undefined;
                               const isOv = currentYearData.manualOverrides?.[m]?.incomeTax?.enabled;
                               const ovData = currentYearData.manualOverrides?.[m]?.incomeTax;
+                              // 通常月所得税セル: 社保系行 (健保/厚年/介護/子育て/雇用、L15147-L15179) と
+                              // 同じ td/span 構造に揃え、行高・余白・文字幅を一致させる。
+                              //   * td className から font-bold を除去 (社保系は font-bold なし)
+                              //   * span className に font-mono を付与 (社保系は font-mono あり = 等幅で揃う)
+                              // 文字色は前回タスクの判定を維持:
+                              //   override 月: text-amber-700 font-black (手動上書きの強調は維持)
+                              //   計算不可月: text-red-600 font-black (注意表示の強調は維持、font-black も社保系と揃える)
+                              //   金額>0 月: text-orange-600 (給与計算重要項目として控えめにオレンジ)
+                              //   0 円月: text-slate-500 (社保系の 0 円セル text-gray-500 と同等の控えめ色)
+                              // UI 表示のみの変更で、金額計算・保存値・印刷には影響しない。
+                              const _itTextColor = isOv
+                                ? "text-amber-700 font-black"
+                                : isUncalc
+                                  ? "text-red-600 font-black"
+                                  : (Number(calcVal) > 0 ? "text-orange-600" : "text-slate-500");
                               return (
                                 <td
                                   key={m}
-                                  className={`border border-gray-300 p-0.5 text-right font-bold text-[11px] ${isOv ? "bg-amber-50" : isUncalc ? "bg-red-50" : ""}`}
+                                  className={`border border-gray-300 p-0.5 text-right text-[11px] ${isOv ? "bg-amber-50" : isUncalc ? "bg-red-50" : ""}`}
                                 >
                                   <div className="flex items-center justify-end gap-0.5">
-                                    <span className={isOv ? "text-amber-700 font-black" : isUncalc ? "text-red-600" : "text-orange-600"}>
+                                    <span className={`font-mono ${_itTextColor}`}>
                                       {isOv ? formatCurrency(Number(ovData.value) || 0) : isUncalc ? "計算不可" : formatCurrency(calcVal)}
                                     </span>
                                     <button
@@ -15239,7 +15254,13 @@ const App = () => {
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-slate-50 text-slate-700 sticky right-[350px] shadow-[-6px_0_8px_-3px_rgba(0,0,0,0.12)] z-25 text-[11px]">
                               {formatCurrency(results.sums.incomeTax)}
                             </td>
-                            <td className={`border border-gray-300 p-0.5 text-right sticky right-[270px] z-25 ${results.bonus1?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
+                            {/* 賞与1 所得税セル: incomeTax===null (計算不可) のとき、以前は CurrencyInput の下に
+                                ブロック要素の「－」div を表示していたが、それが tr の行高を約 30px に押し広げ、
+                                通常月セル (約 15px) との段差を生んでいたため削除。
+                                計算不可の視認性は CurrencyInput 側の disabled / text-slate-400 / cursor-not-allowed で十分。
+                                強い警告は賞与計算画面・賞与明細側で表示済み。
+                                計算ロジック・保存値・賞与所得税判定 (manualRequired)・incomeTax===null 状態には触れない (UI 表示のみ)。 */}
+                            <td className="border border-gray-300 p-0.5 text-right sticky right-[270px] z-25 bg-white">
                               <CurrencyInput
                                 disabled={isYearLocked || !results.bonus1?.manualRequired}
                                 title={!results.bonus1?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
@@ -15255,16 +15276,16 @@ const App = () => {
                                   );
                                 }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
-                                  results.bonus1?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
+                                  results.bonus1?.incomeTax === null ? "text-slate-400 cursor-not-allowed" : "text-indigo-700"
                                 } ${
                                   isYearLocked
                                     ? "cursor-not-allowed opacity-50"
                                     : ""
                                 }`}
                               />
-                              {results.bonus1?.incomeTax === null && <div className="text-[8px] text-red-600 text-center font-black pb-0.5 pointer-events-none">計算不可</div>}
                             </td>
-                            <td className={`border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 ${results.bonus2?.incomeTax === null ? "bg-red-50" : "bg-white"}`}>
+                            {/* 賞与2 所得税セル: 賞与1 と同じく「－」div を削除して行高段差を解消。詳細は賞与1 側のコメント参照。 */}
+                            <td className="border border-gray-300 p-0.5 text-right sticky right-[190px] z-25 bg-white">
                               <CurrencyInput
                                 disabled={isYearLocked || !results.bonus2?.manualRequired}
                                 title={!results.bonus2?.manualRequired ? "自動計算値を表示中（手入力不可）" : "賞与算出率表の範囲外/未登録のため手入力してください"}
@@ -15280,14 +15301,13 @@ const App = () => {
                                   );
                                 }}
                                 className={`w-full bg-transparent text-right outline-none font-bold focus:bg-indigo-50 transition-colors text-[11px] px-1 py-1 ${
-                                  results.bonus2?.incomeTax === null ? "text-red-600 cursor-not-allowed" : "text-indigo-700"
+                                  results.bonus2?.incomeTax === null ? "text-slate-400 cursor-not-allowed" : "text-indigo-700"
                                 } ${
                                   isYearLocked
                                     ? "cursor-not-allowed opacity-50"
                                     : ""
                                 }`}
                               />
-                              {results.bonus2?.incomeTax === null && <div className="text-[8px] text-red-600 text-center font-black pb-0.5 pointer-events-none">計算不可</div>}
                             </td>
                             <td className="border border-gray-300 p-1.5 text-right font-black bg-indigo-50 text-indigo-800 sticky right-[100px] z-25 text-[11px]">
                               {formatCurrency(results.bonusTotal.incomeTax)}

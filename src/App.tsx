@@ -1,5 +1,8 @@
 ﻿// @ts-nocheck
 import React, { useState, useEffect, useMemo, useRef } from "react";
+// 弥生取込テキスト出力時の Shift-JIS / CP932 エンコード変換用。ブラウザ標準 TextEncoder は
+// UTF-8 のみ対応のため、CP932 出力には本ライブラリが必要 (弥生はデフォルト SJIS を期待)。
+import Encoding from "encoding-japanese";
 import { app, appId, getCol, getDocRef, newAutoDocRef, saveDoc, removeDoc, subscribe, queryCol, whereEq, orderByField, limitN, fetchDocs, getDocOnce, createBatch, setFirestoreLogLevel, PATHS } from "./firebase";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import LoginScreen from "./LoginScreen";
@@ -350,7 +353,161 @@ const DEFAULT_SETTINGS = {
   deductionDefinitions: [{ id: "union", name: "その他" }],
   rateSchedules: DEFAULT_RATE_SCHEDULES,
   standardRewardTable: DEFAULT_STD_REWARD_TABLE,
+  // 部門マスタ (弥生会計連携): 弥生会計の部門ディメンションへ出力する組織区分。
+  //   id        : アプリ内部の一意キー (社員 master.departmentId の参照先)
+  //   code      : 部門コード (弥生側コードと合わせる)
+  //   name      : 画面表示用の部門名
+  //   yayoiName : 弥生出力名 (未入力なら name を使う想定 — 出力ロジックは次回以降に実装)
+  // 空配列で初期化。社員マスター側は departmentId="" で「部門なし」を表す。
+  departments: [],
+  // 仕訳勘定科目マッピング (弥生会計連携): 給与/賞与の各項目をどの勘定科目で出力するかの設定。
+  //   固定キー: basePayEmployee / basePayExecutive / health / pension / nursing / childCare /
+  //            employment / incomeTax / residentTax / netPay
+  //   動的キー: allowances[allowanceId] / deductions[deductionId]
+  //            (settings.allowanceDefinitions / deductionDefinitions と連動)
+  // 各値の構造:
+  //   { account, subAccount, taxCategory, dc, departmentMode, fixedDepartmentId }
+  //     dc:             "debit" 借方 | "credit" 貸方
+  //     departmentMode: "employee" 社員部門 | "none" 部門なし | "fixed" 固定部門
+  // 重要: 健康保険・厚生年金・介護保険・子ども子育て支援金・雇用保険の従業員負担分は、
+  //       預り金ではなく「貸方 法定福利費」として初期化 (法定福利費の逆仕訳方針)。
+  // departmentMode: 原則すべて "none" (部門なし) で初期化。部門管理を使う会社のみ、
+  // 仕訳勘定科目設定UIで個別に "employee" / "fixed" に切り替えてもらう運用方針。
+  // 既存保存済み settings.journalMapping は上書きしない (jm[key] || DEFAULT のフォールバック構造)。
+  // subAccount: 弥生会計マスタに存在しない補助科目は取込エラー要因のため、デフォルトは必要最小限。
+  //   incomeTax → "所得税" (一般的な弥生マスタで存在)
+  //   residentTax → "住民税" (一般的な弥生マスタで存在)
+  //   それ以外 → 空欄 (補助科目を使う会社のみ設定UIで明示入力)
+  // groupLabel: 仕訳プレビュー上の摘要グルーピング名。空欄なら個別の shortLabel を使う。
+  //   basePayEmployee → "給料手当" (一般社員の基本給と残業手当などを 1 本にまとめる方針)
+  //   basePayExecutive → 空欄 (役員報酬は給料手当と混ぜない)
+  //   health/pension/nursing/childCare/employment → "社会保険料"
+  //     (同じ勘定科目・補助科目・部門・税区分なら 1 行に集約される。
+  //      補助科目や勘定科目を分けて設定すれば自然に別行に戻る — 会計属性は絶対に混ぜない)
+  //   それ以外 → 空欄 (個別摘要のまま、集約しない)
+  journalMapping: {
+    basePayEmployee: { account: "給料手当",   subAccount: "",       taxCategory: "対象外", dc: "debit",  departmentMode: "none", fixedDepartmentId: "", groupLabel: "給料手当" },
+    basePayExecutive:{ account: "役員報酬",   subAccount: "",       taxCategory: "対象外", dc: "debit",  departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    health:          { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    pension:         { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    nursing:         { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    childCare:       { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    employment:      { account: "法定福利費", subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: "社会保険料" },
+    incomeTax:       { account: "預り金",     subAccount: "所得税", taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    residentTax:     { account: "預り金",     subAccount: "住民税", taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    netPay:          { account: "未払費用",   subAccount: "",       taxCategory: "対象外", dc: "credit", departmentMode: "none", fixedDepartmentId: "", groupLabel: ""       },
+    // 動的: settings.allowanceDefinitions / deductionDefinitions に登録された項目ごとに
+    //       allowances[id] / deductions[id] が生成される (未登録時は JOURNAL_DEFAULT_* を使用)。
+    allowances: {},
+    deductions: {},
+  },
 };
+
+// 仕訳マッピング: 動的項目 (手当/控除) 用の安全なフォールバック既定値。
+// 設定 UI 表示時、まだ journalMapping.allowances[id] / deductions[id] が未生成の手当・控除
+// についてはこの値で表示する。保存時に初めて journalMapping へ書き込まれる。
+const JOURNAL_DEFAULT_ALLOWANCE = {
+  account: "給料手当",
+  subAccount: "",
+  taxCategory: "対象外",
+  dc: "debit",
+  // 動的手当も初期は部門なし。部門管理を使う会社のみ設定UIで切替。
+  departmentMode: "none",
+  fixedDepartmentId: "",
+  // 集約グループ名 (空欄 = 個別摘要、入力あり = 同名+同会計属性で 1 行に集約)。
+  groupLabel: "",
+};
+const JOURNAL_DEFAULT_DEDUCTION = {
+  account: "預り金",
+  subAccount: "",
+  taxCategory: "対象外",
+  dc: "credit",
+  departmentMode: "none",
+  fixedDepartmentId: "",
+  groupLabel: "",
+};
+
+// 動的手当の標準マッピング取得 helper。手当の id / name に応じて account / taxCategory / groupLabel を分岐する。
+//   * 通勤手当 (id === "commute" または name に "通勤" を含む):
+//       account = "旅費交通費" / taxCategory = "課対仕入込10%" / groupLabel = "" (給料手当グループに混ぜない)
+//       (実務上、通勤手当は給料手当ではなく旅費交通費で処理する会社が多いため)
+//   * 残業手当 (id === "extra" — DEFAULT_SETTINGS.allowanceDefinitions の既定 id /
+//             または name に "残業" / "時間外" を含む):
+//       JOURNAL_DEFAULT_ALLOWANCE + groupLabel = "給料手当"
+//       (基本給と同一の勘定科目/補助科目/部門/税区分なら、合算プレビュー上で 1 行にまとまる方針)
+//   * それ以外: JOURNAL_DEFAULT_ALLOWANCE と完全同一 (account = "給料手当" / taxCategory = "対象外" / groupLabel = "")
+// 文字列 "課対仕入込10%" は JOURNAL_TAX_CATEGORIES の候補と完全一致 (弥生取込テキストの税区分名)。
+// 旧値 "課税仕入 10%" を保存済みの設定は変更しない (UI 側で旧値救済 option により表示維持)。
+// 引数 def が undefined/null/不正でも安全に標準値を返す (JOURNAL_DEFAULT_ALLOWANCE と同等)。
+// 注意: JOURNAL_DEFAULT_ALLOWANCE 自体は変更しない (他の手当への影響を避けるため)。
+// 注意: 通勤手当判定を先に評価する。これにより、ありえないが万一 name に「通勤」と「残業」が両方
+//       含まれる手当があっても通勤側 (税区分の特例あり) を優先する安全側挙動になる。
+// 使用箇所:
+//   1. 仕訳マッピング設定UI 動的手当行の未保存デフォルト表示
+//   2. updateJournalMappingAllowance の現在値フォールバック (未保存時の編集で 旅費交通費 / 課対仕入込10% / 給料手当グループ が消えないように)
+//   3. buildMonthlyJournalPreview の動的手当 mapping フォールバック
+//   4. buildDefaultJournalMappingForCurrentDefinitions の動的手当再生成
+const getDefaultAllowanceJournalMapping = (def) => {
+  const base = { ...JOURNAL_DEFAULT_ALLOWANCE };
+  const id = String(def?.id || "");
+  const name = String(def?.name || "");
+  if (id === "commute" || name.includes("通勤")) {
+    return {
+      ...base,
+      account: "旅費交通費",
+      taxCategory: "課対仕入込10%",
+    };
+  }
+  if (id === "extra" || name.includes("残業") || name.includes("時間外")) {
+    return {
+      ...base,
+      groupLabel: "給料手当",
+    };
+  }
+  return base;
+};
+
+// 仕訳マッピング 税区分の候補リスト。
+// 給与仕訳は基本「対象外」だが、課税仕入の手当 (例: 課税通勤費の超過分) や、
+// 控除側で立替経費等を扱う場合に備えて最小限の候補を持たせる。
+// 設定 UI ではこの候補を select で表示し、表記揺れを防ぐ。
+// 既存データに候補外の値が入っている場合は、UI 側で「現在値」を救済 option として
+// 追加表示するため、データ消失はしない (旧値 "課税仕入 10%" 等もそのまま表示・保持される)。
+// 文字列は弥生取込テキストの税区分名と完全一致させる必要があるため、半角スペース有無等まで厳密。
+const JOURNAL_TAX_CATEGORIES = [
+  "対象外",
+  "課対仕入込10%",
+  "課対仕入込8%",
+  "非課税",
+  "不課税",
+];
+
+// ===== 将来の仕訳生成時の取り扱い方針 (今回は未実装。出力ロジック実装時に参照) =====
+// (A) 社員 master.departmentId が settings.departments に存在しないIDだった場合:
+//       → 「部門なし」として扱う (社員側の departmentId は一括クリーンしない)。
+// (B) journalMapping.allowances[X] / .deductions[X] が残っているが、対応する
+//     allowanceDefinitions / deductionDefinitions に X が存在しない場合 (削除済み定義の残骸):
+//       → 表示・仕訳生成いずれも definitions 側を駆動源とし、残骸 mapping は無視する。
+//       残骸は明示削除しないが、参照しないことで悪さを防ぐ。
+// (C) journalMapping そのものが未保存 (undefined) の既存テナント:
+//       → getJournalMapping() が DEFAULT_SETTINGS.journalMapping を返すため、
+//         画面表示・更新ともに安全に動作する。
+// ===================================================================================
+
+// 仕訳マッピング 固定項目の表示順とラベル定義。
+// 設定 UI のテーブル生成 / 将来の仕訳生成ロジックの双方から参照される一覧 (単一情報源)。
+const JOURNAL_FIXED_ITEMS = [
+  { key: "basePayEmployee",  label: "基本給（一般社員・パート等）", group: "debit"  },
+  { key: "basePayExecutive", label: "基本給（役員）",                group: "debit"  },
+  { key: "health",           label: "健康保険料 本人負担",           group: "credit" },
+  { key: "pension",          label: "厚生年金保険料 本人負担",       group: "credit" },
+  { key: "nursing",          label: "介護保険料 本人負担",           group: "credit" },
+  { key: "childCare",        label: "子ども・子育て支援金 本人負担", group: "credit" },
+  { key: "employment",       label: "雇用保険料 本人負担",           group: "credit" },
+  { key: "incomeTax",        label: "源泉所得税",                    group: "credit" },
+  { key: "residentTax",      label: "住民税",                        group: "credit" },
+  { key: "netPay",           label: "差引支給額",                    group: "credit" },
+];
 
 // --- CSV行パース関数（ダブルクォート・エスケープ対応） ---
 const parseCSVLine = (line) => {
@@ -2962,6 +3119,9 @@ const createInitialEmployee = (
       pensionIns: 1,
       employmentIns: 1,
       workersCompIns: 1, // ★追加: 労災保険（役員は0にする）
+      // 弥生会計仕訳出力用の所属部門ID (settings.departments[].id を参照、""=部門なし)。
+      // 既存社員は departmentId 未設定でも UI 側で "" にフォールバックされ、計算ロジックに影響しない。
+      departmentId: "",
       // 【修正⑤】定義はsettingsにある前提なので空でOKだが、フォールバック用に保持する
       allowanceDefinitions: [],
       deductionDefinitions: [],
@@ -3243,7 +3403,8 @@ const useMonthlyCloseActions = ({
   startBulkPrint,
   BULK_PRINT_TYPES,
   setMonthlyClosePrintMode,
-  setCheckModalData
+  setCheckModalData,
+  openJournalPreview, // (monthKey) => void。仕訳プレビューモーダルを開く。
 }) => {
   const handleCheck = React.useCallback((monthKey) => {
     setMonthlyCloseMonth(monthKey);
@@ -3280,14 +3441,1101 @@ const useMonthlyCloseActions = ({
     startBulkPrint(BULK_PRINT_TYPES.PAYSLIP, monthKey);
   }, [startBulkPrint, BULK_PRINT_TYPES]);
 
+  // 仕訳プレビュー: 月次給与のみ対象。賞与キーは MonthlyCloseRow 側でボタン非表示。
+  const handlePreviewJournal = React.useCallback((monthKey) => {
+    if (openJournalPreview) openJournalPreview(monthKey);
+  }, [openJournalPreview]);
+
   return React.useMemo(() => ({
-    handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip
-  }), [handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip]);
+    handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip, handlePreviewJournal
+  }), [handleCheck, handleLock, handleUnlock, handleViewDetails, handlePrintSummary, handlePrintPayslip, handlePreviewJournal]);
 };
+// ============================================================================
+// [弥生会計連携・第2弾] 月次給与 仕訳プレビュー pure helper
+// ----------------------------------------------------------------------------
+// 月次締めステータス管理から呼び出される画面プレビュー用。CSV出力 / 仕訳保存は未実装。
+// ロジックは以下の既存仕様に必ず整合させる:
+//   * 表示金額は renderMonthlySummary (L10665-L10719) と同じ manualOverrides 反映式
+//   * 対象社員判定は仕訳プレビュー専用の hasRowJournalRelevantAmount を使用
+//     (一括印刷・支給控除一覧の hasMonthlyPaymentData とは別軸 — 仕訳では
+//      住民税のみ / その他控除のみの社員も拾う。退職者の扱いはこの判定に依存)
+//   * 動的手当/控除は settings.allowanceDefinitions / deductionDefinitions 駆動
+//     (定義に存在しない journalMapping 残骸は使わない)
+// ============================================================================
+
+// 部門ID → 部門表示名 (弥生出力名優先 / なければ画面名)。
+// 部門マスタに存在しない場合は null を返し、呼出側で「部門なし扱い + 警告」とする。
+const getDepartmentDisplayName = (deptId, departments) => {
+  if (!deptId) return "";
+  const found = (departments || []).find((d) => d.id === deptId);
+  if (!found) return null;
+  return found.yayoiName || found.name || "";
+};
+
+// 月末日 (YYYY-MM-DD) を返す。yearStr: "R08", monthKey: "01"-"12"。
+// reiwaToWestern と整合: 2018 + R番号。
+const getMonthEndDateStr = (yearStr, monthKey) => {
+  const y = reiwaToWestern(yearStr);
+  const m = parseInt(monthKey, 10);
+  if (!y || !m || m < 1 || m > 12) return "";
+  const d = new Date(y, m, 0);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+// 行レベルで「仕訳対象となる金額が 1 件でもあるか」を判定する pure helper。
+// 仕訳プレビュー内専用 (一括印刷・支給控除一覧・月次締めの hasMonthlyPaymentData とは別軸)。
+// 採用基準: row 上で直接判定できる項目のみ。社保/雇用保険/所得税は
+//          calculateMonthlyResult の結果から得るため、ここでは「呼ぶ価値があるか」を
+//          緩く判定するだけ (basePay/手当があれば確実に呼ぶ価値あり、controlに住民税や
+//          その他控除だけの社員も拾うように .some(v>0) で金額ベース判定する)。
+// 0 円手当キー (allowanceAmounts: { commute: 0 } 等) だけが残っているケースを対象外にする。
+const hasRowJournalRelevantAmount = (row) => {
+  if (!row) return false;
+  if (Number(row.basePay) > 0) return true;
+  // 手当: 金額ベース判定 (0 円キーだけでは対象外)
+  const al = row.allowanceAmounts || {};
+  for (const k in al) { if (Number(al[k]) > 0) return true; }
+  // 控除: 金額ベース判定。控除のみ存在するケース (積立金など) も対象に含める。
+  const dd = row.deductionAmounts || {};
+  for (const k in dd) { if (Number(dd[k]) > 0) return true; }
+  // 住民税: 「住民税だけ入力されている」ケースを対象に含める。
+  if (Number(row.residentTax) > 0) return true;
+  return false;
+};
+
+// 仕訳摘要に入れる項目内容の短縮ラベル。
+// 弥生取込テキストは摘要 30 文字制限があるため、社保系・基本給などは短く統一する。
+// 摘要形式 (従業員別): 「年月分 給与 従業員名 ラベル」 (例: "R08年03月分 給与 山田太郎 健保")
+// 摘要形式 (合算):    「年月分 給与 ラベル」 (例: "R08年03月分 給与 健保")
+// ラベル決定の優先順位 (addRow 内で実装):
+//   1. mapping.groupLabel が非空 → groupLabel (例: "社会保険料" 等の集約用ラベル)
+//   2. それ以外 → 下記 JOURNAL_SHORT_LABELS の個別短縮ラベル
+// この 2 軸設計により、「個別表示ラベル」と「集約用グループラベル」を分けて管理できる。
+// JOURNAL_SHORT_LABELS 自体は本来の個別短縮ラベルを維持する (集約は groupLabel 側で制御)。
+const JOURNAL_SHORT_LABELS = {
+  basePayEmployee:  "基本給",
+  basePayExecutive: "役員",
+  health:           "健保",
+  pension:          "厚年",
+  nursing:          "介護",
+  childCare:        "子育て",
+  employment:       "雇用",
+  incomeTax:        "所得税",
+  residentTax:      "住民税",
+  netPay:           "差引",
+};
+
+// 動的手当・控除名を摘要用に短縮 (先頭6文字、サロゲートペア対応)。
+// 7文字以上は意味が伝わる範囲で切り詰め。未入力 / 0 文字は空文字を返す。
+const shortenJournalDynamicLabel = (name) => {
+  if (!name) return "";
+  const arr = Array.from(String(name));
+  if (arr.length === 0) return "";
+  if (arr.length <= 6) return arr.join("");
+  return arr.slice(0, 6).join("");
+};
+
+// 月次給与 仕訳プレビュー生成 (pure helper)。
+// 引数:
+//   employees:    { [empId]: { master, data } }
+//   settings:     会社共通設定
+//   taxTables:    所得税額表 (calculateMonthlyResult が要求)
+//   monthlyLocks: 月次全体ロック state
+//   year:         "R08" 等
+//   monthKey:     "01"-"12" (賞与は今回対象外)
+//   mode:         "aggregate" (合算) | "byEmployee" (従業員別)
+//   dateMode:     "payDate" (支給日) | "periodEnd" (計算期間終了日) | "monthEnd" (月末)
+// 戻り値:
+//   { rows: [...], debitTotal, creditTotal, diff, warnings: [] }
+//   rows の各行は 借方 or 貸方 のどちらか片側だけに金額が入る形式 (CSV 出力時に複合化する想定)。
+//
+// === manualOverrides 反映範囲 (renderMonthlySummary と同一) ===
+//   反映する : health / pension / nursing / childCare / employment /
+//              incomeTax / residentTax / netPay / deduction_<id>
+//   反映しない: basePay / allowanceAmounts[def.id] (renderMonthlySummary も同様)
+//   manualOverrides 自体が未設定でも安全フォールバック (ovs={}/calc値採用)。
+// === CSV 出力時の注意 (次回以降) ===
+//   合算モードで社員ごとに payDate / periodEnd が異なる場合、現状は代表日に正規化している。
+//   弥生取込テキスト出力時には、日付も集約キーに含めて「同日付・同科目・同部門」で集約する形に
+//   見直すことを検討すること (日付混在を warnings で明示しているのはその布石)。
+const buildMonthlyJournalPreview = ({
+  employees,
+  settings,
+  taxTables,
+  monthlyLocks,
+  year,
+  monthKey,
+  mode = "aggregate",
+  dateMode = "payDate",
+}) => {
+  const warnings = [];
+  if (!year || !monthKey) {
+    warnings.push("対象年月が未指定です。");
+    return { rows: [], debitTotal: 0, creditTotal: 0, diff: 0, warnings };
+  }
+  // 賞与は今回スコープ外。賞与キーで呼ばれた場合は明示的に警告し、空で返す。
+  if (monthKey === "bonus" || monthKey === "bonus2") {
+    warnings.push("仕訳プレビューは月次給与のみ対象です (賞与は次回以降の実装)。");
+    return { rows: [], debitTotal: 0, creditTotal: 0, diff: 0, warnings };
+  }
+
+  const jm = (settings && settings.journalMapping) || DEFAULT_SETTINGS.journalMapping;
+  const departments = (settings && settings.departments) || [];
+  const allowanceDefs = settings?.allowanceDefinitions || [];
+  const deductionDefs = settings?.deductionDefinitions || [];
+
+  const yearLabel = year;
+  const mmLabel = String(parseInt(monthKey, 10)).padStart(2, "0");
+  const descBase = `${yearLabel}年${mmLabel}月分 給与`;
+  const monthEndDate = getMonthEndDateStr(year, monthKey);
+
+  // 日付混在検知: 合算モード時の代表日採用と警告のため、最初の値を保持する。
+  let firstPayDate = null;
+  let firstPeriodEnd = null;
+  let payDateMixed = false;
+  let periodEndMixed = false;
+
+  // 動的手当/控除の警告は社員ごとに重複する可能性があるため、Set で重複排除する。
+  const seenAllowanceUnmapped = new Set();
+  const seenDeductionUnmapped = new Set();
+  const seenDeletedDepts = new Set();
+
+  const rawRows = [];
+
+  Object.entries(employees || {}).forEach(([empId, emp]) => {
+    if (!emp || !emp.master) return;
+    const yd = emp.data?.years?.[year];
+    if (!yd) return;
+    const row = yd.monthly?.[monthKey];
+    if (!row) return;
+
+    // 仕訳プレビュー専用の対象判定 (一括印刷・支給控除一覧の hasMonthlyPaymentData とは別軸)。
+    //   * 0 円手当キーだけが残っていても対象外
+    //   * 基本給0・手当0 でも、住民税 / その他控除 / 0 以外の手当金額 があれば対象
+    //   * 退職者でも上記いずれかが該当すれば含める (master.status は明示判定しない)
+    if (!hasRowJournalRelevantAmount(row)) return;
+
+    // 月次計算結果取得 (calculateMonthlyResult は無変更)。
+    const monthlyResult = calculateMonthlyResult(
+      emp.master,
+      row,
+      settings,
+      monthKey,
+      year,
+      taxTables || {},
+      monthlyLocks || {}
+    );
+    if (!monthlyResult || monthlyResult.calcSuccess !== true) {
+      warnings.push(
+        `${emp.master.name || empId}: 月次給与計算が未完了のため、仕訳行を生成しませんでした。`
+      );
+      return;
+    }
+
+    // 表示金額 (renderMonthlySummary と同じ manualOverrides 反映式)。
+    const ovs = yd.manualOverrides?.[monthKey] || {};
+    const dispHealth      = ovs.health?.enabled      ? (Number(ovs.health.value)      || 0) : (Number(monthlyResult.health)      || 0);
+    const dispPension     = ovs.pension?.enabled     ? (Number(ovs.pension.value)     || 0) : (Number(monthlyResult.pension)     || 0);
+    const dispNursing     = ovs.nursing?.enabled     ? (Number(ovs.nursing.value)     || 0) : (Number(monthlyResult.nursing)     || 0);
+    const dispChildCare   = ovs.childCare?.enabled   ? (Number(ovs.childCare.value)   || 0) : (Number(monthlyResult.childCare)   || 0);
+    const dispEmployment  = ovs.employment?.enabled  ? (Number(ovs.employment.value)  || 0) : (Number(monthlyResult.employment)  || 0);
+    const dispIncomeTax   = ovs.incomeTax?.enabled   ? (Number(ovs.incomeTax.value)   || 0) : (Number(monthlyResult.incomeTax)   || 0);
+    const dispResidentTax = ovs.residentTax?.enabled ? (Number(ovs.residentTax.value) || 0) : (Number(row.residentTax)           || 0);
+
+    // 各種控除 (override 反映済み金額を集約用に列挙)。
+    const deductionDispList = deductionDefs.map((def) => {
+      const ovKey = `deduction_${def.id}`;
+      const dov = ovs[ovKey];
+      const amt = dov?.enabled
+        ? (Number(dov.value) || 0)
+        : (Number(row.deductionAmounts?.[def.id]) || 0);
+      return { def, amount: amt };
+    });
+    const dispCustomDeds = deductionDispList.reduce((s, d) => s + d.amount, 0);
+
+    const dispTotalDed =
+      dispHealth + dispPension + dispNursing + dispChildCare + dispEmployment +
+      dispIncomeTax + dispResidentTax + dispCustomDeds;
+    const dispGross = Number(monthlyResult.grossPay) || 0;
+    const dispNetPay = ovs.netPay?.enabled
+      ? (Number(ovs.netPay.value) || 0)
+      : (dispGross - dispTotalDed);
+
+    // === 借方/貸方 不一致リスクの早期検知 (社員ごと) ===
+    // (a) dispNetPay が負: 控除合計が grossPay を超過 = 実務的にあり得ない状態。
+    //     貸方に負の金額が立つと CSV 取り込み側で破綻するため、明示的に警告する。
+    if (dispNetPay < 0) {
+      warnings.push(
+        `${emp.master.name || empId}: 差引支給額が負の値 (${dispNetPay.toLocaleString()}円) です。控除合計が総支給額を超過しています。`
+      );
+    }
+    // (b) netPay 手動上書きが grossPay-totalDed と乖離: 手入力 netPay と他項目合計が
+    //     ズレている = 社員単体の借方/貸方が一致しない原因。総差額警告とは別に
+    //     どの社員が原因か特定できるように個別警告する。
+    if (ovs.netPay?.enabled) {
+      const _calcNet = dispGross - dispTotalDed;
+      if (dispNetPay !== _calcNet) {
+        warnings.push(
+          `${emp.master.name || empId}: 差引支給額が手動上書きされていますが、自動計算値 (${_calcNet.toLocaleString()}円) と乖離しています (上書き値 ${dispNetPay.toLocaleString()}円)。社員単体で借方/貸方が一致しません。`
+        );
+      }
+    }
+
+    // 社員別 取引日決定。
+    let txDate = "";
+    if (dateMode === "payDate") {
+      txDate = row.payDate || "";
+      if (txDate) {
+        if (firstPayDate === null) firstPayDate = txDate;
+        else if (txDate !== firstPayDate) payDateMixed = true;
+      }
+    } else if (dateMode === "periodEnd") {
+      txDate = row.periodEnd || "";
+      if (txDate) {
+        if (firstPeriodEnd === null) firstPeriodEnd = txDate;
+        else if (txDate !== firstPeriodEnd) periodEndMixed = true;
+      }
+    } else {
+      txDate = monthEndDate;
+    }
+
+    const empName = emp.master.name || `(社員ID:${empId})`;
+    // 摘要組立 helper: 短縮ラベル付きで「年月分 給与 [従業員名 ]項目内容」を返す。
+    // shortLabel が空のときは末尾の余分なスペースが付かないように分岐する。
+    // 30文字制限は弥生取込テキスト出力時 (truncateYayoiDescription) で別途切り詰めるため、
+    // ここでは制限を意識せず人間可読な形を優先する。
+    const buildDescription = (shortLabel) => {
+      const parts = [descBase];
+      if (mode === "byEmployee") parts.push(empName);
+      const sl = (shortLabel || "").toString().trim();
+      if (sl) parts.push(sl);
+      return parts.join(" ");
+    };
+
+    // 部門解決 helper。social-ins 系本人負担の departmentMode は journalMapping 設定に従う。
+    const resolveDept = (mapping, itemLabel) => {
+      if (!mapping) return "";
+      if (mapping.departmentMode === "none") return "";
+      if (mapping.departmentMode === "fixed") {
+        const n = getDepartmentDisplayName(mapping.fixedDepartmentId, departments);
+        if (n === null) {
+          const k = `fixed:${mapping.fixedDepartmentId}`;
+          if (!seenDeletedDepts.has(k)) {
+            seenDeletedDepts.add(k);
+            warnings.push(`「${itemLabel}」の固定部門ID(${mapping.fixedDepartmentId})が部門マスタに存在しません (部門なし扱い)。`);
+          }
+          return "";
+        }
+        return n;
+      }
+      // "employee" (default)
+      const did = emp.master.departmentId || "";
+      if (!did) return "";
+      const n = getDepartmentDisplayName(did, departments);
+      if (n === null) {
+        const k = `emp:${empId}:${did}`;
+        if (!seenDeletedDepts.has(k)) {
+          seenDeletedDepts.add(k);
+          warnings.push(`${empName}: 所属部門ID(${did})が部門マスタに存在しません (部門なし扱い)。`);
+        }
+        return "";
+      }
+      return n;
+    };
+
+    // 仕訳行を 1 件追加する内部 helper。金額 0 はスキップ (NaN は 0 扱い)。
+    // shortLabel: 摘要に入れる短縮ラベル (例: "基本給", "健保", "雇用", 動的手当名6文字以内)。
+    // 摘要のラベル決定の優先順位:
+    //   1. mapping.groupLabel が非空 → groupLabel (例: "社会保険料" 等の集約用ラベル)
+    //   2. それ以外 → shortLabel (個別短縮ラベル)
+    // groupLabel が同じ + 借/貸科目・補助・部門・税区分・社員ID が同じ場合のみ
+    // 集約モードで 1 行に統合される (会計属性が違えば別行のまま)。
+    const addRow = ({ kind, amount, mapping, itemLabel, shortLabel, fallbackAccount }) => {
+      let amt = Number(amount);
+      if (!Number.isFinite(amt)) {
+        warnings.push(`${empName}: 「${itemLabel}」の金額が数値化できませんでした (0 扱い)。`);
+        amt = 0;
+      }
+      if (!amt) return;
+      const m = mapping || {};
+      const account = (m.account || "").toString().trim();
+      const subAccount = m.subAccount || "";
+      const taxCategory = m.taxCategory || "対象外";
+      const dept = resolveDept(m, itemLabel);
+      const dc = m.dc || (kind === "credit" ? "credit" : "debit");
+      if (!account) {
+        warnings.push(`「${itemLabel}」の勘定科目が未設定です (既定値「${fallbackAccount || "(未設定)"}」で生成)。`);
+      }
+      const accountFinal = account || (fallbackAccount || "(未設定)");
+      // 集約グループ名があれば優先 (空文字/空白のみ/未定義はフォールバック)。
+      const groupLabel = ((m.groupLabel || "") + "").trim();
+      const effectiveLabel = groupLabel || shortLabel || "";
+      rawRows.push({
+        date: txDate,
+        debitAccount:     dc === "debit"  ? accountFinal : "",
+        debitSubAccount:  dc === "debit"  ? subAccount   : "",
+        debitDepartment:  dc === "debit"  ? dept         : "",
+        debitAmount:      dc === "debit"  ? amt          : 0,
+        creditAccount:    dc === "credit" ? accountFinal : "",
+        creditSubAccount: dc === "credit" ? subAccount   : "",
+        creditDepartment: dc === "credit" ? dept         : "",
+        creditAmount:     dc === "credit" ? amt          : 0,
+        taxCategory,
+        description: buildDescription(effectiveLabel),
+        employeeId: empId,
+        employeeName: empName,
+        itemLabel,
+        shortLabel: shortLabel || "",
+        groupLabel,
+      });
+    };
+
+    // === 借方: 基本給 ===
+    const isExec = emp.master.employmentType === "executive";
+    const basePayKey = isExec ? "basePayExecutive" : "basePayEmployee";
+    if (!emp.master.employmentType) {
+      // 未設定は仕様上「正社員」フォールバックのまま使うが、念のため軽い警告のみ出す (重複排除)。
+      // 基本給を持っている社員に限る (basePay=0 なら addRow でスキップされる)。
+    }
+    addRow({
+      kind: "debit",
+      amount: Number(row.basePay) || 0,
+      mapping: jm[basePayKey] || DEFAULT_SETTINGS.journalMapping[basePayKey],
+      itemLabel: isExec ? "基本給 (役員)" : "基本給 (一般)",
+      shortLabel: isExec ? JOURNAL_SHORT_LABELS.basePayExecutive : JOURNAL_SHORT_LABELS.basePayEmployee,
+      fallbackAccount: isExec ? "役員報酬" : "給料手当",
+    });
+
+    // === 借方: 各種手当 (定義側駆動。残骸 mapping は使わない) ===
+    allowanceDefs.forEach((def) => {
+      const amt = Number(row.allowanceAmounts?.[def.id]) || 0;
+      if (!amt) return;
+      const am = (jm.allowances || {})[def.id];
+      if (!am && !seenAllowanceUnmapped.has(def.id)) {
+        seenAllowanceUnmapped.add(def.id);
+        warnings.push(`手当「${def.name}」の仕訳マッピングが未設定です (既定値で出力)。`);
+      }
+      addRow({
+        kind: "debit",
+        amount: amt,
+        // 未保存時は def に応じた標準値 (通勤手当は taxCategory="課対仕入込10%") を使う。
+        mapping: am || getDefaultAllowanceJournalMapping(def),
+        itemLabel: `手当: ${def.name || "(無題)"}`,
+        shortLabel: shortenJournalDynamicLabel(def.name || ""),
+        fallbackAccount: "給料手当",
+      });
+    });
+
+    // === 貸方: 社保系本人負担 / 所得税 / 住民税 ===
+    // short は摘要用の短縮ラベル (JOURNAL_SHORT_LABELS と整合)。
+    const creditFixed = [
+      { amount: dispHealth,      key: "health",      label: "健康保険料 本人負担",           fb: "法定福利費", short: JOURNAL_SHORT_LABELS.health      },
+      { amount: dispPension,     key: "pension",     label: "厚生年金保険料 本人負担",       fb: "法定福利費", short: JOURNAL_SHORT_LABELS.pension     },
+      { amount: dispNursing,     key: "nursing",     label: "介護保険料 本人負担",           fb: "法定福利費", short: JOURNAL_SHORT_LABELS.nursing     },
+      { amount: dispChildCare,   key: "childCare",   label: "子ども・子育て支援金 本人負担", fb: "法定福利費", short: JOURNAL_SHORT_LABELS.childCare   },
+      { amount: dispEmployment,  key: "employment",  label: "雇用保険料 本人負担",           fb: "法定福利費", short: JOURNAL_SHORT_LABELS.employment  },
+      { amount: dispIncomeTax,   key: "incomeTax",   label: "源泉所得税",                    fb: "預り金",     short: JOURNAL_SHORT_LABELS.incomeTax   },
+      { amount: dispResidentTax, key: "residentTax", label: "住民税",                        fb: "預り金",     short: JOURNAL_SHORT_LABELS.residentTax },
+    ];
+    creditFixed.forEach((ci) => {
+      addRow({
+        kind: "credit",
+        amount: ci.amount,
+        mapping: jm[ci.key] || DEFAULT_SETTINGS.journalMapping[ci.key],
+        itemLabel: ci.label,
+        shortLabel: ci.short,
+        fallbackAccount: ci.fb,
+      });
+    });
+
+    // === 貸方: 各種控除 (定義側駆動) ===
+    deductionDispList.forEach(({ def, amount }) => {
+      if (!amount) return;
+      const dm = (jm.deductions || {})[def.id];
+      if (!dm && !seenDeductionUnmapped.has(def.id)) {
+        seenDeductionUnmapped.add(def.id);
+        warnings.push(`控除「${def.name}」の仕訳マッピングが未設定です (既定値で出力)。`);
+      }
+      addRow({
+        kind: "credit",
+        amount,
+        mapping: dm || JOURNAL_DEFAULT_DEDUCTION,
+        itemLabel: `控除: ${def.name || "(無題)"}`,
+        shortLabel: shortenJournalDynamicLabel(def.name || ""),
+        fallbackAccount: "預り金",
+      });
+    });
+
+    // === 貸方: 差引支給額 ===
+    addRow({
+      kind: "credit",
+      amount: dispNetPay,
+      mapping: jm.netPay || DEFAULT_SETTINGS.journalMapping.netPay,
+      itemLabel: "差引支給額",
+      shortLabel: JOURNAL_SHORT_LABELS.netPay,
+      fallbackAccount: "未払費用",
+    });
+  });
+
+  if (rawRows.length === 0) {
+    warnings.push("対象月に仕訳対象金額 (基本給・手当・控除・住民税) が入力されている社員がいません。");
+  }
+  if (payDateMixed) {
+    warnings.push(`社員ごとに支給日が異なります。代表日 ${firstPayDate} で表示しています。`);
+  }
+  if (periodEndMixed) {
+    warnings.push(`社員ごとに計算期間終了日が異なります。代表日 ${firstPeriodEnd} で表示しています。`);
+  }
+
+  // ===== 集約 / 従業員別 =====
+  let outRows;
+  if (mode === "aggregate") {
+    // 合算モード: date は代表日に正規化、key=借/貸 各項目+部門+補助+税区分。
+    const aggDate =
+      dateMode === "payDate"   ? (firstPayDate   || "")
+    : dateMode === "periodEnd" ? (firstPeriodEnd || "")
+    : monthEndDate;
+    const map = new Map();
+    rawRows.forEach((r) => {
+      // 集約キーに description を含めることで、同じ勘定科目 (例: 給料手当) でも
+      // 「基本給」「残業」「通勤」など項目別に別行として保持する。
+      // description は addRow 内で buildDescription(groupLabel || shortLabel) によって組み立て済み:
+      //   * mapping.groupLabel が設定されている項目は同じグループラベルで集約される (社会保険料 等)
+      //   * mapping.groupLabel が空欄なら個別 shortLabel で別行のまま
+      // ただし会計属性 (借/貸科目・補助・部門・税区分) も集約キーに含めるため、
+      // groupLabel が同じでも会計属性が違えば必ず別行になる (会計安全性を優先)。
+      const key = [
+        r.debitAccount,  r.debitSubAccount,  r.debitDepartment,
+        r.creditAccount, r.creditSubAccount, r.creditDepartment,
+        r.taxCategory,
+        r.description,
+      ].join("|");
+      if (!map.has(key)) {
+        map.set(key, {
+          date: aggDate,
+          debitAccount: r.debitAccount, debitSubAccount: r.debitSubAccount, debitDepartment: r.debitDepartment,
+          debitAmount: 0,
+          creditAccount: r.creditAccount, creditSubAccount: r.creditSubAccount, creditDepartment: r.creditDepartment,
+          creditAmount: 0,
+          taxCategory: r.taxCategory,
+          // 集約後 description は項目別に分離した addRow 段階の値をそのまま保持 (descBase ではない)。
+          description: r.description,
+          employeeId: "",
+          employeeName: "",
+          itemLabel: r.itemLabel,
+          shortLabel: r.shortLabel,
+          // 集約後も groupLabel を保持 (取込前チェック UI で集約状況を表示するため)。
+          // 同一集約バケット内の groupLabel は description 経由でキーと一致するため一意。
+          groupLabel: r.groupLabel || "",
+        });
+      }
+      const acc = map.get(key);
+      acc.debitAmount  += r.debitAmount;
+      acc.creditAmount += r.creditAmount;
+    });
+    outRows = Array.from(map.values())
+      .filter((r) => r.debitAmount > 0 || r.creditAmount > 0)
+      .sort((a, b) => {
+        // 未払費用 (差引支給額 = netPay 行) は必ず最後。
+        // 判定は itemLabel === "差引支給額" を使う (会社が勘定科目名を「未払金」等に変更しても、
+        // addRow 側で渡している内部ラベル "差引支給額" は不変なので安定)。
+        const aIsNet = a.itemLabel === "差引支給額";
+        const bIsNet = b.itemLabel === "差引支給額";
+        if (aIsNet !== bIsNet) return aIsNet ? 1 : -1;
+        // 借方を先、貸方を後。同じ側内では勘定科目→補助→部門の順。
+        const sideA = a.debitAmount > 0 ? 0 : 1;
+        const sideB = b.debitAmount > 0 ? 0 : 1;
+        if (sideA !== sideB) return sideA - sideB;
+        return (a.debitAccount || a.creditAccount).localeCompare(b.debitAccount || b.creditAccount, "ja");
+      });
+  } else {
+    // 従業員別モード: 社員ごとに集約 (同じ employeeId 内で借方/貸方科目・補助・部門・税区分・摘要
+    // が同一の行を金額合算)。集約モード (aggregate) と同じキー戦略を employeeId 込みで適用。
+    // 用途例: 法定福利費系 (健保/厚年/介護/子育て/雇用) は摘要を「社会保険料」共通ラベルに
+    // 統一しているため、同一社員内では勘定科目・補助・部門が同じなら 1 行にまとまる。
+    // 摘要が異なる所得税 / 住民税 / 差引 / 基本給 / 各手当はそれぞれ別行のまま。
+    const grouped = new Map();
+    rawRows.forEach((r) => {
+      const key = [
+        r.employeeId,
+        r.debitAccount,  r.debitSubAccount,  r.debitDepartment,
+        r.creditAccount, r.creditSubAccount, r.creditDepartment,
+        r.taxCategory,
+        r.description,
+      ].join("|");
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          date: r.date,
+          debitAccount: r.debitAccount, debitSubAccount: r.debitSubAccount, debitDepartment: r.debitDepartment,
+          debitAmount: 0,
+          creditAccount: r.creditAccount, creditSubAccount: r.creditSubAccount, creditDepartment: r.creditDepartment,
+          creditAmount: 0,
+          taxCategory: r.taxCategory,
+          description: r.description,
+          employeeId: r.employeeId,
+          employeeName: r.employeeName,
+          itemLabel: r.itemLabel,
+          shortLabel: r.shortLabel,
+          // 集約後も groupLabel を保持 (取込前チェック UI で集約状況を表示するため)。
+          // 同一集約バケット内の groupLabel は description 経由でキーと一致するため一意。
+          groupLabel: r.groupLabel || "",
+        });
+      }
+      const acc = grouped.get(key);
+      acc.debitAmount  += r.debitAmount;
+      acc.creditAmount += r.creditAmount;
+    });
+    // 集約結果を 社員ID ごとにバケット分けし、借方 → 貸方 (未払費用以外) → 未払費用 の順に並べる。
+    // これにより社員ごとの複合仕訳の最終行が必ず未払費用 (差引支給額) となり、
+    // 弥生取込テキスト側の識別フラグも自動的に 2101 (最終行) になる。
+    const byEmp = new Map();
+    Array.from(grouped.values()).forEach((r) => {
+      const k = r.employeeId;
+      if (!byEmp.has(k)) byEmp.set(k, []);
+      byEmp.get(k).push(r);
+    });
+    outRows = [];
+    byEmp.forEach((arr) => {
+      // 未払費用判定: itemLabel === "差引支給額" (addRow 側で渡している内部ラベル)。
+      // 勘定科目名は会社で変更可能なため、内部ラベルベースで判定する。
+      const isNet = (r) => r.itemLabel === "差引支給額";
+      const debits  = arr.filter((r) => r.debitAmount  > 0 && !isNet(r));
+      const credits = arr.filter((r) => r.creditAmount > 0 && !isNet(r));
+      const netRows = arr.filter((r) => isNet(r));
+      outRows.push(...debits, ...credits, ...netRows);
+    });
+  }
+
+  const debitTotal  = outRows.reduce((s, r) => s + (r.debitAmount  || 0), 0);
+  const creditTotal = outRows.reduce((s, r) => s + (r.creditAmount || 0), 0);
+  const diff = debitTotal - creditTotal;
+  if (outRows.length > 0 && diff !== 0) {
+    warnings.push(`借方合計 (${debitTotal.toLocaleString()}円) と貸方合計 (${creditTotal.toLocaleString()}円) が一致しません (差額: ${diff.toLocaleString()}円)。`);
+  }
+
+  return { rows: outRows, debitTotal, creditTotal, diff, warnings };
+};
+
+// ============================================================================
+// [弥生会計連携・第3弾(改)] 月次給与 弥生取込テキスト出力 (.txt / カンマ区切り / 25列)
+// ----------------------------------------------------------------------------
+// 弥生会計の取込形式は実体として「カンマ区切りのテキストファイル」。
+// 列数・引用ルール・日付形式は、ユーザー提供の参考ファイル siwake.txt に合わせる:
+//   * 25 列固定 (旧27列から 借方/貸方取引先名 を除去)
+//   * 文字列カラムは常にダブルクォート ("2110" 等)、数値カラムは生 (38 / 337684 等)
+//   * 取引日付は和暦 "R.08/03/31" (Reiwa = 西暦 - 2018)
+//   * 借方税区分・貸方税区分は両側ともに「対象外」 (金額0側でも空欄にしない)
+//   * 20列目「タイプ」は 3 (数値) 固定
+//   * 末尾 23/24/25 列「付箋1/付箋2/調整」は "0","0","no" (文字列)
+//   * 2列目「伝票No」は伝票単位の連番を仮値で出力 (将来 settings 化を検討)
+//
+// 識別フラグ: 単一仕訳=2000、複合仕訳 1行目=2110/間=2100/最終=2101
+// 1 伝票 20 行上限、借方金額・貸方金額マイナス不可、摘要 30 文字切詰、CRLF 改行は維持。
+// 文字コード: Shift-JIS (CP932 / 弥生公式仕様) 固定 (UTF-8 切替は廃止)。
+// SJIS 変換はモーダル側で encoding-japanese を使用する (本 helper は textBody を UTF-16 文字列で返すだけ)。
+// 必ず buildMonthlyJournalPreview の戻り値 rows をそのまま使う (再計算しない)。
+// ============================================================================
+
+// 弥生取込テキスト 1 セルを参考ファイル siwake.txt の引用ルールに合わせて文字列化する。
+//   - kind="string" : 必ずダブルクォートで囲み、内部の " は "" にエスケープ (空文字も "")
+//   - kind="number" : 数値をそのまま (有限値でなければ "0")
+// 参考ファイルの引用ルール例:
+//   "2110",38,"","R.08/03/31","給料手当","","","対象外",337684,0,...,"0","0","no"
+//   ↑ 文字列カラム (識別フラグ/日付/勘定科目/税区分/付箋/調整) は常にクォート、
+//     数値カラム (伝票No/金額/税金額/タイプ) は生のまま。
+const formatYayoiCell = (cell) => {
+  if (!cell) return "";
+  if (cell.kind === "number") {
+    const n = Number(cell.value);
+    return Number.isFinite(n) ? String(n) : "0";
+  }
+  // string
+  const s = (cell.value === null || cell.value === undefined) ? "" : String(cell.value);
+  return `"${s.replace(/"/g, '""')}"`;
+};
+
+// "2026-03-31" → "R.08/03/31" (弥生取込仕様の和暦表記)。
+// 参考ファイル siwake.txt が "R.08/03/31" 形式を要求。Reiwa番号 = 西暦 - 2018 (1始まり)。
+// 平成以前 (西暦 ≤ 2018) は今回スコープ外として null を返す。不正値・空文字も null。
+const formatYayoiDate = (isoDate) => {
+  if (!isoDate || typeof isoDate !== "string") return null;
+  const m = isoDate.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const da = parseInt(m[3], 10);
+  if (!y || mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+  const reiwaNum = y - 2018;
+  if (reiwaNum < 1) return null;
+  return `R.${String(reiwaNum).padStart(2, "0")}/${String(mo).padStart(2, "0")}/${String(da).padStart(2, "0")}`;
+};
+
+// 摘要を弥生仕様に合わせて 30 文字以内に切り詰め + 改行を空白に置換。
+// サロゲートペア対応で [...str].length を使用。
+const truncateYayoiDescription = (s) => {
+  if (!s) return { text: "", truncated: false };
+  const cleaned = String(s).replace(/[\r\n]+/g, " ").trim();
+  const chars = Array.from(cleaned);
+  if (chars.length <= 30) return { text: cleaned, truncated: false };
+  return { text: chars.slice(0, 30).join(""), truncated: true };
+};
+
+// 安全な整数化。NaN / 非有限値 / 負数 はそれぞれフラグを返し、最終判定は呼出側で行う。
+//   { ok: true, value: 整数 } / { ok: false, reason: "nan" | "negative" }
+const safeIntForYayoi = (raw) => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, reason: "nan" };
+  if (n < 0) return { ok: false, reason: "negative" };
+  return { ok: true, value: Math.round(n) };
+};
+
+// 弥生取込テキスト 25 列の生成 helper。各セルを {kind, value} 形式で返す。
+// 参考ファイル siwake.txt の列構成 (25列) に合わせる:
+//   1 識別フラグ   /  2 伝票No   /  3 決算  /  4 取引日付
+//   5 借方勘定科目 /  6 借方補助 /  7 借方部門 / 8 借方税区分
+//   9 借方金額     / 10 借方税金額
+//   11 貸方勘定科目 / 12 貸方補助 / 13 貸方部門 / 14 貸方税区分
+//   15 貸方金額    / 16 貸方税金額
+//   17 摘要 / 18 番号 / 19 期日 / 20 タイプ
+//   21 生成元 / 22 仕訳メモ / 23 付箋1 / 24 付箋2 / 25 調整
+// 旧 27列にあった「借方取引先名 / 貸方取引先名」は参考ファイルに無いため削除。
+// kind=number のセル: 伝票No / 借方金額 / 借方税金額 / 貸方金額 / 貸方税金額 / タイプ。
+// それ以外は kind=string (空文字でも "" としてクォート出力)。
+// 借方税区分・貸方税区分は呼出側で必ず "対象外" 等を渡す前提 (参考ファイルでは両側に「対象外」が入る)。
+const toYayoiTextRow = ({
+  flag, voucherNo, date,
+  debitAccount, debitSubAccount, debitDepartment, debitTaxCategory, debitAmount,
+  creditAccount, creditSubAccount, creditDepartment, creditTaxCategory, creditAmount,
+  description,
+}) => [
+  /*  1 識別フラグ          */ { kind: "string", value: flag },
+  /*  2 伝票No              */ { kind: "number", value: voucherNo },
+  /*  3 決算                */ { kind: "string", value: "" },
+  /*  4 取引日付            */ { kind: "string", value: date },
+  /*  5 借方勘定科目        */ { kind: "string", value: debitAccount  || "" },
+  /*  6 借方補助科目        */ { kind: "string", value: debitSubAccount || "" },
+  /*  7 借方部門            */ { kind: "string", value: debitDepartment || "" },
+  /*  8 借方税区分          */ { kind: "string", value: debitTaxCategory || "対象外" },
+  /*  9 借方金額            */ { kind: "number", value: debitAmount },
+  /* 10 借方税金額          */ { kind: "number", value: 0 },
+  /* 11 貸方勘定科目        */ { kind: "string", value: creditAccount  || "" },
+  /* 12 貸方補助科目        */ { kind: "string", value: creditSubAccount || "" },
+  /* 13 貸方部門            */ { kind: "string", value: creditDepartment || "" },
+  /* 14 貸方税区分          */ { kind: "string", value: creditTaxCategory || "対象外" },
+  /* 15 貸方金額            */ { kind: "number", value: creditAmount },
+  /* 16 貸方税金額          */ { kind: "number", value: 0 },
+  /* 17 摘要                */ { kind: "string", value: description || "" },
+  /* 18 番号                */ { kind: "string", value: "" },
+  /* 19 期日                */ { kind: "string", value: "" },
+  /* 20 タイプ              */ { kind: "number", value: 3 },
+  /* 21 生成元              */ { kind: "string", value: "" },
+  /* 22 仕訳メモ            */ { kind: "string", value: "" },
+  /* 23 付箋1               */ { kind: "string", value: "0" },
+  /* 24 付箋2               */ { kind: "string", value: "0" },
+  /* 25 調整                */ { kind: "string", value: "no" },
+];
+
+// プレビュー rows から「複合仕訳」単位の伝票配列を組み立てる。
+//   mode === "aggregate" : 全行を 1 伝票にまとめる
+//   mode === "byEmployee": employeeId でグルーピングして 1 社員 = 1 伝票
+// 戻り値: [{ employeeId, employeeName, rows: [previewRow,...] }, ...]
+const groupPreviewRowsToVouchers = (previewRows, mode) => {
+  if (mode === "byEmployee") {
+    const map = new Map();
+    previewRows.forEach((r) => {
+      const k = r.employeeId || "";
+      if (!map.has(k)) map.set(k, { employeeId: k, employeeName: r.employeeName || "", rows: [] });
+      map.get(k).rows.push(r);
+    });
+    return Array.from(map.values());
+  }
+  // aggregate: 単一伝票
+  return [{ employeeId: "", employeeName: "", rows: previewRows.slice() }];
+};
+
+// 弥生取込前チェック サマリ生成 (pure helper)。
+// プレビュー rows を読むだけで I/O や保存処理は無し。
+// 仕訳プレビューモーダル内に「弥生取込前チェック」パネルを表示するためのチェック結果を返す。
+// 本 helper は出力を止めない (停止判定は buildYayoiJournalText 側の最終バリデーションが担う)。
+// 二重チェック構造: 画面チェック (ここ) = 事前確認 / 出力時チェック = 実際の出力を止める。
+//
+// 戻り値:
+//   {
+//     overallStatus : "ok" | "warning" | "error",
+//     items: [{ key, label, status, message }],
+//     voucherCount, rowCount, maxRowsPerVoucher
+//   }
+//   status は 4 種: "ok" / "warning" / "error" / "info" (情報表示専用)。
+const buildYayoiPrecheckSummary = ({ rows, mode, debitTotal, creditTotal, diff }) => {
+  const items = [];
+  const _rows = rows || [];
+
+  // 伝票単位にグルーピング (buildYayoiJournalText の groupPreviewRowsToVouchers と同じ規則)。
+  let vouchers;
+  if (mode === "byEmployee") {
+    const map = new Map();
+    _rows.forEach((r) => {
+      const k = r.employeeId || "";
+      if (!map.has(k)) map.set(k, { employeeName: r.employeeName || "", rows: [] });
+      map.get(k).rows.push(r);
+    });
+    vouchers = Array.from(map.values());
+  } else {
+    vouchers = _rows.length > 0 ? [{ employeeName: "", rows: _rows.slice() }] : [];
+  }
+  const voucherCount = vouchers.length;
+  const rowCount = _rows.length;
+  const maxRowsPerVoucher = vouchers.reduce((m, v) => Math.max(m, v.rows.length), 0);
+
+  // 1. 伝票数 (情報のみ)。
+  items.push({
+    key: "voucherCount",
+    label: "伝票数",
+    status: "info",
+    message:
+      rowCount === 0
+        ? "対象行なし"
+        : `${voucherCount}件 (${mode === "byEmployee" ? "社員ごとに1伝票" : "合算で1伝票"})`,
+  });
+
+  // 2. 20行制限。1伝票あたり20行を超えると弥生取込NG。
+  const over = vouchers.filter((v) => v.rows.length > 20).length;
+  items.push({
+    key: "voucherRows",
+    label: "20行制限",
+    status: rowCount === 0 ? "info" : over > 0 ? "error" : "ok",
+    message:
+      rowCount === 0
+        ? "行なし"
+        : over > 0
+          ? `${over}伝票が20行超過 (最大${maxRowsPerVoucher}行 / 20行)`
+          : `最大${maxRowsPerVoucher}行 / 20行 (全体${rowCount}行)`,
+  });
+
+  // 3. 借方/貸方一致。
+  items.push({
+    key: "balance",
+    label: "借方/貸方一致",
+    status: rowCount === 0 ? "info" : (diff || 0) === 0 ? "ok" : "error",
+    message:
+      rowCount === 0
+        ? "対象行なし"
+        : (diff || 0) === 0
+          ? `一致 (借方${Number(debitTotal || 0).toLocaleString()}円 / 貸方${Number(creditTotal || 0).toLocaleString()}円)`
+          : `不一致 (差額 ${Number(diff || 0).toLocaleString()}円)`,
+  });
+
+  // 4. 日付混在 (伝票内に複数日付がある場合は出力NG)。
+  let dateMixed = false;
+  vouchers.forEach((v) => {
+    const uniq = new Set(v.rows.map((r) => r.date || "").filter((d) => d !== ""));
+    if (uniq.size > 1) dateMixed = true;
+  });
+  items.push({
+    key: "dateMix",
+    label: "日付混在",
+    status: rowCount === 0 ? "info" : dateMixed ? "error" : "ok",
+    message: rowCount === 0 ? "—" : dateMixed ? "伝票内に複数の取引日付が混在" : "単一日付",
+  });
+
+  // 5. 勘定科目未設定 (空欄 / "(未設定)" フォールバック値)。
+  const missingAcc = _rows.filter(
+    (r) =>
+      (r.debitAmount  > 0 && (!r.debitAccount  || r.debitAccount  === "(未設定)")) ||
+      (r.creditAmount > 0 && (!r.creditAccount || r.creditAccount === "(未設定)"))
+  ).length;
+  items.push({
+    key: "account",
+    label: "勘定科目",
+    status: missingAcc > 0 ? "error" : "ok",
+    message: missingAcc > 0 ? `未設定 ${missingAcc}件` : "設定済み",
+  });
+
+  // 6. 補助科目あり (注意レベル: 弥生マスタに存在しないと取込NG)。
+  const subAccRows = _rows.filter(
+    (r) =>
+      (r.debitAmount  > 0 && r.debitSubAccount) ||
+      (r.creditAmount > 0 && r.creditSubAccount)
+  ).length;
+  items.push({
+    key: "subAccount",
+    label: "補助科目",
+    status: subAccRows > 0 ? "warning" : "ok",
+    message:
+      subAccRows > 0
+        ? `あり ${subAccRows}件 (弥生マスタに同名が無いと取込NG)`
+        : "なし",
+  });
+
+  // 7. 税区分: JOURNAL_TAX_CATEGORIES の現行候補と一致するか。
+  //    旧値 (例: "課税仕入 10%" "課税仕入 8%") などが残っていれば注意表示。
+  const legacyTax = _rows
+    .map((r) => r.taxCategory || "")
+    .filter((tc) => tc && !JOURNAL_TAX_CATEGORIES.includes(tc));
+  const legacyTaxSet = Array.from(new Set(legacyTax));
+  items.push({
+    key: "tax",
+    label: "税区分",
+    status: legacyTaxSet.length > 0 ? "warning" : "ok",
+    message:
+      legacyTaxSet.length > 0
+        ? `候補外/旧値あり: ${legacyTaxSet.slice(0, 3).join(" / ")}`
+        : "OK",
+  });
+
+  // 8. 金額: マイナス または NaN (出力NG)。
+  const badAmt = _rows.filter((r) => {
+    const d = Number(r.debitAmount);
+    const c = Number(r.creditAmount);
+    return !Number.isFinite(d) || !Number.isFinite(c) || d < 0 || c < 0;
+  }).length;
+  items.push({
+    key: "amount",
+    label: "金額",
+    status: badAmt > 0 ? "error" : "ok",
+    message: badAmt > 0 ? `マイナス/NaN ${badAmt}件` : "OK",
+  });
+
+  // 9. 部門 (注意: 弥生で取り込まれない可能性)。
+  const deptRows = _rows.filter((r) => r.debitDepartment || r.creditDepartment).length;
+  items.push({
+    key: "dept",
+    label: "部門列",
+    status: deptRows > 0 ? "warning" : "ok",
+    message:
+      deptRows > 0
+        ? `あり ${deptRows}件 (弥生側で取り込まれない可能性)`
+        : "なし",
+  });
+
+  // 10. 集約グループ (情報): groupLabel が反映されている行を集計。
+  const usedGroups = Array.from(
+    new Set(_rows.map((r) => (r.groupLabel || "").toString().trim()).filter((g) => g))
+  );
+  items.push({
+    key: "group",
+    label: "集約グループ",
+    status: "info",
+    message:
+      usedGroups.length > 0
+        ? `${usedGroups.length}グループ適用中 (${usedGroups.slice(0, 3).join(" / ")})`
+        : "未使用 (個別ラベルで出力)",
+  });
+
+  // 11. 文字コード (情報: SJIS 固定)。
+  items.push({
+    key: "encoding",
+    label: "文字コード",
+    status: "info",
+    message: "Shift-JIS (CP932) 固定",
+  });
+
+  const hasError = items.some((i) => i.status === "error");
+  const hasWarning = items.some((i) => i.status === "warning");
+  const overallStatus = hasError ? "error" : hasWarning ? "warning" : "ok";
+
+  return { overallStatus, items, voucherCount, rowCount, maxRowsPerVoucher };
+};
+
+// 弥生取込テキスト 全体生成 (pure helper)。
+// 中身はカンマ区切り 27 列のままで、出力ファイルの拡張子だけ .txt にする想定。
+// 引数:
+//   previewRows : buildMonthlyJournalPreview の戻り値 .rows
+//   mode        : "aggregate" | "byEmployee" (プレビューと同一)
+//   year        : "R08" 等 (摘要・ファイル名候補に使用。helper はファイル名は返さない)
+//   monthKey    : "01"-"12"
+// 戻り値:
+//   { textBody, warnings, errors, success, voucherCount, rowCount }
+//     errors.length > 0 のときは success=false / textBody="" を返す。
+//     warnings は摘要切詰など軽微な事項。
+const buildYayoiJournalText = ({ previewRows, mode, year, monthKey }) => {
+  const errors = [];
+  const warnings = [];
+
+  if (!previewRows || previewRows.length === 0) {
+    errors.push("仕訳行が0件のため、取込テキストを出力できません。");
+    return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
+  }
+  if (monthKey === "bonus" || monthKey === "bonus2") {
+    errors.push("賞与仕訳の取込テキスト出力は今回スコープ外です。");
+    return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
+  }
+
+  const vouchers = groupPreviewRowsToVouchers(previewRows, mode);
+
+  // 伝票No: 参考ファイル siwake.txt では 2 列目に整数の伝票No (例: 38) が入る。
+  // 今回は自動採番として「出力単位の連番」を仮値で割当 (aggregate=1 のみ / byEmployee=1,2,3,...)。
+  // ユーザーが任意の伝票Noで運用したい場合は将来 settings 化を検討。
+  let voucherCounter = 0;
+
+  // 各伝票を検証 → カンマ区切り行配列に変換。1つでもエラーがあれば textBody を返さない (全部止める)。
+  const csvLines = [];
+  vouchers.forEach((v) => {
+    const rows = v.rows || [];
+    const empLabel = v.employeeName ? `[${v.employeeName}] ` : "";
+
+    if (rows.length === 0) return;
+
+    voucherCounter++;
+    const voucherNo = voucherCounter;
+
+    // (1) 行数制限
+    if (rows.length > 20) {
+      errors.push(`${empLabel}複合仕訳が ${rows.length} 行で 20 行上限を超えています。取込テキスト出力を停止しました。`);
+      return;
+    }
+
+    // (2) 日付検証: 伝票内すべての行が同一日付であること + フォーマット
+    const dates = rows.map((r) => r.date || "");
+    const uniqueDates = Array.from(new Set(dates.filter((d) => d !== "")));
+    if (uniqueDates.length === 0) {
+      errors.push(`${empLabel}伝票の取引日付が空です。`);
+      return;
+    }
+    if (uniqueDates.length > 1) {
+      errors.push(`${empLabel}伝票内に複数の取引日付が混在しています (${uniqueDates.join(" / ")})。同一日付に揃えてから再出力してください。`);
+      return;
+    }
+    const voucherDate = formatYayoiDate(uniqueDates[0]);
+    if (!voucherDate) {
+      errors.push(`${empLabel}取引日付「${uniqueDates[0]}」が不正な形式です (YYYY-MM-DD 期待)。`);
+      return;
+    }
+
+    // (3) 各行の金額・科目検証 + 借方/貸方合計
+    let voucherDebitSum = 0;
+    let voucherCreditSum = 0;
+    const rowBuffer = [];
+    let rowOk = true;
+    rows.forEach((r, idx) => {
+      const isDebitRow  = (Number(r.debitAmount)  || 0) > 0;
+      const isCreditRow = (Number(r.creditAmount) || 0) > 0;
+      if (!isDebitRow && !isCreditRow) {
+        errors.push(`${empLabel}${idx + 1} 行目: 金額が 0 です (CSV出力対象外)。`);
+        rowOk = false;
+        return;
+      }
+
+      const di = safeIntForYayoi(r.debitAmount);
+      const ci = safeIntForYayoi(r.creditAmount);
+      if (!di.ok) {
+        errors.push(`${empLabel}${idx + 1} 行目: 借方金額が${di.reason === "nan" ? "数値ではありません" : "マイナスです"}。`);
+        rowOk = false; return;
+      }
+      if (!ci.ok) {
+        errors.push(`${empLabel}${idx + 1} 行目: 貸方金額が${ci.reason === "nan" ? "数値ではありません" : "マイナスです"}。`);
+        rowOk = false; return;
+      }
+
+      const dAcc = isDebitRow  ? (r.debitAccount  || "").trim() : "";
+      const cAcc = isCreditRow ? (r.creditAccount || "").trim() : "";
+      if (isDebitRow && (!dAcc || dAcc === "(未設定)")) {
+        errors.push(`${empLabel}${idx + 1} 行目 (${r.itemLabel || "?"}): 借方勘定科目が未設定です。仕訳マッピング設定を見直してください。`);
+        rowOk = false; return;
+      }
+      if (isCreditRow && (!cAcc || cAcc === "(未設定)")) {
+        errors.push(`${empLabel}${idx + 1} 行目 (${r.itemLabel || "?"}): 貸方勘定科目が未設定です。仕訳マッピング設定を見直してください。`);
+        rowOk = false; return;
+      }
+
+      voucherDebitSum  += di.value;
+      voucherCreditSum += ci.value;
+
+      // 摘要切り詰め
+      const _desc = truncateYayoiDescription(r.description || "");
+      if (_desc.truncated) {
+        warnings.push(`${empLabel}摘要「${(r.description || "").slice(0, 20)}…」を 30 文字に切り詰めました。`);
+      }
+
+      rowBuffer.push({
+        debitAmount:      di.value,
+        creditAmount:     ci.value,
+        debitAccount:     isDebitRow  ? dAcc : "",
+        debitSubAccount:  isDebitRow  ? (r.debitSubAccount  || "") : "",
+        debitDepartment:  isDebitRow  ? (r.debitDepartment  || "") : "",
+        // 参考ファイル siwake.txt では借方税区分・貸方税区分の両方が常に「対象外」になっている。
+        // 金額が0の側でも空欄にせず、taxCategory (デフォルト "対象外") を必ず入れる。
+        debitTaxCategory: r.taxCategory || "対象外",
+        creditAccount:    isCreditRow ? cAcc : "",
+        creditSubAccount: isCreditRow ? (r.creditSubAccount || "") : "",
+        creditDepartment: isCreditRow ? (r.creditDepartment || "") : "",
+        creditTaxCategory:r.taxCategory || "対象外",
+        description:      _desc.text,
+        date:             voucherDate,
+      });
+    });
+
+    if (!rowOk) return;
+
+    // (4) 伝票単位での借方/貸方合計一致
+    if (voucherDebitSum !== voucherCreditSum) {
+      errors.push(`${empLabel}伝票の借方合計 (${voucherDebitSum.toLocaleString()}円) と貸方合計 (${voucherCreditSum.toLocaleString()}円) が一致しません (差額: ${(voucherDebitSum - voucherCreditSum).toLocaleString()}円)。`);
+      return;
+    }
+
+    // (5) 識別フラグの決定: 1 行のみなら 2000、複数行なら 2110/2100/2101
+    const n = rowBuffer.length;
+    rowBuffer.forEach((rb, i) => {
+      let flag;
+      if (n === 1) flag = "2000";
+      else if (i === 0) flag = "2110";
+      else if (i === n - 1) flag = "2101";
+      else flag = "2100";
+
+      const cells = toYayoiTextRow({
+        flag,
+        voucherNo,
+        date: rb.date,
+        debitAccount: rb.debitAccount,
+        debitSubAccount: rb.debitSubAccount,
+        debitDepartment: rb.debitDepartment,
+        debitTaxCategory: rb.debitTaxCategory,
+        debitAmount: rb.debitAmount,
+        creditAccount: rb.creditAccount,
+        creditSubAccount: rb.creditSubAccount,
+        creditDepartment: rb.creditDepartment,
+        creditTaxCategory: rb.creditTaxCategory,
+        creditAmount: rb.creditAmount,
+        description: rb.description,
+      });
+      // 各セルを {kind, value} 形式から弥生取込仕様 (文字列はクォート、数値は生) に整形して連結。
+      csvLines.push(cells.map(formatYayoiCell).join(","));
+    });
+  });
+
+  if (errors.length > 0) {
+    return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
+  }
+  if (csvLines.length === 0) {
+    errors.push("取込テキストに出力可能な仕訳行がありません。");
+    return { textBody: "", warnings, errors, success: false, voucherCount: 0, rowCount: 0 };
+  }
+
+  // 弥生のインポート仕様にはヘッダ行は不要 (フォーマット固定)。改行は CRLF。
+  // 区切り文字はカンマ (タブ区切り TSV ではない)。拡張子のみ .txt にしてダウンロードする。
+  const textBody = csvLines.join("\r\n") + "\r\n";
+  return {
+    textBody,
+    warnings,
+    errors: [],
+    success: true,
+    voucherCount: vouchers.length,
+    rowCount: csvLines.length,
+  };
+};
+
+// 弥生取込テキスト ファイル名生成。Windows 不可文字は除去。拡張子は .txt 固定。
+// 例: 給与仕訳_R08_05_合算_弥生取込.txt / 給与仕訳_R08_05_従業員別_弥生取込.txt
+const buildYayoiTextFilename = (year, monthKey, mode) => {
+  const _safe = (s) => String(s || "").replace(/[\\/:*?"<>|]/g, "");
+  const _mLabel = mode === "byEmployee" ? "従業員別" : "合算";
+  return `給与仕訳_${_safe(year)}_${_safe(monthKey)}_${_mLabel}_弥生取込.txt`;
+};
+
 // ============================================================================
 // [UIコンポーネント] 月次締めダッシュボード 行アイテム
 // ============================================================================
-const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onUnlock, onViewDetails, onPrintSummary, onPrintPayslip }) => {
+const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onUnlock, onViewDetails, onPrintSummary, onPrintPayslip, onPreviewJournal }) => {
   const [unlockReason, setUnlockReason] = useState("");
 
   return (
@@ -3337,6 +4585,17 @@ const MonthlyCloseRow = React.memo(({ status, selectedYear, onCheck, onLock, onU
             <button onClick={() => onPrintPayslip(status.monthKey)} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-indigo-600 hover:bg-indigo-50 border border-indigo-200 shadow-sm">
               <Printer size={14} /> 給与明細
             </button>
+            {/* 弥生会計連携・第2弾: 仕訳プレビュー (画面表示のみ。CSV出力・仕訳保存は未実装)。
+                月次給与の対象のみ。賞与は将来対応。 */}
+            {onPreviewJournal && status.monthKey !== "bonus" && status.monthKey !== "bonus2" && (
+              <button
+                onClick={() => onPreviewJournal(status.monthKey)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-white text-sky-600 hover:bg-sky-50 border border-sky-200 shadow-sm"
+                title="月次給与の仕訳プレビューを表示します (CSV出力は未実装)"
+              >
+                <Search size={14} /> 仕訳プレビュー
+              </button>
+            )}
           </>
         )}
 
@@ -3455,11 +4714,13 @@ const MonthlyCloseDashboard = React.memo(({
   handleMonthlyCheck, handleLockMonth, handleUnlockMonth,
   startBulkPrint, BULK_PRINT_TYPES,
   setMonthlyClosePrintMode, setCheckModalData,
-  monthlyLocks, showLockHistoryKey, setShowLockHistoryKey
+  monthlyLocks, showLockHistoryKey, setShowLockHistoryKey,
+  openJournalPreview,
 }) => {
   const actions = useMonthlyCloseActions({
     selectedYear, setMonthlyCloseMonth, handleMonthlyCheck, handleLockMonth, handleUnlockMonth,
-    startBulkPrint, BULK_PRINT_TYPES, setMonthlyClosePrintMode, setCheckModalData
+    startBulkPrint, BULK_PRINT_TYPES, setMonthlyClosePrintMode, setCheckModalData,
+    openJournalPreview,
   });
 
   return (
@@ -3568,6 +4829,7 @@ const MonthlyCloseDashboard = React.memo(({
                 onViewDetails={actions.handleViewDetails}
                 onPrintSummary={actions.handlePrintSummary}
                 onPrintPayslip={actions.handlePrintPayslip}
+                onPreviewJournal={actions.handlePreviewJournal}
               />
             ))}
           </div>
@@ -4378,6 +5640,23 @@ const App = () => {
 
   const [logModalData, setLogModalData] = useState(null); // ★追加: 計算ログモーダル用の状態
   const [checkModalData, setCheckModalData] = useState(null); // ★追加: 月次チェックモーダル用の状態（モーダル表示制御）
+  // 弥生会計連携・第2弾: 月次給与 仕訳プレビュー モーダル用 state。
+  // open=false で非表示。年・月は当時の selectedYear / monthKey を凍結 (年切替で消えないように)。
+  // mode/dateMode はユーザー操作で切替。CSV出力・Firestore保存は未実装。
+  const [journalPreview, setJournalPreview] = useState({
+    open: false,
+    year: null,
+    monthKey: null,
+    mode: "aggregate",      // "aggregate" | "byEmployee"
+    // 給与計上仕訳としては「計算期間終了日」(periodEnd) で計上するのが基本のため初期値はこれ。
+    // ユーザーは取引日付トグルで「支給日」「月末」へ切替可能。
+    dateMode: "periodEnd",  // "payDate" | "periodEnd" | "monthEnd"
+    // 弥生取込テキスト出力 結果表示用 (モーダル内 警告パネル下にエラー/成功通知を表示)。
+    // 構造: null | { errors: string[], warnings: string[], success: bool, filename?: string }
+    textResult: null,
+    // 文字コードは Shift-JIS / CP932 固定 (弥生公式仕様)。
+    // 以前は state で UTF-8 と切替可能だったが、実務上 SJIS のみで運用するため切替UI・state ともに廃止。
+  });
   // ★月次チェック結果の年×月別履歴: { [year]: { [month]: { errors, warnings, infos, at } } }
   // 月次締め画面のサマリー表示で参照。モーダルを閉じても消えず、月切替・年切替でも復元される。
   // 将来的な「月別履歴」「再確認」拡張のための土台でもある。Firestore には保存しない（実行時のみ保持）。
@@ -8592,6 +9871,131 @@ const App = () => {
     const newSettings = { ...settings, [field]: value };
     setSettings(newSettings);
     handleSaveSettingsObj(newSettings);
+  };
+
+  // ============================================================================
+  // 弥生会計連携: 部門マスタ / 仕訳マッピング 更新 helper
+  // ----------------------------------------------------------------------------
+  // handleSettingChange は top-level shallow merge のため、journalMapping のような
+  // ネスト構造を「部分更新」しようとすると他のキーが消える。
+  // 以下の helper は「変更前 settings.journalMapping を起点に新しいツリーを構築 → 全体を渡す」
+  // 方式で安全に部分更新する。
+  //   * 固定キー (basePayEmployee 等) の更新 -> jm[key] のみ差し替え、他キーは保持
+  //   * allowances[allowanceId] の更新     -> allowances 全体を新オブジェクトで差し替え、deductions と固定キーは保持
+  //   * deductions[deductionId] の更新     -> 同上 (deductions 側)
+  // ============================================================================
+  const getJournalMapping = () =>
+    settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
+
+  const updateJournalMappingFixed = (key, patch) => {
+    const jm = getJournalMapping();
+    const cur = jm[key] || DEFAULT_SETTINGS.journalMapping[key] || JOURNAL_DEFAULT_ALLOWANCE;
+    const newJM = { ...jm, [key]: { ...cur, ...patch } };
+    handleSettingChange("journalMapping", newJM);
+  };
+
+  const updateJournalMappingAllowance = (allowanceId, patch) => {
+    const jm = getJournalMapping();
+    const allowances = jm.allowances || {};
+    // 未保存時のフォールバックは def に応じた標準値を使う (例: 通勤手当の課対仕入込10% が、
+    // 借/貸切替などで他フィールドだけ編集された場合に「対象外」に戻されないように)。
+    // 削除済み定義 (def 未取得) でも getDefaultAllowanceJournalMapping は安全に標準値を返す。
+    const def = (settings.allowanceDefinitions || []).find((d) => d?.id === allowanceId);
+    const cur = allowances[allowanceId] || getDefaultAllowanceJournalMapping(def);
+    const newJM = {
+      ...jm,
+      allowances: { ...allowances, [allowanceId]: { ...cur, ...patch } },
+    };
+    handleSettingChange("journalMapping", newJM);
+  };
+
+  const updateJournalMappingDeduction = (deductionId, patch) => {
+    const jm = getJournalMapping();
+    const deductions = jm.deductions || {};
+    const cur = deductions[deductionId] || JOURNAL_DEFAULT_DEDUCTION;
+    const newJM = {
+      ...jm,
+      deductions: { ...deductions, [deductionId]: { ...cur, ...patch } },
+    };
+    handleSettingChange("journalMapping", newJM);
+  };
+
+  // 現在の手当/控除定義をベースに、仕訳マッピングを標準値で再生成する pure helper。
+  //   * 固定 10 項目: DEFAULT_SETTINGS.journalMapping の値を deep clone (incomeTax="所得税" / residentTax="住民税" / 他 subAccount="" / departmentMode="none")
+  //   * 動的手当:    settings.allowanceDefinitions に存在する id だけ JOURNAL_DEFAULT_ALLOWANCE で再生成 (削除済み定義の残骸は引き継がない)
+  //   * 動的控除:    settings.deductionDefinitions に存在する id だけ JOURNAL_DEFAULT_DEDUCTION で再生成 (同上)
+  // settings.departments / 社員 master.departmentId / 手当・控除定義そのものは触らない。
+  const buildDefaultJournalMappingForCurrentDefinitions = () => {
+    // JSON parse/stringify で deep clone (structuredClone 未対応環境への保険)。
+    const base = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.journalMapping));
+    const allowanceMappings = {};
+    (settings.allowanceDefinitions || []).forEach((def) => {
+      if (def && def.id) {
+        // def に応じた標準値 (通勤手当のみ taxCategory="課対仕入込10%"、それ以外は対象外)。
+        allowanceMappings[def.id] = getDefaultAllowanceJournalMapping(def);
+      }
+    });
+    const deductionMappings = {};
+    (settings.deductionDefinitions || []).forEach((def) => {
+      if (def && def.id) {
+        deductionMappings[def.id] = { ...JOURNAL_DEFAULT_DEDUCTION };
+      }
+    });
+    return {
+      ...base,
+      allowances: allowanceMappings,
+      deductions: deductionMappings,
+    };
+  };
+
+  // 「標準設定に戻す」操作: 明示的なボタン押下 + 確認ダイアログ承認時のみ実行される。
+  // 自動適用やマイグレーションはせず、ユーザー意思を都度確認する。
+  // 既存の handleSettingChange("journalMapping", ...) ルートに乗せるため、
+  // Firestore 保存も他の設定変更と同じ経路で行われる (専用保存処理は追加しない)。
+  const resetJournalMappingToDefault = () => {
+    if (!window.confirm(
+      "仕訳勘定科目設定を標準設定に戻します。\n" +
+      "現在入力されている勘定科目、補助科目、借方貸方、税区分、部門設定は上書きされます。\n\n" +
+      "部門マスタや社員の所属部門は変更されません。\n" +
+      "月次給与・賞与データにも影響しません。\n\n" +
+      "実行しますか？"
+    )) return;
+    const newJM = buildDefaultJournalMappingForCurrentDefinitions();
+    handleSettingChange("journalMapping", newJM);
+  };
+
+  // 部門マスタ操作: 配列の add / update / remove。
+  // 削除時のみ確認ダイアログを出し、使用中社員への影響を注意喚起する。
+  // (使用中社員の departmentId 自動クリーンアップは今回スコープ外 — UI 側でフォールバック表示する)。
+  const addDepartment = () => {
+    const newDept = {
+      id: `dept_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      code: "",
+      name: "新部門",
+      yayoiName: "",
+    };
+    const newDepts = [...(settings.departments || []), newDept];
+    handleSettingChange("departments", newDepts);
+  };
+
+  const updateDepartment = (index, patch) => {
+    const list = [...(settings.departments || [])];
+    if (!list[index]) return;
+    list[index] = { ...list[index], ...patch };
+    handleSettingChange("departments", list);
+  };
+
+  const removeDepartment = (index) => {
+    const dept = (settings.departments || [])[index];
+    if (!dept) return;
+    if (
+      !window.confirm(
+        `部門【${dept.name || "(無題)"}】を削除しますか？\n\nこの部門を使用中の社員がいる場合、部門なし扱いになる可能性があります。`
+      )
+    )
+      return;
+    const list = (settings.departments || []).filter((_, i) => i !== index);
+    handleSettingChange("departments", list);
   };
 
   const handleEditableYearChange = (e) => {
@@ -15580,7 +16984,10 @@ const App = () => {
 
         {activeTab === "settings" && (
           <div className="p-6 max-w-[2100px] mx-auto h-full overflow-y-auto">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden max-w-4xl mx-auto mt-4 mb-20">
+            {/* 会社共通設定は入力項目・テーブル列数が多いため、外側ラッパー (max-w-[2100px] mx-auto)
+                の幅をそのまま使う。max-w-4xl mx-auto の中央寄せ制限は外す。
+                仕訳勘定科目設定テーブルはこのカード内部で overflow-x-auto + min-w-[1280px] 維持 (L17486-17487)。 */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden w-full max-w-none mt-4 mb-20">
               <div className="bg-slate-800 px-6 py-4 flex items-center gap-2 text-white">
                 <Settings className="text-orange-400" size={20} />
                 <h2 className="font-black text-sm tracking-widest uppercase">
@@ -16322,7 +17729,531 @@ const App = () => {
 
                 {/* (源泉徴収税額表管理はポータルへ移動しました) */}
 
-                {/* 6. バックアップ管理 */}
+                {/* 5. 部門設定 (弥生会計連携・第1弾) */}
+                <section>
+                  <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">
+                    部門設定（弥生会計連携用）
+                  </h3>
+                  <div className="bg-sky-50 border border-sky-200 text-sky-700 p-3 rounded-lg mb-4 text-xs font-bold">
+                    <p className="flex items-center gap-1 mb-1">
+                      <Info size={14} /> 弥生会計仕訳出力時の「部門ディメンション」用マスタです。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 部門は任意です。未設定でも給与計算・支給控除一覧・賃金台帳は通常通り動作します。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 弥生会計 CSV 出力ロジック自体は次回以降の実装になります。
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-50 p-5 rounded-lg border border-slate-200">
+                    <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                      <h4 className="text-sm font-black text-sky-700 flex items-center gap-2">
+                        <Tag size={16} /> 部門一覧
+                      </h4>
+                      <button
+                        onClick={addDepartment}
+                        className="px-3 py-1.5 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded flex items-center gap-1 transition-colors"
+                      >
+                        <PlusCircle size={14} /> 部門を追加
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {(settings?.departments || []).map((dept, idx) => (
+                        <div
+                          key={dept.id}
+                          className="grid grid-cols-12 gap-3 items-end bg-white border border-slate-200 rounded-lg p-3 shadow-sm hover:border-sky-300 transition-colors"
+                        >
+                          <div className="col-span-3">
+                            <label className="text-[10px] font-bold text-slate-500 block mb-1">
+                              部門コード
+                            </label>
+                            <input
+                              value={dept.code || ""}
+                              onChange={(e) =>
+                                updateDepartment(idx, { code: e.target.value })
+                              }
+                              className="text-sm font-mono bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-sky-500 w-full"
+                              placeholder="001"
+                            />
+                          </div>
+                          <div className="col-span-4">
+                            <label className="text-[10px] font-bold text-slate-500 block mb-1">
+                              部門名（画面表示用）
+                            </label>
+                            <input
+                              value={dept.name || ""}
+                              onChange={(e) =>
+                                updateDepartment(idx, { name: e.target.value })
+                              }
+                              className="text-sm font-bold bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-sky-500 w-full"
+                              placeholder="管理部"
+                            />
+                          </div>
+                          <div className="col-span-4">
+                            <label className="text-[10px] font-bold text-slate-500 block mb-1">
+                              弥生出力名（空欄なら部門名を使用）
+                            </label>
+                            <input
+                              value={dept.yayoiName || ""}
+                              onChange={(e) =>
+                                updateDepartment(idx, {
+                                  yayoiName: e.target.value,
+                                })
+                              }
+                              className="text-sm bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-sky-500 w-full"
+                              placeholder="(部門名と同じ)"
+                            />
+                          </div>
+                          <div className="col-span-1 flex justify-end">
+                            <button
+                              onClick={() => removeDepartment(idx)}
+                              className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                              title="削除"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {(!settings?.departments ||
+                        settings.departments.length === 0) && (
+                        <p className="text-xs text-slate-400 text-center py-4 font-bold">
+                          部門が登録されていません（部門なしのみで運用可）
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {/* 6. 仕訳勘定科目設定 (弥生会計連携・第1弾) */}
+                <section>
+                  {/* 見出し + 「標準設定に戻す」ボタン (右寄せ)。確認ダイアログ承認時のみ実行。 */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b pb-2">
+                    <h3 className="text-sm font-bold text-slate-700">
+                      仕訳勘定科目設定（弥生会計連携用）
+                    </h3>
+                    <button
+                      onClick={resetJournalMappingToDefault}
+                      className="px-3 py-1.5 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded border border-amber-300 transition-colors flex items-center gap-1"
+                      title="現在の手当・控除定義に合わせて仕訳マッピングをDEFAULT_SETTINGSの標準値で再生成します。確認ダイアログあり。"
+                    >
+                      ⟲ 標準設定に戻す
+                    </button>
+                  </div>
+                  <div className="bg-sky-50 border border-sky-200 text-sky-700 p-3 rounded-lg mb-4 text-xs font-bold">
+                    <p className="flex items-center gap-1 mb-1">
+                      <Info size={14} /> 給与/賞与の各項目を弥生会計の勘定科目にどう対応させるかを設定します。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 健保・厚年・介護・子ども子育て・雇用保険の本人負担分は、初期値で「貸方 法定福利費」(逆仕訳方針) になっています。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 弥生会計 CSV 出力・仕訳生成・月次締めへの連携ボタンは次回以降の実装になります。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※「標準設定に戻す」を押すと、現在の手当・控除定義に合わせて仕訳マッピングが初期化されます (削除済み定義の残骸も整理されます)。部門マスタや社員の所属部門、給与データには影響しません。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※「集約グループ」列に同じ名前を入れた項目は、仕訳プレビュー上で同じ摘要として 1 行に集約されます。<span className="font-bold">ただし、勘定科目・補助科目・借貸・税区分・部門が異なる場合は、同じ集約グループ名でも別行のまま</span>になります (会計属性は絶対に混ぜません)。
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-50 p-5 rounded-lg border border-slate-200 overflow-x-auto">
+                    <table className="w-full text-xs border-collapse min-w-[1280px]">
+                      <thead className="bg-slate-100 text-slate-700">
+                        <tr>
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold">項目</th>
+                          <th className="border border-slate-200 px-2 py-2 text-center font-bold w-[80px]">借/貸</th>
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold">勘定科目</th>
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold">補助科目</th>
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[110px]">税区分</th>
+                          <th className="border border-slate-200 px-2 py-2 text-center font-bold w-[140px]">部門設定</th>
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[180px]">固定部門</th>
+                          {/* 集約グループ: 同名+同会計属性で1行に集約。会計属性が違えば別行になる (安全制限)。 */}
+                          <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[140px]">集約グループ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* 固定項目 */}
+                        {JOURNAL_FIXED_ITEMS.map((item) => {
+                          const jm = settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
+                          const cur =
+                            jm[item.key] ||
+                            DEFAULT_SETTINGS.journalMapping[item.key] ||
+                            JOURNAL_DEFAULT_ALLOWANCE;
+                          return (
+                            <tr key={item.key} className="bg-white hover:bg-sky-50/40 transition-colors">
+                              <td className="border border-slate-200 px-2 py-1.5 font-bold text-slate-700">
+                                {item.label}
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.dc || "debit"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { dc: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  <option value="debit">借方</option>
+                                  <option value="credit">貸方</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.account || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { account: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="勘定科目"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.subAccount || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { subAccount: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="補助科目（任意）"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.taxCategory || "対象外"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { taxCategory: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  {JOURNAL_TAX_CATEGORIES.map((tc) => (
+                                    <option key={tc} value={tc}>{tc}</option>
+                                  ))}
+                                  {/* 既存データに候補外の値が残っていた場合の救済 (表記揺れ・旧データの保護)。 */}
+                                  {cur.taxCategory && !JOURNAL_TAX_CATEGORIES.includes(cur.taxCategory) && (
+                                    <option value={cur.taxCategory}>{cur.taxCategory}（旧値）</option>
+                                  )}
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.departmentMode || "none"}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, {
+                                      departmentMode: e.target.value,
+                                    })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                >
+                                  <option value="employee">社員部門</option>
+                                  <option value="none">部門なし</option>
+                                  <option value="fixed">固定部門</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.fixedDepartmentId || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, {
+                                      fixedDepartmentId: e.target.value,
+                                    })
+                                  }
+                                  disabled={cur.departmentMode !== "fixed"}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500 disabled:bg-slate-100 disabled:text-slate-400"
+                                >
+                                  <option value="">(未選択)</option>
+                                  {(settings.departments || []).map((d) => (
+                                    <option key={d.id} value={d.id}>
+                                      {d.code ? `${d.code} ` : ""}{d.name || "(無題)"}
+                                    </option>
+                                  ))}
+                                  {/* 削除済み部門ID救済: 過去に設定した固定部門が departments から
+                                      削除されている場合、option が消えると React 警告 + ユーザー認知不能になる。
+                                      現在値が存在しない場合のみ「(削除済み)」option を追加する。 */}
+                                  {cur.fixedDepartmentId &&
+                                    !(settings.departments || []).some(
+                                      (d) => d.id === cur.fixedDepartmentId
+                                    ) && (
+                                      <option value={cur.fixedDepartmentId}>
+                                        (削除済み: {cur.fixedDepartmentId})
+                                      </option>
+                                    )}
+                                </select>
+                              </td>
+                              {/* 集約グループ: 仕訳プレビュー上で同名+同会計属性の行を 1 本に集約する補助設定。 */}
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.groupLabel || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingFixed(item.key, { groupLabel: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-sky-500"
+                                  placeholder="（任意）例: 社会保険料"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* 動的: 手当 */}
+                        {(settings.allowanceDefinitions || []).length > 0 && (
+                          <tr>
+                            <td colSpan={8} className="bg-indigo-50 text-indigo-700 font-bold px-2 py-1 text-[11px] border border-slate-200">
+                              支給項目（手当）
+                            </td>
+                          </tr>
+                        )}
+                        {(settings.allowanceDefinitions || []).map((def) => {
+                          const jm = settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
+                          // 未保存時は def に応じた標準値を表示 (通勤手当は taxCategory="課対仕入込10%")。
+                          const cur = (jm.allowances || {})[def.id] || getDefaultAllowanceJournalMapping(def);
+                          return (
+                            <tr key={`alw_${def.id}`} className="bg-white hover:bg-indigo-50/40 transition-colors">
+                              <td className="border border-slate-200 px-2 py-1.5 font-bold text-slate-700">
+                                {def.name || "(無題手当)"}
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.dc || "debit"}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, { dc: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                >
+                                  <option value="debit">借方</option>
+                                  <option value="credit">貸方</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.account || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, { account: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                  placeholder="勘定科目"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.subAccount || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, { subAccount: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                  placeholder="補助科目（任意）"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.taxCategory || "対象外"}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, { taxCategory: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                >
+                                  {JOURNAL_TAX_CATEGORIES.map((tc) => (
+                                    <option key={tc} value={tc}>{tc}</option>
+                                  ))}
+                                  {cur.taxCategory && !JOURNAL_TAX_CATEGORIES.includes(cur.taxCategory) && (
+                                    <option value={cur.taxCategory}>{cur.taxCategory}（旧値）</option>
+                                  )}
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.departmentMode || "none"}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, {
+                                      departmentMode: e.target.value,
+                                    })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                >
+                                  <option value="employee">社員部門</option>
+                                  <option value="none">部門なし</option>
+                                  <option value="fixed">固定部門</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.fixedDepartmentId || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, {
+                                      fixedDepartmentId: e.target.value,
+                                    })
+                                  }
+                                  disabled={cur.departmentMode !== "fixed"}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500 disabled:bg-slate-100 disabled:text-slate-400"
+                                >
+                                  <option value="">(未選択)</option>
+                                  {(settings.departments || []).map((d) => (
+                                    <option key={d.id} value={d.id}>
+                                      {d.code ? `${d.code} ` : ""}{d.name || "(無題)"}
+                                    </option>
+                                  ))}
+                                  {/* 削除済み部門ID救済: 過去に設定した固定部門が departments から
+                                      削除されている場合、option が消えると React 警告 + ユーザー認知不能になる。
+                                      現在値が存在しない場合のみ「(削除済み)」option を追加する。 */}
+                                  {cur.fixedDepartmentId &&
+                                    !(settings.departments || []).some(
+                                      (d) => d.id === cur.fixedDepartmentId
+                                    ) && (
+                                      <option value={cur.fixedDepartmentId}>
+                                        (削除済み: {cur.fixedDepartmentId})
+                                      </option>
+                                    )}
+                                </select>
+                              </td>
+                              {/* 集約グループ: 同名+同会計属性で 1 行に集約 (動的手当)。 */}
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.groupLabel || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingAllowance(def.id, { groupLabel: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-indigo-500"
+                                  placeholder="（任意）例: 交通費"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* 動的: 控除 */}
+                        {(settings.deductionDefinitions || []).length > 0 && (
+                          <tr>
+                            <td colSpan={8} className="bg-red-50 text-red-700 font-bold px-2 py-1 text-[11px] border border-slate-200">
+                              控除項目
+                            </td>
+                          </tr>
+                        )}
+                        {(settings.deductionDefinitions || []).map((def) => {
+                          const jm = settings.journalMapping || DEFAULT_SETTINGS.journalMapping;
+                          const cur = (jm.deductions || {})[def.id] || JOURNAL_DEFAULT_DEDUCTION;
+                          return (
+                            <tr key={`ded_${def.id}`} className="bg-white hover:bg-red-50/40 transition-colors">
+                              <td className="border border-slate-200 px-2 py-1.5 font-bold text-slate-700">
+                                {def.name || "(無題控除)"}
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.dc || "credit"}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, { dc: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                >
+                                  <option value="debit">借方</option>
+                                  <option value="credit">貸方</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.account || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, { account: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                  placeholder="勘定科目"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.subAccount || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, { subAccount: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                  placeholder="補助科目（任意）"
+                                />
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.taxCategory || "対象外"}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, { taxCategory: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                >
+                                  {JOURNAL_TAX_CATEGORIES.map((tc) => (
+                                    <option key={tc} value={tc}>{tc}</option>
+                                  ))}
+                                  {cur.taxCategory && !JOURNAL_TAX_CATEGORIES.includes(cur.taxCategory) && (
+                                    <option value={cur.taxCategory}>{cur.taxCategory}（旧値）</option>
+                                  )}
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.departmentMode || "none"}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, {
+                                      departmentMode: e.target.value,
+                                    })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                >
+                                  <option value="employee">社員部門</option>
+                                  <option value="none">部門なし</option>
+                                  <option value="fixed">固定部門</option>
+                                </select>
+                              </td>
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <select
+                                  value={cur.fixedDepartmentId || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, {
+                                      fixedDepartmentId: e.target.value,
+                                    })
+                                  }
+                                  disabled={cur.departmentMode !== "fixed"}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500 disabled:bg-slate-100 disabled:text-slate-400"
+                                >
+                                  <option value="">(未選択)</option>
+                                  {(settings.departments || []).map((d) => (
+                                    <option key={d.id} value={d.id}>
+                                      {d.code ? `${d.code} ` : ""}{d.name || "(無題)"}
+                                    </option>
+                                  ))}
+                                  {/* 削除済み部門ID救済: 過去に設定した固定部門が departments から
+                                      削除されている場合、option が消えると React 警告 + ユーザー認知不能になる。
+                                      現在値が存在しない場合のみ「(削除済み)」option を追加する。 */}
+                                  {cur.fixedDepartmentId &&
+                                    !(settings.departments || []).some(
+                                      (d) => d.id === cur.fixedDepartmentId
+                                    ) && (
+                                      <option value={cur.fixedDepartmentId}>
+                                        (削除済み: {cur.fixedDepartmentId})
+                                      </option>
+                                    )}
+                                </select>
+                              </td>
+                              {/* 集約グループ: 同名+同会計属性で 1 行に集約 (動的控除)。 */}
+                              <td className="border border-slate-200 px-2 py-1.5">
+                                <input
+                                  value={cur.groupLabel || ""}
+                                  onChange={(e) =>
+                                    updateJournalMappingDeduction(def.id, { groupLabel: e.target.value })
+                                  }
+                                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none focus:border-red-500"
+                                  placeholder="（任意）"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <p className="text-[10px] text-slate-400 mt-3">
+                      ※ 動的な手当・控除に対する仕訳設定が未保存の場合、画面上では安全な既定値で表示され、編集して保存した時点で確定します。他項目の設定は影響を受けません。
+                    </p>
+                  </div>
+                </section>
+
+                {/* 7. バックアップ管理 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
                     バックアップ管理
@@ -20899,6 +22830,15 @@ const App = () => {
               startBulkPrint={startBulkPrint} BULK_PRINT_TYPES={BULK_PRINT_TYPES}
               setMonthlyClosePrintMode={setMonthlyClosePrintMode} setCheckModalData={setCheckModalData}
               monthlyLocks={monthlyLocks} showLockHistoryKey={showLockHistoryKey} setShowLockHistoryKey={setShowLockHistoryKey}
+              openJournalPreview={(monthKey) =>
+                setJournalPreview((p) => ({
+                  ...p,
+                  open: true,
+                  year: selectedYear,
+                  monthKey,
+                  textResult: null, // 前回の取込テキスト出力結果は持ち越さない
+                }))
+              }
             />
             {monthlyClosePrintMode === "monthlySummary" && !isBulkPrintOpen && !slipEmployeeId && !isLedgerPrintOpen && (
               <div className="print-only-block print-area monthly-summary-print-area">
@@ -21612,6 +23552,42 @@ const App = () => {
                     <option value="executive">役員</option>
                     <option value="employee">正社員</option>
                     <option value="part_time">パート・アルバイト</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">
+                    所属部門
+                  </label>
+                  {/* 弥生会計仕訳出力用の所属部門。settings.departments が空でも「部門なし」のみ表示。
+                      既存社員 (departmentId 未定義) は "" にフォールバック → 「部門なし」として動作。
+                      この値は今回スコープでは月次/賞与計算ロジックには一切影響しない。
+                      部門マスタから削除済みのIDが残っている場合は「(削除済み)」option を救済表示し、
+                      ユーザーが選び直さない限り値は保持する (一括クリーンアップは行わない)。
+                      将来の仕訳生成時には「部門マスタに存在しない departmentId は部門なし扱い」とする方針。 */}
+                  <select
+                    value={editingMaster.departmentId || ""}
+                    onChange={(e) =>
+                      setEditingMaster({
+                        ...editingMaster,
+                        departmentId: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-2 outline-none focus:border-emerald-500"
+                  >
+                    <option value="">部門なし</option>
+                    {(settings.departments || []).map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.code ? `${d.code} ` : ""}{d.name || "(無題)"}
+                      </option>
+                    ))}
+                    {editingMaster.departmentId &&
+                      !(settings.departments || []).some(
+                        (d) => d.id === editingMaster.departmentId
+                      ) && (
+                        <option value={editingMaster.departmentId}>
+                          (削除済み: {editingMaster.departmentId})
+                        </option>
+                      )}
                   </select>
                 </div>
                 <div className="space-y-1">
@@ -22762,6 +24738,358 @@ const App = () => {
         </div>
       )}
             {/* ▼▼▼ 追加：月次チェック モーダル ▼▼▼ */}     {" "}
+      {/* ▼▼▼ 追加: 月次給与 仕訳プレビュー モーダル (弥生会計連携・第2弾) ▼▼▼ */}
+      {journalPreview.open && (() => {
+        const _preview = buildMonthlyJournalPreview({
+          employees,
+          settings: effectiveSettings,
+          taxTables,
+          monthlyLocks,
+          year: journalPreview.year,
+          monthKey: journalPreview.monthKey,
+          mode: journalPreview.mode,
+          dateMode: journalPreview.dateMode,
+        });
+        const _closeJp = () => setJournalPreview((p) => ({ ...p, open: false, textResult: null }));
+        const _mLabel = journalPreview.monthKey
+          ? `${parseInt(journalPreview.monthKey, 10)}月`
+          : "";
+
+        // 弥生取込テキスト出力ハンドラ: プレビュー rows を直接渡して再計算しない。
+        // 結果 (errors / warnings / success) は journalPreview.textResult に保存し、モーダル上に表示。
+        // 出力ファイルは「カンマ区切り 27 列 (RFC4180 風エスケープ) + UTF-8 BOM + CRLF」を .txt 拡張子で保存。
+        const _handleExportYayoiText = () => {
+          const _result = buildYayoiJournalText({
+            previewRows: _preview.rows,
+            mode: journalPreview.mode,
+            year: journalPreview.year,
+            monthKey: journalPreview.monthKey,
+          });
+          if (!_result.success) {
+            setJournalPreview((p) => ({
+              ...p,
+              textResult: { errors: _result.errors, warnings: _result.warnings, success: false },
+            }));
+            return;
+          }
+          const _filename = buildYayoiTextFilename(
+            journalPreview.year,
+            journalPreview.monthKey,
+            journalPreview.mode
+          );
+          // 文字コードは Shift-JIS / CP932 固定 (弥生公式仕様)。
+          // ブラウザ標準 TextEncoder は UTF-8 のみのため、encoding-japanese で SJIS バイト列に変換。
+          // type は text/plain;charset=shift_jis (Yayoi は Content-Type ヒントを参照しないが、
+          // ブラウザ/エディタで開く際の判別目的で明示しておく)。
+          const _sjisArr = Encoding.convert(_result.textBody, {
+            to: "SJIS",
+            from: "UNICODE",
+            type: "array",
+          });
+          const _blob = new Blob([new Uint8Array(_sjisArr)], {
+            type: "text/plain;charset=shift_jis",
+          });
+          const _url = URL.createObjectURL(_blob);
+          const _a = document.createElement("a");
+          _a.href = _url;
+          _a.download = _filename;
+          document.body.appendChild(_a);
+          _a.click();
+          document.body.removeChild(_a);
+          URL.revokeObjectURL(_url);
+          setJournalPreview((p) => ({
+            ...p,
+            textResult: {
+              errors: [],
+              warnings: _result.warnings,
+              success: true,
+              filename: _filename,
+              voucherCount: _result.voucherCount,
+              rowCount: _result.rowCount,
+            },
+          }));
+        };
+        const _outputUnitLabel = journalPreview.mode === "byEmployee" ? "従業員ごとの仕訳" : "全体での仕訳";
+        return (
+          <div
+            className="fixed inset-0 bg-slate-900/60 z-[200] flex justify-center items-center backdrop-blur-sm transition-opacity p-4"
+            onClick={_closeJp}
+          >
+            <div
+              className="bg-slate-50 rounded-2xl shadow-2xl w-full max-w-6xl overflow-hidden flex flex-col max-h-[90vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="bg-sky-600 p-4 text-white flex justify-between items-center">
+                <h2 className="font-black text-sm flex items-center gap-2 tracking-widest">
+                  <Search size={18} />
+                  {journalPreview.year}年 {_mLabel}分 給与仕訳プレビュー（弥生会計連携・画面表示のみ）
+                </h2>
+                <button onClick={_closeJp} className="text-white/80 hover:text-white transition-colors" title="閉じる">
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* 操作パネル: 区分ごとにカード状にグループ化して視覚的に分離。
+                  出力単位 / 取引日付 はユーザー操作可能、文字コードは SJIS 固定の表示のみ。 */}
+              <div className="bg-slate-100 px-5 py-3 border-b border-slate-200 flex flex-wrap items-start gap-3">
+                {/* 出力単位 */}
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5 min-w-[160px]">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+                    出力単位
+                  </div>
+                  <div className="flex bg-slate-100 rounded-md p-0.5">
+                    {[
+                      { v: "aggregate",  label: "合算" },
+                      { v: "byEmployee", label: "従業員別" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.v}
+                        onClick={() => setJournalPreview((p) => ({ ...p, mode: opt.v, textResult: null }))}
+                        className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                          journalPreview.mode === opt.v ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 取引日付 */}
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5 min-w-[260px]">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+                    取引日付
+                  </div>
+                  <div className="flex bg-slate-100 rounded-md p-0.5">
+                    {[
+                      { v: "payDate",   label: "支給日" },
+                      { v: "periodEnd", label: "計算期間終了日" },
+                      { v: "monthEnd",  label: "月末" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.v}
+                        onClick={() => setJournalPreview((p) => ({ ...p, dateMode: opt.v, textResult: null }))}
+                        className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                          journalPreview.dateMode === opt.v ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 文字コード (Shift-JIS 固定。実務上 SJIS 以外で取込エラーになるため切替不可)。 */}
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5 min-w-[180px]">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+                    文字コード
+                  </div>
+                  <div className="px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-md text-xs font-bold text-emerald-700 inline-block">
+                    Shift-JIS（推奨・固定）
+                  </div>
+                </div>
+
+                <div className="ml-auto self-center text-[11px] text-slate-600 font-bold">
+                  仕訳行数: <span className="font-mono">{_preview.rows.length}</span>
+                </div>
+              </div>
+
+              {/* 弥生取込前チェック (画面チェック / 出力時の最終バリデーションとは独立)。
+                  buildYayoiJournalText 側にある出力時の停止チェックは別途維持。 */}
+              {(() => {
+                const _pc = buildYayoiPrecheckSummary({
+                  rows: _preview.rows,
+                  mode: journalPreview.mode,
+                  debitTotal: _preview.debitTotal,
+                  creditTotal: _preview.creditTotal,
+                  diff: _preview.diff,
+                });
+                const _overallBg =
+                  _pc.overallStatus === "error"   ? "bg-red-50 border-red-200" :
+                  _pc.overallStatus === "warning" ? "bg-amber-50 border-amber-200" :
+                  "bg-emerald-50 border-emerald-200";
+                const _overallText =
+                  _pc.overallStatus === "error"   ? "text-red-700" :
+                  _pc.overallStatus === "warning" ? "text-amber-700" :
+                  "text-emerald-700";
+                const _overallLabel =
+                  _pc.overallStatus === "error"   ? "✕ エラーあり (出力時に停止される可能性)" :
+                  _pc.overallStatus === "warning" ? "⚠ 注意あり (出力は可能 / 弥生側で要確認)" :
+                  "✓ 取込前チェック OK";
+                const _itemBg = (s) =>
+                  s === "error"   ? "bg-red-100 text-red-700 border-red-200"     :
+                  s === "warning" ? "bg-amber-100 text-amber-700 border-amber-200" :
+                  s === "ok"      ? "bg-emerald-100 text-emerald-700 border-emerald-200" :
+                                    "bg-slate-100 text-slate-600 border-slate-200";
+                const _itemIcon = (s) =>
+                  s === "error" ? "✕" : s === "warning" ? "⚠" : s === "ok" ? "✓" : "ⓘ";
+                return (
+                  <div className={`border-y px-5 py-3 ${_overallBg}`}>
+                    <p className={`text-[11px] font-black mb-2 ${_overallText}`}>
+                      🛡 弥生取込前チェック — {_overallLabel}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {_pc.items.map((it) => (
+                        <div
+                          key={it.key}
+                          className={`flex items-start gap-2 px-2 py-1.5 rounded border text-[11px] leading-snug ${_itemBg(it.status)}`}
+                        >
+                          <span className="font-black shrink-0 w-3 text-center">{_itemIcon(it.status)}</span>
+                          <div className="flex-1 min-w-0">
+                            <span className="font-bold">{it.label}: </span>
+                            <span className="font-normal">{it.message}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-2">
+                      ※ このチェックは事前確認です。エラーがあっても表示は可能ですが、「弥生取込テキスト出力」ボタン押下時に出力時バリデーションが最終判定します。
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {/* 警告 (プレビュー) */}
+              {_preview.warnings.length > 0 && (
+                <div className="bg-amber-50 border-y border-amber-200 px-5 py-3 max-h-32 overflow-y-auto">
+                  <p className="text-[11px] font-bold text-amber-700 mb-1">⚠ プレビュー警告 ({_preview.warnings.length} 件)</p>
+                  <ul className="text-[11px] text-amber-700 space-y-0.5 list-disc pl-5">
+                    {_preview.warnings.map((w, i) => (<li key={i}>{w}</li>))}
+                  </ul>
+                </div>
+              )}
+
+              {/* 弥生取込テキスト出力 結果 (エラー / 成功 / 切詰警告) */}
+              {journalPreview.textResult && journalPreview.textResult.errors && journalPreview.textResult.errors.length > 0 && (
+                <div className="bg-red-50 border-y border-red-200 px-5 py-3 max-h-40 overflow-y-auto">
+                  <p className="text-[11px] font-bold text-red-700 mb-1">
+                    ✕ 弥生取込テキスト出力を停止しました ({journalPreview.textResult.errors.length} 件のエラー)
+                  </p>
+                  <ul className="text-[11px] text-red-700 space-y-0.5 list-disc pl-5">
+                    {journalPreview.textResult.errors.map((e, i) => (<li key={i}>{e}</li>))}
+                  </ul>
+                </div>
+              )}
+              {journalPreview.textResult && journalPreview.textResult.success && (
+                <div className="bg-emerald-50 border-y border-emerald-200 px-5 py-3 text-[11px] text-emerald-700 font-bold">
+                  ✓ 弥生取込テキストをダウンロードしました:{" "}
+                  <span className="font-mono">{journalPreview.textResult.filename}</span>
+                  <span className="ml-3 text-emerald-600 font-normal">
+                    （伝票数 {journalPreview.textResult.voucherCount} / 行数 {journalPreview.textResult.rowCount}）
+                  </span>
+                  {journalPreview.textResult.warnings && journalPreview.textResult.warnings.length > 0 && (
+                    <ul className="mt-2 text-amber-700 space-y-0.5 list-disc pl-5 font-normal">
+                      {journalPreview.textResult.warnings.map((w, i) => (<li key={i}>{w}</li>))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* テーブル */}
+              <div className="flex-1 overflow-auto bg-white">
+                <table className="w-full text-[11px] border-collapse min-w-[1200px]">
+                  <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
+                    <tr>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[100px]">取引日</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">借方科目</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">借方補助</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">借方部門</th>
+                      <th className="border border-slate-200 px-2 py-2 text-right font-bold w-[100px]">借方金額</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">貸方科目</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">貸方補助</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">貸方部門</th>
+                      <th className="border border-slate-200 px-2 py-2 text-right font-bold w-[100px]">貸方金額</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[90px]">税区分</th>
+                      <th className="border border-slate-200 px-2 py-2 text-left font-bold">摘要</th>
+                      {journalPreview.mode === "byEmployee" && (
+                        <th className="border border-slate-200 px-2 py-2 text-left font-bold w-[110px]">社員名</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {_preview.rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={journalPreview.mode === "byEmployee" ? 12 : 11} className="text-center text-slate-400 font-bold py-8">
+                          仕訳行はありません
+                        </td>
+                      </tr>
+                    ) : (
+                      _preview.rows.map((r, i) => (
+                        <tr key={i} className="hover:bg-sky-50/40">
+                          <td className="border border-slate-200 px-2 py-1 font-mono text-[10px]">{r.date}</td>
+                          <td className="border border-slate-200 px-2 py-1">{r.debitAccount}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-500">{r.debitSubAccount}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-500">{r.debitDepartment}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-right font-mono">
+                            {r.debitAmount > 0 ? r.debitAmount.toLocaleString() : ""}
+                          </td>
+                          <td className="border border-slate-200 px-2 py-1">{r.creditAccount}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-500">{r.creditSubAccount}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-500">{r.creditDepartment}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-right font-mono">
+                            {r.creditAmount > 0 ? r.creditAmount.toLocaleString() : ""}
+                          </td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-500">{r.taxCategory}</td>
+                          <td className="border border-slate-200 px-2 py-1 text-slate-600">{r.description}</td>
+                          {journalPreview.mode === "byEmployee" && (
+                            <td className="border border-slate-200 px-2 py-1 text-slate-600">{r.employeeName}</td>
+                          )}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                  <tfoot className="bg-slate-100 sticky bottom-0">
+                    <tr>
+                      <td colSpan={4} className="border border-slate-300 px-2 py-2 text-right font-bold text-slate-700">借方合計</td>
+                      <td className="border border-slate-300 px-2 py-2 text-right font-mono font-black text-slate-800">{_preview.debitTotal.toLocaleString()}</td>
+                      <td colSpan={3} className="border border-slate-300 px-2 py-2 text-right font-bold text-slate-700">貸方合計</td>
+                      <td className="border border-slate-300 px-2 py-2 text-right font-mono font-black text-slate-800">{_preview.creditTotal.toLocaleString()}</td>
+                      <td colSpan={journalPreview.mode === "byEmployee" ? 3 : 2} className="border border-slate-300 px-2 py-2 text-right font-bold text-slate-700">
+                        差額:
+                        <span className={`ml-2 font-mono font-black ${_preview.diff === 0 ? "text-emerald-600" : "text-red-600"}`}>
+                          {_preview.diff.toLocaleString()}
+                        </span>
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {/* フッタ */}
+              <div className="bg-slate-100 px-5 py-3 border-t border-slate-200 flex flex-wrap justify-between items-center gap-3">
+                <div className="text-[10px] text-slate-600 leading-snug space-y-0.5">
+                  <p>
+                    現在の出力単位: <span className="font-bold text-sky-700">{_outputUnitLabel}</span>
+                    （ボタン押下で現在表示中の仕訳プレビュー内容を弥生会計の取込形式で出力します）
+                  </p>
+                  <p className="text-slate-500">
+                    ※ 弥生会計の取込に合わせ、<span className="font-bold text-slate-700">Shift-JIS 形式のカンマ区切りテキスト（.txt / 25列 / 日付は R.08/MM/DD 形式）</span>で出力します。タブ区切りではありません。
+                  </p>
+                  <p className="text-slate-500">
+                    ※ 借方部門 / 貸方部門 列は出力しますが、弥生会計側で取り込まれない場合があります。仕訳データの Firestore 保存は行いません。
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={_handleExportYayoiText}
+                    className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                    title="弥生会計の取込形式（カンマ区切り .txt）の複合仕訳テキストをダウンロードします"
+                  >
+                    <Download size={14} /> 弥生取込テキスト出力
+                  </button>
+                  <button
+                    onClick={_closeJp}
+                    className="px-5 py-2 text-xs font-bold text-white bg-slate-600 hover:bg-slate-500 rounded-lg shadow-sm transition-colors"
+                  >
+                    閉じる
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {checkModalData && (
         <div
           className="fixed inset-0 bg-slate-900/60 z-[200] flex justify-center items-center backdrop-blur-sm transition-opacity p-4"

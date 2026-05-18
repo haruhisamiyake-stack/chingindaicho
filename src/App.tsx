@@ -3016,6 +3016,25 @@ const getRowHash = (_row) => {
   return keys.join("|") + "|" + alw + "|" + ded;
 };
 
+// 対象年度・対象月に実際の支給データがあるかを判定する pure helper。
+// 判定基準は calculateMonthlyAggregates の retired 判定 (L3032 付近) と完全に同じ:
+//   - basePay が正の値、または allowanceAmounts に1件でも key があれば「支給実績あり」
+//   - monthKey は通常月 ("01"〜"12") / 賞与 ("bonus" / "bonus2") の両方に対応
+// 用途: 「退職者は基本的に除外するが、その月に給与・賞与の支給実績がある場合は含める」
+//       という制御を、給与明細一括印刷キュー / 賃金台帳の月別ビューで使うため。
+const hasMonthlyPaymentData = (emp, year, monthKey) => {
+  if (!emp || !year || !monthKey) return false;
+  const yd = emp.data?.years?.[year];
+  if (!yd) return false;
+  const isBonusKey = monthKey === "bonus" || monthKey === "bonus2";
+  const row = isBonusKey ? yd[monthKey] : yd.monthly?.[monthKey];
+  if (!row) return false;
+  return (
+    Number(row.basePay) > 0 ||
+    Object.keys(row.allowanceAmounts || {}).length > 0
+  );
+};
+
 // 1. 集計処理
 const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, settings, effectiveSettings, taxTables, monthlyLocks, calcCache }) => {
   let activeEmployeeCount = 0;
@@ -4288,6 +4307,13 @@ const App = () => {
   const [employees, setEmployees] = useState({});
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(null);
   const [employeeSearchQuery, setEmployeeSearchQuery] = useState("");
+  // 退職・非表示社員の通常一覧での表示制御。
+  //   デフォルト false: 退職者 (master.status === "retired") は社員登録タブの一覧・検索結果・件数から除外される。
+  //   true にすると退職者も表示 (退職者の再表示・誤退職の取り消し・状態確認のための管理 UX を維持)。
+  //   将来「退職者一覧」専用画面が実装されたら本トグルは廃止予定。
+  //   ※ 賃金台帳の社員選択ドロップダウン / 給与明細一覧 / 集計系 等は本フラグの対象外
+  //     (退職者の過去年度データ閲覧・賞与既支給データ集計の経路を維持するため)。
+  const [showRetiredInList, setShowRetiredInList] = useState(false);
 
   const [selectedYear, setSelectedYear] = useState(null);
   const initializedYearsRef = useRef({});
@@ -9277,25 +9303,88 @@ const App = () => {
   const handleRetireEmployee = (empId) => {
     const emp = employees[empId];
     if (!emp) return;
-    // ★ 保存入口は requestEmployeeSave に統一。master のみ status を更新（data は維持）。
+    // 「退職・非表示」: 実在社員用。Firestore ドキュメントは削除しない。
+    //   - removeDoc は使わない (給与・賞与・過年度データを保持)
+    //   - master.status = "retired" + retiredAt(ISO) を保存
+    //   - 通常の社員登録一覧から除外される (社員登録 tab のフィルタ参照)
+    //   - 過去年度の賃金台帳・源泉徴収票閲覧経路は維持 (賃金台帳ドロップダウンはフィルタしない)
+    const empName = emp.master?.name || "この社員";
+    if (!window.confirm(
+      `「${empName}」を退職・非表示にします。\n\n` +
+      `給与データ・賞与データ・過年度データは保持されます。\n` +
+      `通常の社員一覧には表示されなくなります(社員登録タブの「退職者も表示」で再表示可)。\n\n` +
+      `実行しますか？`
+    )) return;
+    // ★ 保存入口は requestEmployeeSave に統一。master のみ status / retiredAt を更新（data は維持）。
     requestEmployeeSave(selectedTenantId, empId, (_currentData, currentEmp) => ({
-      master: { ...currentEmp.master, status: "retired" },
+      master: {
+        ...currentEmp.master,
+        status: "retired",
+        retiredAt: new Date().toISOString(),
+      },
     }));
   };
 
-  const handleDeleteEmployee = async (empId) => {
+  const handleUnretireEmployee = (empId) => {
+    const emp = employees[empId];
+    if (!emp) return;
+    // 「退職解除」: 退職者を有効社員に戻す。給与・賞与・過年度データには触らない。
+    //   - master.status = "active" に戻す
+    //   - master.retiredAt = null で履歴情報を消去 (Firestore merge:true で null 上書き)
+    //   - data 配下 (years / monthly / bonus 等) は一切変更しない (給与・賞与・過年度データを保持)
+    //   - removeDoc は呼ばない (Firestore ドキュメントはそのまま保持)
+    //   - 既存設計に合わせて status 一元管理。hidden / isHidden フィールドは存在しないため処理不要。
+    const empName = emp.master?.name || "この社員";
+    if (!window.confirm(
+      `「${empName}」を有効社員に戻します。\n\n` +
+      `給与データ・賞与データ・過年度データはそのまま保持されます。\n` +
+      `通常の社員一覧に再表示されます。\n\n` +
+      `実行しますか？`
+    )) return;
+    // ★ 保存入口は requestEmployeeSave に統一。master のみ status / retiredAt を更新（data は維持）。
+    requestEmployeeSave(selectedTenantId, empId, (_currentData, currentEmp) => ({
+      master: {
+        ...currentEmp.master,
+        status: "active",
+        retiredAt: null,
+      },
+    }));
+  };
+
+  const handleHardDeleteEmployee = async (empId) => {
+    // 「完全削除」: テストデータ・誤登録用。Firestore ドキュメントを物理削除する。
+    //   - removeDoc(PATHS.employee(...)) を呼ぶ唯一の経路。
+    //   - 二段階確認: confirm + 「完全削除」と prompt で入力させる。
+    //   - 実在社員には使用しない (退職処理は handleRetireEmployee へ)。
+    //   - 給与・賞与・過年度データも一緒に消える点に注意 (master 配下の data フィールドごと削除)。
     const emp = employees[empId];
     const empName = emp?.master?.name || "この社員";
 
     if (
       !window.confirm(
-        `${empName} の社員データを削除します。\n` +
-          `給与台帳・賞与・明細データもすべて削除されます。\n` +
-          `この操作は元に戻せません。本当によろしいですか？`
+        `【完全削除】テストデータ・誤登録用\n\n` +
+        `「${empName}」の社員データを完全に削除します。\n\n` +
+        `給与データ・賞与データ・過年度データも復元できなくなる可能性があります。\n` +
+        `テストデータまたは誤登録データの場合のみ実行してください。\n\n` +
+        `(実在社員の退職には「退職・非表示」を使ってください)\n\n` +
+        `本当に完全削除しますか？`
       )
     )
       return;
-    setSaveStatus("削除中..."); 
+
+    // 二段階確認: 「完全削除」と入力した場合のみ実行。誤クリック・誤判断を防ぐ。
+    const confirmText = window.prompt(
+      `最終確認: 完全削除を実行するには、下の入力欄に「完全削除」と入力してください。\n` +
+      `(キャンセルで中止)`
+    );
+    if (confirmText !== "完全削除") {
+      if (confirmText !== null) {
+        alert("入力が一致しなかったため、完全削除を中止しました。");
+      }
+      return;
+    }
+
+    setSaveStatus("完全削除中...");
 
     const remainingIds = Object.keys(employees).filter((id) => id !== empId);
     setEmployees((prev) => {
@@ -9314,15 +9403,15 @@ const App = () => {
     if (selectedTenantId) {
       try {
         await removeDoc(PATHS.employee(tenantId, empId));
-        setSaveStatus("削除しました");
+        setSaveStatus("完全削除しました");
         setTimeout(() => setSaveStatus(""), 2000);
       } catch (error) {
-        console.error("削除エラー:", error);
-        setSaveStatus("削除エラー");
+        console.error("完全削除エラー:", error);
+        setSaveStatus("完全削除エラー");
         setTimeout(() => setSaveStatus(""), 2000);
       }
     } else {
-      setSaveStatus("削除しました");
+      setSaveStatus("完全削除しました");
       setTimeout(() => setSaveStatus(""), 2000);
     }
   };
@@ -10063,9 +10152,14 @@ const App = () => {
   };
 
   // 一括印刷キューを開始: 在籍社員IDを並べて先頭社員を単票モーダルへ表示。
+  // 退職者は原則除外するが、対象月に給与支給実績がある場合は含める
+  // (退職月分の給与明細を一括印刷できるようにするため。判定基準は集計処理 L3032 付近と同一)。
   const startBulkPrint = (type = BULK_PRINT_TYPES.PAYSLIP, monthKey = selectedListMonth) => {
     const queue = Object.entries(employees)
-      .filter(([, emp]) => emp.master?.status !== "retired")
+      .filter(([, emp]) =>
+        emp.master?.status !== "retired" ||
+        hasMonthlyPaymentData(emp, selectedYear, monthKey)
+      )
       .map(([id]) => id);
     if (queue.length === 0) {
       alert("印刷対象の社員がいません。");
@@ -11797,17 +11891,33 @@ const App = () => {
                 </button>
               </div>
               <div className="p-6">
-                <div className="mb-4 relative w-72">
-                  <Search
-                    size={16}
-                    className="absolute left-3 top-2.5 text-slate-400"
-                  />
-                  <input
-                    value={employeeSearchQuery}
-                    onChange={(e) => setEmployeeSearchQuery(e.target.value)}
-                    placeholder="社員コード、氏名で検索..."
-                    className="w-full bg-slate-50 border border-slate-300 rounded-lg py-2 pl-10 pr-3 text-sm outline-none focus:border-teal-500 transition-colors text-slate-700 font-bold"
-                  />
+                <div className="mb-4 flex flex-wrap items-center gap-4">
+                  <div className="relative w-72">
+                    <Search
+                      size={16}
+                      className="absolute left-3 top-2.5 text-slate-400"
+                    />
+                    <input
+                      value={employeeSearchQuery}
+                      onChange={(e) => setEmployeeSearchQuery(e.target.value)}
+                      placeholder="社員コード、氏名で検索..."
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg py-2 pl-10 pr-3 text-sm outline-none focus:border-teal-500 transition-colors text-slate-700 font-bold"
+                    />
+                  </div>
+                  {/* 退職者の表示トグル: デフォルト OFF (= 通常一覧から除外)。
+                      管理操作 (再表示・誤退職取消) が必要なときだけ ON にする。 */}
+                  <label
+                    className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-600 select-none"
+                    title="ONにすると、退職・非表示にした社員も社員登録の一覧に表示します(管理用)"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showRetiredInList}
+                      onChange={(e) => setShowRetiredInList(e.target.checked)}
+                      className="w-4 h-4 accent-amber-500"
+                    />
+                    退職者も表示する
+                  </label>
                 </div>
                 <div className="overflow-x-auto rounded-lg border border-slate-200">
                   <table className="w-full border-collapse">
@@ -11836,15 +11946,25 @@ const App = () => {
                     </thead>
                     <tbody>
                       {Object.entries(employees)
-                        .filter(
-                          ([id, emp]) =>
-                            (emp.master?.name || "").includes(
-                              employeeSearchQuery
-                            ) ||
-                            (emp.master?.employeeCode || "").includes(
-                              employeeSearchQuery
-                            )
-                        )
+                        .filter(([id, emp]) => {
+                          // 退職・非表示社員は通常一覧から除外 (= showRetiredInList=false 時)。
+                          // status === "retired" のみ判定対象。既存データに status フィールドが無い社員 (undefined)
+                          // は「在籍」扱いで通常表示される (後方互換)。
+                          if (
+                            !showRetiredInList &&
+                            emp.master?.status === "retired"
+                          ) {
+                            return false;
+                          }
+                          // 検索フィルタ: 空クエリならすべて通過。退職者を含めない通常運用では
+                          // この段階の前に既に退職者が除外されているため、検索対象にも含まれない。
+                          const q = employeeSearchQuery || "";
+                          if (q === "") return true;
+                          return (
+                            (emp.master?.name || "").includes(q) ||
+                            (emp.master?.employeeCode || "").includes(q)
+                          );
+                        })
                         .map(([id, emp]) => {
                           const hasHealth =
                             emp.master?.healthIns !== undefined
@@ -11945,26 +12065,37 @@ const App = () => {
                                 >
                                   <Edit2 size={12} /> 編集
                                 </button>
+                                {/* 「退職・非表示」: 実在社員用。Firestore データは保持され、通常一覧から除外される。
+                                    確認ダイアログは handleRetireEmployee 内に集約済み (関数定義側で文言メンテ可能)。 */}
                                 {emp.master?.status !== "retired" && (
                                   <button
-                                    onClick={() => {
-                                      if (
-                                        window.confirm(
-                                          "この社員を退職済みにしますか？"
-                                        )
-                                      )
-                                        handleRetireEmployee(id);
-                                    }}
-                                    className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-[10px] font-bold transition-colors border border-red-100"
+                                    onClick={() => handleRetireEmployee(id)}
+                                    title="退職・非表示にします (実在社員用、給与データは保持)"
+                                    className="flex items-center gap-1 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded text-[10px] font-bold transition-colors border border-amber-200"
                                   >
-                                    退職
+                                    退職・非表示
                                   </button>
                                 )}
+                                {/* 「退職解除」: 退職者を有効社員に戻す。「退職者も表示する」ON の時にだけ
+                                    退職者の行が見えており、その行にだけこのボタンが出る (status === "retired" の行限定)。
+                                    給与・賞与・過年度データには触らず、master.status のみ "active" に戻す。 */}
+                                {emp.master?.status === "retired" && (
+                                  <button
+                                    onClick={() => handleUnretireEmployee(id)}
+                                    title="退職解除: 有効社員に戻します (給与・賞与・過年度データはそのまま保持されます)"
+                                    className="flex items-center gap-1 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded text-[10px] font-bold transition-colors border border-emerald-200"
+                                  >
+                                    退職解除
+                                  </button>
+                                )}
+                                {/* 「完全削除」: テストデータ・誤登録用。物理削除 (removeDoc) を実行する唯一の経路。
+                                    handleHardDeleteEmployee 内で 2 段階確認 (confirm + 「完全削除」入力 prompt) を行う。 */}
                                 <button
-                                  onClick={() => handleDeleteEmployee(id)}
+                                  onClick={() => handleHardDeleteEmployee(id)}
+                                  title="完全削除 — テストデータ・誤登録用。実在社員には使わないでください。"
                                   className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-red-600 hover:text-white text-slate-500 rounded text-[10px] font-bold transition-colors border border-slate-200"
                                 >
-                                  <Trash2 size={12} /> 削除
+                                  <Trash2 size={12} /> 完全削除
                                 </button>
                                 <button
                                   onClick={() => {
@@ -11981,11 +12112,47 @@ const App = () => {
                         })}
                     </tbody>
                   </table>
-                  {Object.keys(employees).length === 0 && (
-                    <div className="p-8 text-center text-slate-400 font-bold">
-                      登録されている社員がいません。
-                    </div>
-                  )}
+                  {/* empty-state 判定:
+                      - 社員データ自体が 0 件 → 「登録されている社員がいません」
+                      - 表示対象 0 件 かつ 退職者が存在 (=非表示で隠れている) → 「退職者を確認する場合は『退職者も表示する』をONに」を案内
+                      - 表示対象 0 件 かつ 検索クエリ非空 → 「条件に一致する社員がいません」
+                      filter 条件はテーブル本体側 (Object.entries(employees).filter(...)) と同一ロジックを使う必要があるため
+                      ここで再度算出している (filter ロジックを変更したら両方を揃える必要あり)。 */}
+                  {(() => {
+                    const totalCount = Object.keys(employees).length;
+                    if (totalCount === 0) {
+                      return (
+                        <div className="p-8 text-center text-slate-400 font-bold">
+                          登録されている社員がいません。
+                        </div>
+                      );
+                    }
+                    const visibleCount = Object.values(employees).filter((emp) => {
+                      if (!showRetiredInList && emp.master?.status === "retired") {
+                        return false;
+                      }
+                      const q = employeeSearchQuery || "";
+                      if (q === "") return true;
+                      return (
+                        (emp.master?.name || "").includes(q) ||
+                        (emp.master?.employeeCode || "").includes(q)
+                      );
+                    }).length;
+                    if (visibleCount > 0) return null;
+                    const hasRetiredHidden =
+                      !showRetiredInList &&
+                      Object.values(employees).some((emp) => emp.master?.status === "retired");
+                    const hasSearchQuery = (employeeSearchQuery || "") !== "";
+                    return (
+                      <div className="p-8 text-center text-slate-400 font-bold">
+                        {hasRetiredHidden && !hasSearchQuery
+                          ? "表示対象の社員がいません。退職者を確認する場合は『退職者も表示する』をONにしてください。"
+                          : hasSearchQuery
+                          ? "条件に一致する社員がいません。"
+                          : "表示対象の社員がいません。"}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -12180,7 +12347,12 @@ const App = () => {
                     <tbody className="text-xs whitespace-nowrap">
                                            {" "}
                       {Object.entries(employees)
-                        .filter(([id, emp]) => emp.master?.status !== "retired")
+                        // 退職者は原則除外するが、対象月に給与支給実績がある場合は含める
+                        // (退職月分が支給控除一覧表に出ないと不整合になるため。判定は L3032 付近と同一)。
+                        .filter(([id, emp]) =>
+                          emp.master?.status !== "retired" ||
+                          hasMonthlyPaymentData(emp, selectedYear, ledgerSelectedMonth)
+                        )
                         .map(([empId, emp]) => {
                           const currentYearDataObj = selectedYear
                             ? emp.data?.years?.[selectedYear] ||

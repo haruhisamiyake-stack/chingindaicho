@@ -15793,10 +15793,17 @@ const App = () => {
                                 (rawNew != null && rawNew !== "")
                                   ? rawNew
                                   : ((rawLegacy != null && rawLegacy !== "") ? rawLegacy : "");
-                              // 加入している場合のみ未入力判定
+                              // 加入している場合のみ未入力判定。
+                              // ただし総支給額が0円の月 (calculateMonthlyResult の noIncome 短絡対象月) は
+                              // 「⚠️未入力」UIアラートを抑制する。0円月は社会保険料計算もスキップされるため、
+                              // 標準報酬月額の入力を促す赤帯はノイズになる。
+                              // UI 表示のみの抑制で、stdAmount の保存値や計算ロジックには影響しない。
+                              const _grossPayForCell = Number(results.monthlyResults[m]?.grossPay || 0);
+                              const _isGrossZeroForCell = _grossPayForCell === 0;
                               const isUnset =
                                 isApplicable &&
-                                (!stdAmount || Number(stdAmount) <= 0);
+                                (!stdAmount || Number(stdAmount) <= 0) &&
+                                !_isGrossZeroForCell;
 
                               // 推定との差異チェック(該当系統の推定値と比較)
                               const estAmt = results.monthlyResults[m]?.estStdAmountHealth ?? results.monthlyResults[m]?.estStdAmount;
@@ -15958,10 +15965,17 @@ const App = () => {
                                 (rawNew != null && rawNew !== "")
                                   ? rawNew
                                   : ((rawLegacy != null && rawLegacy !== "") ? rawLegacy : "");
-                              // 加入している場合のみ未入力判定
+                              // 加入している場合のみ未入力判定。
+                              // ただし総支給額が0円の月 (calculateMonthlyResult の noIncome 短絡対象月) は
+                              // 「⚠️未入力」UIアラートを抑制する。0円月は社会保険料計算もスキップされるため、
+                              // 標準報酬月額の入力を促す赤帯はノイズになる。
+                              // UI 表示のみの抑制で、stdAmount の保存値や計算ロジックには影響しない。
+                              const _grossPayForCell = Number(results.monthlyResults[m]?.grossPay || 0);
+                              const _isGrossZeroForCell = _grossPayForCell === 0;
                               const isUnset =
                                 isApplicable &&
-                                (!stdAmount || Number(stdAmount) <= 0);
+                                (!stdAmount || Number(stdAmount) <= 0) &&
+                                !_isGrossZeroForCell;
 
                               // 推定との差異チェック(該当系統の推定値と比較)
                               const estAmt = results.monthlyResults[m]?.estStdAmountPension ?? results.monthlyResults[m]?.estStdAmount;

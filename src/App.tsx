@@ -779,6 +779,120 @@ const getBonusRateMonth = (bonusRow) => {
   return "12";
 };
 
+// 賞与支給日 (payDate, "YYYY-MM-DD") から "前月の YYYY-MM" を返す。
+//   2026-01-10 → "2025-12" (前年12月)、2026-07-10 → "2026-06" (同年6月)。
+//   payDate が未入力 / フォーマット不正のときは null を返す (呼出側で manualRequired 状態へ倒す)。
+//   旧実装は yearStr 内で prevMonthKey="12" をデフォルトにしていたため 1 月賞与で前年データに到達できず、
+//   静かに「前月給与なし計算 (1/divisor)」へフォールバックしてしまっていたバグの原因 helper。
+const getPreviousYearMonthFromPayDate = (payDate) => {
+  if (!payDate || typeof payDate !== "string") return null;
+  const m = payDate.match(/^(\d{4})-(\d{1,2})/);
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || mo < 1 || mo > 12) return null;
+  if (mo === 1) return `${y - 1}-12`;
+  return `${y}-${String(mo - 1).padStart(2, "0")}`;
+};
+
+// employees[empId].data.years 全体から、与えられた targetYearMonth ("YYYY-MM") に対応する
+// 給与行 (monthly[mm]) を年度またぎで検索する。
+//
+// 【検索順序の方針】
+//   税法上の「前月給与」=「賞与支給月の前月中に支給された通常給与等」(国税庁ガイドライン)。
+//   解釈基準は **支給日 (payDate)** ベース。periodEnd (計算期間終了日 / 対象月分基準) は
+//   payDate が未入力のときの補助 fallback として位置づける。
+//
+//   1stパス: 各 monthly[mm].payDate の先頭 7 文字 (YYYY-MM) が targetYearMonth と一致する行を返す。
+//            これが原則。「前月中に支給された給与等」を payDate で素直に特定する。
+//            翌月支給会社で 12月分給与の payDate="2026-01-25" の場合、2026-01 賞与の前月給与
+//            (target="2025-12") としては該当しない (= payDate.slice(0,7)="2026-01" は一致しない)
+//            ため、本パスでは拾われない (=国税庁ルールの「前月給与なし計算」分岐へ進む経路を保つ)。
+//   2ndパス: 1stパスで見つからない場合、各 monthly[mm].periodEnd の先頭 7 文字が一致する行を、
+//            **ただし、その行の payDate が未入力 (空 / null / undefined) のときに限り** 返す。
+//            payDate が入っているのに periodEnd で別月の前月給与として拾うのは、国税庁基準と
+//            乖離するため明示的に禁止する (per-row guard)。
+//            payDate が空で periodEnd だけ残っている旧データや手動消去ケースを救済する fallback。
+//   3rdパス: 1st/2nd で見つからない場合、年度キー (e.g. "R07") を西暦化 (reiwaToWestern) し、
+//            targetYearMonth の YYYY と一致する年度の monthly[targetMM] を返す。
+//            payDate / periodEnd の両方が未入力でも年度キー + 月キーで近似復元できる最終 fallback。
+//
+// 戻り値: { yearStr, monthKey, row, source } | null
+//   - row はデータ構造のオブジェクトそのもの (基本給/手当などのみ。社保控除後給与は呼出側で
+//     calculateMonthlyResult を介して算出する。マスタや料率設定が必要なため helper には封入しない)。
+//   - source は どのパスで一致したかを示す:
+//       "payDate-match"     | 1st パス (推奨ルート / 国税庁原則 = 支給日基準)
+//       "periodEnd-match"   | 2nd パス (payDate 未入力時の補助 fallback)
+//       "year-key-fallback" | 3rd パス (両方未入力時の最終手段、最も曖昧)
+//     呼出側 (calcLog) で検索手段を明示するために使う。
+//   - allYears 自体が null/undefined のときは null を返す (cross-year 検索を諦め、呼出側は manualRequired
+//     状態にフォールバックする)。
+//   - 「row は存在するが basePay=0」は「真に 0 円だった月」として未取得とは区別 → row オブジェクトを返す。
+//
+// ※ Firestore の保存構造は一切変更しない。あくまで読み取り側 helper。
+// ※ calculateBonusIncomeTax / calculateBonusCore / calculateBonusIns / calculateBonusStd /
+//   calculateBonusTaxCore / calculateMonthlyResult の計算式には一切触らない。
+//   本 helper の検索順序と source 報告の精度向上のみ。
+const findPayrollRowByYearMonth = (allYears, targetYearMonth) => {
+  if (!allYears || !targetYearMonth) return null;
+  const dash = targetYearMonth.indexOf("-");
+  if (dash < 0) return null;
+  const targetY = targetYearMonth.slice(0, dash);
+  const targetM = targetYearMonth.slice(dash + 1);
+  // 1stパス: payDate の先頭 7 文字一致 (国税庁原則 = 「前月中に支給された通常給与」を支給日で特定)
+  for (const yStr in allYears) {
+    const monthly = allYears[yStr]?.monthly;
+    if (!monthly) continue;
+    for (const mm in monthly) {
+      const row = monthly[mm];
+      if (
+        row &&
+        typeof row.payDate === "string" &&
+        row.payDate.length >= 7 &&
+        row.payDate.slice(0, 7) === targetYearMonth
+      ) {
+        return { yearStr: yStr, monthKey: mm, row, source: "payDate-match" };
+      }
+    }
+  }
+  // 2ndパス: periodEnd の先頭 7 文字一致 ★ ただし payDate が未入力の行に限る (per-row guard)
+  //   payDate が設定済みの行は 1st パスの判定対象だったため、ここで periodEnd 経由で
+  //   別月の前月給与として拾ってしまうと国税庁ルール (支給日基準) と乖離する。
+  //   payDate が空 (空文字 / null / undefined) で periodEnd だけ残っている旧データや
+  //   手動消去ケースの救済 fallback として動作させる。
+  for (const yStr in allYears) {
+    const monthly = allYears[yStr]?.monthly;
+    if (!monthly) continue;
+    for (const mm in monthly) {
+      const row = monthly[mm];
+      if (!row) continue;
+      // ★ per-row guard: payDate が設定済みの行は periodEnd 経由で拾わない。
+      //   payDate を文字列として持ち、かつ空でない場合に skip。
+      //   null / undefined / 空文字列 はすべて「未入力」扱いで本パスの判定対象になる。
+      const payDate = row.payDate;
+      if (typeof payDate === "string" && payDate.length > 0) continue;
+      if (
+        typeof row.periodEnd === "string" &&
+        row.periodEnd.length >= 7 &&
+        row.periodEnd.slice(0, 7) === targetYearMonth
+      ) {
+        return { yearStr: yStr, monthKey: mm, row, source: "periodEnd-match" };
+      }
+    }
+  }
+  // 3rdパス: 年度キー Rxx → 西暦化して targetY と一致 + monthly[targetM] が存在 (最終 fallback)
+  for (const yStr in allYears) {
+    const westernYear = reiwaToWestern(yStr);
+    if (westernYear === null || westernYear === undefined) continue;
+    if (String(westernYear) !== targetY) continue;
+    const monthly = allYears[yStr]?.monthly;
+    if (monthly && monthly[targetM]) {
+      return { yearStr: yStr, monthKey: targetM, row: monthly[targetM], source: "year-key-fallback" };
+    }
+  }
+  return null;
+};
+
 // 年齢到達アラートの判定 (40歳・65歳・70歳・75歳)
 const getAgeAlerts = (dobStr, yearStr, mStr) => {
   if (!dobStr || !yearStr || !mStr) return [];
@@ -2478,6 +2592,10 @@ const calculateBonusResult = ({
   yearStr,
   taxTables = {},
   monthlyLocks = {},
+  // ★ 追加(後方互換 optional): 年度またぎ前月給与検索のためのフル years 辞書。
+  //   渡されなかった呼出経路は従来の yearData 単独参照 (= 同一年度内 fallback) のままで動作する。
+  //   1 月賞与 (前年 12 月を要する) では allYears を明示的に渡すこと。
+  allYears = null,
 }) => {
   if (!master || !bonusRow || !yearData) return {};
   const _lockYear = normalizeYear(yearStr);
@@ -2569,12 +2687,92 @@ const calculateBonusResult = ({
     priorHealthBonusStdTotal += b1Std;
   }
 
-  let prevMonthKey = "12";
-  if (b.payDate) {
-    const pMonth = parseInt(b.payDate.split("-")[1], 10);
-    if (pMonth > 1) prevMonthKey = String(pMonth - 1).padStart(2, "0");
+  // 【前月給与の参照】
+  //   旧実装は yearData (= 現在の選択年度) の monthly[prevMonthKey] だけを見ていたため、
+  //   1月賞与で前年12月給与に到達できず、無音で「前月給与なし計算 (1/divisor)」へ
+  //   フォールバックしてしまうバグがあった。本実装では:
+  //     a) bonusRow.payDate から前月の YYYY-MM を算出 (1月→前年12月、年度跨ぎ)
+  //     b) allYears 全体から payDate 一致 → 年度キー Rxx 西暦化 の 2 段検索
+  //     c) 見つかった場合は **その年度の yearStr** を calculateMonthlyResult に渡す
+  //        (rate スケジュールは yearStr+monthKey 依存のため、現在年度を渡すと料率が誤る)
+  //     d) 見つからない場合は 0円扱いせず manualRequired=true で返し、所得税の手入力を促す
+  //     e) allYears 未提供 (旧呼出経路) は従来通り yearData 単独で fallback (後方互換)
+  const prevYearMonth = getPreviousYearMonthFromPayDate(b.payDate);
+  let prevRow = null;
+  let prevLookupYearStr = null;
+  let prevLookupMonthKey = null;
+  // 検索ソース内訳:
+  //   "payDate-match"     : findPayrollRowByYearMonth の 1st パス (国税庁原則 = 支給日基準)
+  //   "periodEnd-match"   : 同 2nd パス (payDate 未入力行の periodEnd 補助 fallback)
+  //   "year-key-fallback" : 同 3rd パス (年度キー + monthKey から推定 / 両方未入力時の最終手段)
+  //   "fallback-same-year": allYears 未提供 (旧呼出経路) の同一年度内 fallback
+  //   "none"              : 前月給与未取得 (calcLog 注記対象。manualRequired=true ルートへ)
+  let prevLookupSource = "none";
+
+  if (allYears && prevYearMonth) {
+    const found = findPayrollRowByYearMonth(allYears, prevYearMonth);
+    if (found && found.row) {
+      prevRow = found.row;
+      prevLookupYearStr = found.yearStr;
+      prevLookupMonthKey = found.monthKey;
+      // findPayrollRowByYearMonth が返した source をそのまま採用。これで calcLog に
+      // 「periodEnd 一致だったのか」「payDate fallback だったのか」「年度キー推定だったのか」が
+      // 区別表示される (確認項目: どの検索方法で取得したか分かる内容になっているか)。
+      prevLookupSource = found.source || "cross-year";
+    }
   }
-  const prevRow = yearData.monthly[prevMonthKey] || {};
+
+  // 後方互換 fallback: allYears 未提供 (旧呼出経路) のときだけ走る同一年度内ルックアップ。
+  // allYears 提供済みで見つからなかった場合はこの fallback を走らせない (= 未取得として扱う)。
+  if (!prevRow && !allYears) {
+    let fallbackMonthKey = "12";
+    if (b.payDate) {
+      const pMonth = parseInt(b.payDate.split("-")[1], 10);
+      if (pMonth > 1) fallbackMonthKey = String(pMonth - 1).padStart(2, "0");
+    }
+    const fb = yearData.monthly?.[fallbackMonthKey];
+    if (fb) {
+      prevRow = fb;
+      prevLookupYearStr = yearStr;
+      prevLookupMonthKey = fallbackMonthKey;
+      prevLookupSource = "fallback-same-year";
+    }
+  }
+
+  // 前月給与データが特定できないケース。
+  //   - payDate 未入力 → 前月 YYYY-MM を算出できない
+  //   - 年度またぎ検索で該当年度オブジェクトが data.years に存在しない (真の "未取得")
+  //  → 0円扱いせず、manualRequired=true として返し UI 側で所得税の手入力を促す。
+  //    (社保系の表示は既存失敗パスと同じ null に倒し、計算ログでも参照対象年月を明示する)
+  if (!prevRow) {
+    const _bGross = (Number(b.basePay) || 0) + allowanceAmounts.reduce((s, a) => s + a.amount, 0);
+    if (prevYearMonth) {
+      calcLog.push(`⚠ 前月給与データ (${prevYearMonth}) が見つかりません → 賞与所得税は手入力で確認してください。`);
+    } else {
+      calcLog.push("⚠ 賞与支給日 (payDate) が未入力のため前月給与を特定できません → 賞与所得税は手入力で確認してください。");
+    }
+    // 手入力値が既に入っていれば、その値で incomeTax を表示する (UI 上で「入力済み手入力値」を可視化)。
+    // 入っていなければ null のままにし、UI は "計算不可" + 入力欄活性化 (manualRequired=true 経由) を出す。
+    const _manualIncomeTax = Number(b.incomeTax) || 0;
+    return {
+      basePay: Number(b.basePay) || 0,
+      grossPay: _bGross,
+      health: null, pension: null, nursing: null, childCare: null,
+      employment: null, socialTotal: null,
+      incomeTax: _manualIncomeTax > 0 ? _manualIncomeTax : null,
+      totalDeductions: null, netPay: null,
+      isBlocking: true,
+      manualRequired: true,
+      taxWarning: prevYearMonth
+        ? `前月給与データ (${prevYearMonth}) が見つからないため賞与所得税は手入力で確認してください`
+        : "賞与支給日が未入力のため前月給与を特定できません",
+      calcLog,
+    };
+  }
+
+  // 参照月年がどこから来たかを計算ログに残す (デバッグ・監査用)。
+  calcLog.push(`- 参照した前月給与年月: ${prevLookupYearStr}年度 ${prevLookupMonthKey}月 (検索ソース: ${prevLookupSource}${prevYearMonth ? `, 探索キー=${prevYearMonth}` : ""})`);
+
   let prevTaxableAlw = 0;
   allowanceDefs.forEach((def) => {
     if (def.isTaxable)
@@ -2585,8 +2783,8 @@ const calculateBonusResult = ({
     master,
     prevRow,
     settings,
-    prevMonthKey,
-    yearStr,
+    prevLookupMonthKey,
+    prevLookupYearStr,
     taxTables,
     monthlyLocks
   );
@@ -2851,7 +3049,7 @@ const calculateMonthlyAggregates = ({ monthKey, selectedYear, employees, setting
       _calc = isBonusList
         ? calculateBonusResult({
             master: emp.master, bonusRow: _row, bonusKey: monthKey,
-            settings: effectiveSettings, yearData: _yd,
+            settings: effectiveSettings, yearData: _yd, allYears: emp.data?.years || null,
             allowanceDefs: settings?.allowanceDefinitions || emp.master?.allowanceDefinitions || [],
             deductionDefs: settings?.deductionDefinitions || emp.master?.deductionDefinitions || [],
             monthKeyForRates: getBonusRateMonth(_row), yearStr: selectedYear, taxTables, monthlyLocks,
@@ -3449,11 +3647,11 @@ const checkHasNullTax = (master, data, settings, effectiveSettings, taxTables) =
       }
     }
     if (yearData.bonus && (Number(yearData.bonus.basePay) > 0 || Object.values(yearData.bonus.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-      const bRes = calculateBonusResult({ master, bonusRow: yearData.bonus, bonusKey: "bonus", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
+      const bRes = calculateBonusResult({ master, bonusRow: yearData.bonus, bonusKey: "bonus", settings: effectiveSettings, yearData, allYears: data.years, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus), yearStr, taxTables });
       if (bRes.incomeTax === null) return true;
     }
     if (yearData.bonus2 && (Number(yearData.bonus2.basePay) > 0 || Object.values(yearData.bonus2.allowanceAmounts || {}).some(v => Number(v) > 0))) {
-      const bRes2 = calculateBonusResult({ master, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: effectiveSettings, yearData, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
+      const bRes2 = calculateBonusResult({ master, bonusRow: yearData.bonus2, bonusKey: "bonus2", settings: effectiveSettings, yearData, allYears: data.years, allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(yearData.bonus2), yearStr, taxTables });
       if (bRes2.incomeTax === null) return true;
     }
   }
@@ -9940,6 +10138,7 @@ const App = () => {
           bonusKey: monthKey,
           settings: effectiveSettings,
           yearData: currentYearDataObj,
+          allYears: emp.data?.years || null,
           allowanceDefs:
             settings?.allowanceDefinitions ||
             emp.master?.allowanceDefinitions ||
@@ -10088,6 +10287,7 @@ const App = () => {
         bonusKey: monthKey,
         settings: effectiveSettings,
         yearData: yearDataObj,
+        allYears: emp.data?.years || null,
         allowanceDefs,
         deductionDefs,
         monthKeyForRates: getBonusRateMonth(rowData),
@@ -10333,6 +10533,7 @@ const App = () => {
         bonusKey: key,
         settings: effectiveSettings,
         yearData: currentYearData,
+        allYears: data?.years || null,
         allowanceDefs,
         deductionDefs,
         monthKeyForRates: getBonusRateMonth(b),
@@ -10430,7 +10631,7 @@ const App = () => {
     payDateText = rowData.payDate || "未設定";
 
     calcResult = calculateBonusResult({
-      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings: effectiveSettings, yearData: slipYearData,
+      master: emp.master, bonusRow: rowData, bonusKey: monthKey, settings: effectiveSettings, yearData: slipYearData, allYears: emp.data?.years || null,
       allowanceDefs, deductionDefs, monthKeyForRates: getBonusRateMonth(rowData), yearStr: selectedYear, taxTables, monthlyLocks,
     });
   } else {
@@ -10776,7 +10977,7 @@ const App = () => {
       if (isBonus) {
         row = yearData[targetMonth] || {};
         if (!row.payDate && !row.basePay && Object.keys(row.allowanceAmounts || {}).length === 0) return null;
-        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: targetMonth, settings: effectiveSettings, yearData, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
+        calc = calculateBonusResult({master: m, bonusRow: row, bonusKey: targetMonth, settings: effectiveSettings, yearData, allYears: emp.data?.years || null, allowanceDefs, deductionDefs: settings?.deductionDefinitions || [], monthKeyForRates: getBonusRateMonth(row), yearStr: selectedYear, taxTables, monthlyLocks});
       } else {
         row = yearData.monthly?.[targetMonth] || {};
         calc = calculateMonthlyResult(m, row, effectiveSettings, targetMonth, selectedYear, taxTables, monthlyLocks);
@@ -14878,6 +15079,7 @@ const App = () => {
                           bonusKey: selectedListMonth,
                           settings: effectiveSettings,
                           yearData: currentYearDataObj,
+                          allYears: emp.data?.years || null,
                           allowanceDefs,
                           deductionDefs,
                           monthKeyForRates: getBonusRateMonth(rowData),
@@ -19692,6 +19894,7 @@ const App = () => {
                     bonusKey,
                     settings: effectiveSettings,
                     yearData,
+                    allYears: emp.data?.years || null,
                     allowanceDefs,
                     deductionDefs,
                     monthKeyForRates: getBonusRateMonth(bonusRow),

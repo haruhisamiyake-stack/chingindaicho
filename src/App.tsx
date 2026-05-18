@@ -6252,6 +6252,21 @@ const App = () => {
   const [overrideInputValue, setOverrideInputValue] = useState("");
   const [overrideInputMemo, setOverrideInputMemo] = useState("");
 
+  // 会社個別設定タブ (activeTab === "settings") のカテゴリ折りたたみ state (UI 専用)。
+  //   * Firestore / settings には保存しない (UI 表示状態のみ)
+  //   * 初期状態は「基本情報」だけ open、それ以外は close
+  //   * 設定値そのもの (handleSettingChange など) には影響しない
+  //   * 設定タブを離れて再オープンすると毎回この初期状態に戻る (= 都度「基本情報だけ開く」)
+  const [settingsCategoryOpen, setSettingsCategoryOpen] = useState({
+    basic:     true,   // 会社情報
+    payroll:   false,  // 年度ロック / 保険料率
+    allowance: false,  // 手当・控除定義
+    ledger:    false,  // 賃金台帳 表示順
+    bonus:     false,  // 賞与表示名
+    yayoi:     false,  // 部門 / 仕訳勘定科目 (弥生連携)
+    backup:    false,  // バックアップ管理
+  });
+
   // ★ 帳票出力用のステート
   const [printDocType, setPrintDocType] = useState("payslip"); // payslip, ledger, withholding
   const [printTargetMonth, setPrintTargetMonth] = useState("01");
@@ -17708,7 +17723,30 @@ const App = () => {
                   会社共通設定
                 </h2>
               </div>
-              <div className="p-8 space-y-10">
+              {/* 会社共通設定を 7 カテゴリの折りたたみカードに整理 (settingsCategoryOpen state)。
+                  各カテゴリは <button> でトグル可能。中身の <section> 群は原則そのまま再利用し、
+                  外側カード + 開閉条件で包むだけにしてある (input/select/onChange/handleSettingChange は無変更)。 */}
+              <div className="p-6 space-y-4">
+                {/* ===== カテゴリ: 基本情報 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, basic: !p.basic }))}
+                    aria-expanded={settingsCategoryOpen.basic}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.basic ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">基本情報</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">会社名・住所・締日・支給日・メモなど</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.basic && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 1. 会社情報 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
@@ -17862,6 +17900,31 @@ const App = () => {
                   </div>
                 </section>
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 基本情報 ===== */}
+
+                {/* ===== カテゴリ: 給与計算設定 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, payroll: !p.payroll }))}
+                    aria-expanded={settingsCategoryOpen.payroll}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.payroll ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">給与計算設定</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">年度ロック設定・保険料率設定</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.payroll && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 2. 年度ロック設定 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
@@ -18183,6 +18246,31 @@ const App = () => {
                   ))}
                 </section>
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 給与計算設定 ===== */}
+
+                {/* ===== カテゴリ: 手当・控除設定 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, allowance: !p.allowance }))}
+                    aria-expanded={settingsCategoryOpen.allowance}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.allowance ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">手当・控除設定</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">支給・控除項目（手当定義・控除定義）</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.allowance && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 4. 支給・控除項目設定 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">
@@ -18443,6 +18531,31 @@ const App = () => {
 
                 {/* (源泉徴収税額表管理はポータルへ移動しました) */}
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 手当・控除設定 ===== */}
+
+                {/* ===== カテゴリ: 賃金台帳設定 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, ledger: !p.ledger }))}
+                    aria-expanded={settingsCategoryOpen.ledger}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.ledger ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">賃金台帳設定</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">賃金台帳での手当・控除の表示順</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.ledger && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 4.5 賃金台帳 表示順設定 (UI 表示のみ・計算/保存/印刷には影響しない) */}
                 <section>
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b pb-2">
@@ -18603,6 +18716,31 @@ const App = () => {
                   </div>
                 </section>
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 賃金台帳設定 ===== */}
+
+                {/* ===== カテゴリ: 賞与設定 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, bonus: !p.bonus }))}
+                    aria-expanded={settingsCategoryOpen.bonus}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.bonus ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">賞与設定</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">賞与1・賞与2 の表示名</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.bonus && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 4.6 賞与表示名設定 (UI / 印刷 / 仕訳摘要 / 弥生取込ファイル名の表示文言のみ・データキー bonus/bonus2 は不変) */}
                 <section>
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b pb-2">
@@ -18675,6 +18813,31 @@ const App = () => {
                   </div>
                 </section>
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 賞与設定 ===== */}
+
+                {/* ===== カテゴリ: 弥生会計連携 (部門設定 + 仕訳勘定科目設定) ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, yayoi: !p.yayoi }))}
+                    aria-expanded={settingsCategoryOpen.yayoi}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.yayoi ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">弥生会計連携</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">部門設定・仕訳勘定科目設定（月次給与仕訳 / 賞与仕訳）</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.yayoi && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 5. 部門設定 (弥生会計連携・第1弾) */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-2 border-b pb-2">
@@ -19337,6 +19500,31 @@ const App = () => {
                   </div>
                 </section>
 
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: 弥生会計連携 ===== */}
+
+                {/* ===== カテゴリ: バックアップ・管理 ===== */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsCategoryOpen((p) => ({ ...p, backup: !p.backup }))}
+                    aria-expanded={settingsCategoryOpen.backup}
+                    className="w-full flex items-center justify-between px-5 py-3 bg-slate-50 hover:bg-slate-100 text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500 text-base font-bold leading-none w-4 text-center">
+                        {settingsCategoryOpen.backup ? "▼" : "▶"}
+                      </span>
+                      <div>
+                        <h2 className="font-black text-sm text-slate-800">バックアップ・管理</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">設定バックアップ / リストア / 管理操作</p>
+                      </div>
+                    </div>
+                  </button>
+                  {settingsCategoryOpen.backup && (
+                    <div className="p-6 border-t border-slate-200 space-y-6">
                 {/* 7. バックアップ管理 */}
                 <section>
                   <h3 className="text-sm font-bold text-slate-700 mb-4 border-b pb-2">
@@ -19439,6 +19627,10 @@ const App = () => {
                     </div>
                   </div>
                 </section>
+                    </div>
+                  )}
+                </div>
+                {/* ===== /カテゴリ: バックアップ・管理 ===== */}
               </div>
             </div>
           </div>

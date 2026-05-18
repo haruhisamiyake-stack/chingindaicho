@@ -334,6 +334,14 @@ const DEFAULT_SETTINGS = {
   paymentDay: "翌月15",
   editableYear: "R08",
   taxCalcMethod: "taxTable", // ★追加：所得税計算方式 (taxTable or densan)
+  // 賃金台帳 (全年ビュー / 月別ビュー) の手当・控除行の表示順設定。
+  //   allowances: 手当定義ID の表示順 (空配列なら allowanceDefinitions の元順をそのまま使用)
+  //   deductions: 控除定義ID の表示順 (空配列なら deductionDefinitions の元順をそのまま使用)
+  // 用途は「賃金台帳の見た目」だけ。仕訳勘定科目設定の並び順とは独立 (混ぜない方針)。
+  // 金額計算・保存値・印刷ロジック・弥生取込テキストには一切影響しない (getOrderedDefinitions で
+  // 並び替えた配列を render 段でだけ使用する)。
+  // フォールバック: ledgerItemOrder 自体や子配列が undefined でも getOrderedDefinitions が安全側で空扱いするため画面は落ちない。
+  ledgerItemOrder: { allowances: [], deductions: [] },
   allowanceDefinitions: [
     {
       id: "extra",
@@ -401,6 +409,40 @@ const DEFAULT_SETTINGS = {
     allowances: {},
     deductions: {},
   },
+};
+
+// 賃金台帳 (全年ビュー / 月別ビュー) 用 表示順並び替え helper。
+//   definitions : allowanceDefinitions / deductionDefinitions 等の定義配列
+//   orderIds    : settings.ledgerItemOrder.allowances / deductions (id 文字列の配列)
+// 仕様:
+//   1. orderIds に含まれる id を先頭側に、orderIds の順番でレンダリング順を決める
+//   2. orderIds に存在するが definitions に存在しない id は無視 (削除済み定義の残骸を出さない)
+//   3. definitions に存在するが orderIds に含まれない id は末尾に追加 (新規手当・新規控除の自動補完)
+//   4. 末尾追加分は definitions の元順を維持する
+// 戻り値は definitions の要素を並び替えた新しい配列 (definitions そのものは不変)。
+// definitions が undefined / null や非配列でも、orderIds が undefined でも安全に [] を返す
+// (画面が落ちないための防御)。
+// 用途は表示順のみ。金額取得・計算・保存・印刷・弥生取込のロジックには絶対に使わない。
+const getOrderedDefinitions = (definitions, orderIds) => {
+  const defs = Array.isArray(definitions) ? definitions.filter((d) => d && d.id != null) : [];
+  const ids = Array.isArray(orderIds) ? orderIds : [];
+  if (defs.length === 0) return [];
+  const byId = new Map();
+  defs.forEach((d) => { byId.set(d.id, d); });
+  const head = [];
+  const used = new Set();
+  for (const id of ids) {
+    if (used.has(id)) continue;
+    const d = byId.get(id);
+    if (d) {
+      head.push(d);
+      used.add(id);
+    }
+    // definitions に存在しない id は無視 (削除済み定義の残骸排除)
+  }
+  // 元順を維持しつつ未登録項目を末尾に追加
+  const tail = defs.filter((d) => !used.has(d.id));
+  return [...head, ...tail];
 };
 
 // 仕訳マッピング: 動的項目 (手当/控除) 用の安全なフォールバック既定値。
@@ -9874,6 +9916,53 @@ const App = () => {
   };
 
   // ============================================================================
+  // 賃金台帳 表示順設定: 手当・控除の上下移動 / 標準順リセット
+  // ----------------------------------------------------------------------------
+  // settings.ledgerItemOrder = { allowances: [id,...], deductions: [id,...] }
+  // を更新するだけで、月次給与計算 / 賞与計算 / 所得税 / 社保 / 保存処理 / 印刷 / 弥生取込
+  // のいずれにも影響しない (表示順だけ変える)。
+  // 既存設定が無い (旧データ) でも安全に動作するよう、毎回 getOrderedDefinitions で
+  // 「definitions に存在する id だけ」「新規項目は末尾」に整地してから差し替える。
+  // ============================================================================
+  const moveLedgerOrderItem = (kind, fromIdx, direction) => {
+    // kind: "allowance" | "deduction"
+    // direction: -1 (上へ) | +1 (下へ)
+    const defs = kind === "allowance"
+      ? (settings?.allowanceDefinitions || [])
+      : (settings?.deductionDefinitions || []);
+    const curOrder = kind === "allowance"
+      ? (settings?.ledgerItemOrder?.allowances || [])
+      : (settings?.ledgerItemOrder?.deductions || []);
+    // 現在の表示順 (=並べ替えダイアログの行順) を一旦解決して id 配列にする。
+    // これにより削除済み id の残骸も末尾未登録項目も含めて確定した順序で扱える。
+    const orderedIds = getOrderedDefinitions(defs, curOrder).map((d) => d.id);
+    const toIdx = fromIdx + direction;
+    if (fromIdx < 0 || fromIdx >= orderedIds.length) return;
+    if (toIdx < 0 || toIdx >= orderedIds.length) return;
+    const next = [...orderedIds];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    // 他キーを潰さないため、現在の ledgerItemOrder を起点に部分更新する。
+    const curWhole = settings?.ledgerItemOrder || { allowances: [], deductions: [] };
+    handleSettingChange("ledgerItemOrder", {
+      allowances: kind === "allowance" ? next : (curWhole.allowances || []),
+      deductions: kind === "deduction" ? next : (curWhole.deductions || []),
+    });
+  };
+
+  const resetLedgerOrderToDefault = () => {
+    if (!window.confirm(
+      "賃金台帳の手当・控除の表示順を標準順に戻します。\n" +
+      "手当・控除の定義や給与データは変更されません。\n" +
+      "実行しますか？"
+    )) return;
+    handleSettingChange("ledgerItemOrder", {
+      allowances: (settings?.allowanceDefinitions || []).map((d) => d.id).filter((id) => id != null),
+      deductions: (settings?.deductionDefinitions || []).map((d) => d.id).filter((id) => id != null),
+    });
+  };
+
+  // ============================================================================
   // 弥生会計連携: 部門マスタ / 仕訳マッピング 更新 helper
   // ----------------------------------------------------------------------------
   // handleSettingChange は top-level shallow merge のため、journalMapping のような
@@ -12105,6 +12194,23 @@ const App = () => {
     return [];
   }, [settings?.deductionDefinitions, employees]);
 
+  // 賃金台帳 (全年ビュー / 月別ビュー) 専用の並び替え済み定義配列。
+  //   * settings.ledgerItemOrder.allowances / deductions の id 配列に従って並び替える
+  //   * 新規手当・新規控除 (orderIds に未登録) は末尾に自動追加
+  //   * orderIds に残った削除済み id は無視 (画面に出さない)
+  //   * 並び順設定が未保存 / 空配列なら、allAllowances / allDeductions の元順をそのまま使う
+  // 用途は賃金台帳の表示行順だけ。給与明細一覧表 (payrollList タブ) や仕訳プレビュー、
+  // 計算/保存/印刷/弥生取込には一切使わない (これらは従来通り allAllowances / allDeductions /
+  // settings.allowanceDefinitions を直接参照する)。
+  const ledgerOrderedAllowances = useMemo(
+    () => getOrderedDefinitions(allAllowances, settings?.ledgerItemOrder?.allowances || []),
+    [allAllowances, settings?.ledgerItemOrder?.allowances]
+  );
+  const ledgerOrderedDeductions = useMemo(
+    () => getOrderedDefinitions(allDeductions, settings?.ledgerItemOrder?.deductions || []),
+    [allDeductions, settings?.ledgerItemOrder?.deductions]
+  );
+
   const renderPayslip = (empId, emp, monthKey) => {
   const slipYearData = emp.data?.years?.[selectedYear] || createInitialYearData(selectedYear, settings);
   const isBonus = monthKey === "bonus" || monthKey === "bonus2";
@@ -13698,7 +13804,8 @@ const App = () => {
                           基本給
                         </th>
                                                {" "}
-                        {allAllowances.map((def) => (
+                        {/* 月別ビュー 手当 列ヘッダ: settings.ledgerItemOrder.allowances に従って並び替える (入力セル側 と同順) */}
+                        {ledgerOrderedAllowances.map((def) => (
                           <th
                             key={def.id}
                             className="border border-slate-200 p-2 min-w-[100px] bg-slate-100"
@@ -13731,7 +13838,8 @@ const App = () => {
                           住民税
                         </th>
                                                {" "}
-                        {allDeductions.map((def) => (
+                        {/* 月別ビュー 控除 列ヘッダ: settings.ledgerItemOrder.deductions に従って並び替える (入力セル側 と同順) */}
+                        {ledgerOrderedDeductions.map((def) => (
                           <th
                             key={def.id}
                             className="border border-slate-200 p-2 min-w-[100px] bg-slate-100"
@@ -13836,7 +13944,8 @@ const App = () => {
                               </td>
                                                                                
                                    {" "}
-                              {allAllowances.map((def) => (
+                              {/* 月別ビュー 手当 入力セル: settings.ledgerItemOrder.allowances 順 (列ヘッダと同順) */}
+                              {ledgerOrderedAllowances.map((def) => (
                                 <td
                                   key={def.id}
                                   className="border border-slate-200 p-1 bg-white"
@@ -13912,7 +14021,8 @@ const App = () => {
                                                            {" "}
                               </td>
                                                          {" "}
-                              {allDeductions.map((def) => (
+                              {/* 月別ビュー 控除 入力セル: settings.ledgerItemOrder.deductions 順 (列ヘッダと同順) */}
+                              {ledgerOrderedDeductions.map((def) => (
                                 <td
                                   key={def.id}
                                   className="border border-slate-200 p-1 bg-white"
@@ -14915,7 +15025,10 @@ const App = () => {
                             </td>
                           </tr>
 
-                          {allAllowances.map((def) => (
+                          {/* 全年ビュー 手当行: settings.ledgerItemOrder.allowances に従って並び替える。
+                              未保存 (空配列) の場合は allowanceDefinitions の元順をそのまま使う。
+                              金額の取得 (currentYearData.monthly[m]?.allowanceAmounts?.[def.id]) は変更しない。 */}
+                          {ledgerOrderedAllowances.map((def) => (
                             <tr key={def.id}>
                               <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold flex justify-between items-center text-[11px]">
                                 {def.name}
@@ -15440,7 +15553,11 @@ const App = () => {
                             </td>
                           </tr>
 
-                          {(settings?.deductionDefinitions || []).map((def) => (
+                          {/* 全年ビュー 控除行: settings.ledgerItemOrder.deductions に従って並び替える。
+                              未保存 (空配列) の場合は deductionDefinitions の元順をそのまま使う。
+                              金額の取得 (currentYearData.monthly[m]?.deductionAmounts?.[def.id]) や
+                              手動上書きキー (`deduction_${def.id}`) のロジックは変更しない。 */}
+                          {ledgerOrderedDeductions.map((def) => (
                             <tr key={def.id}>
                               <td className="border border-gray-300 p-1.5 sticky left-0 z-20 bg-white font-bold text-red-700 flex justify-between items-center text-[11px]">
                                 {def.name}{" "}
@@ -17762,6 +17879,166 @@ const App = () => {
                 </section>
 
                 {/* (源泉徴収税額表管理はポータルへ移動しました) */}
+
+                {/* 4.5 賃金台帳 表示順設定 (UI 表示のみ・計算/保存/印刷には影響しない) */}
+                <section>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b pb-2">
+                    <h3 className="text-sm font-bold text-slate-700">
+                      賃金台帳 表示順設定
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={resetLedgerOrderToDefault}
+                      className="px-3 py-1.5 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded border border-amber-300 transition-colors flex items-center gap-1"
+                      title="賃金台帳の手当・控除の表示順を現在の手当・控除定義の登録順に戻します。手当・控除の定義そのものや給与データには影響しません。"
+                    >
+                      ⟲ 標準順に戻す
+                    </button>
+                  </div>
+                  <div className="bg-sky-50 border border-sky-200 text-sky-700 p-3 rounded-lg mb-4 text-xs font-bold">
+                    <p className="flex items-center gap-1 mb-1">
+                      <Info size={14} /> 賃金台帳（全年ビュー・月別ビュー）の手当行・控除行の並び順を会社ごとに調整できます。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 並び替えるのは表示順だけです。月次給与・賞与・所得税・社会保険料の計算、保存値、印刷、弥生取込テキストには影響しません。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 仕訳勘定科目設定の並び順とは独立です（賃金台帳専用の設定）。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 基本給・総支給額・差引支給額・社会保険料・所得税・住民税・標準報酬月額などの固定行の位置は変更できません。手当エリア / 控除エリア内でだけ並び替えできます。
+                    </p>
+                    <p className="ml-4 text-sky-600 font-normal">
+                      ※ 新規追加された手当・控除は自動的に末尾に表示されます（↑↓で位置を確定すると保存されます）。
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* 手当 並び替え */}
+                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                      <h4 className="text-sm font-black text-emerald-700 flex items-center gap-2 border-b border-slate-200 pb-2 mb-3">
+                        <PlusCircle size={16} /> 手当項目（表示順）
+                      </h4>
+                      <div className="space-y-2">
+                        {(() => {
+                          const ordered = getOrderedDefinitions(
+                            settings?.allowanceDefinitions || [],
+                            settings?.ledgerItemOrder?.allowances || []
+                          );
+                          if (ordered.length === 0) {
+                            return (
+                              <p className="text-xs text-slate-400 text-center py-4 font-bold">
+                                並び替え対象の手当項目がありません
+                              </p>
+                            );
+                          }
+                          return ordered.map((def, idx) => (
+                            <div
+                              key={def.id}
+                              className="flex items-center gap-2 bg-white border border-slate-200 rounded px-3 py-2 hover:border-emerald-300 transition-colors"
+                            >
+                              <div className="flex flex-col gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => moveLedgerOrderItem("allowance", idx, -1)}
+                                  disabled={idx === 0}
+                                  title="上へ移動"
+                                  aria-label={`${def.name || "(無題)"}を上へ移動`}
+                                  className="text-[10px] leading-none px-1.5 py-0.5 rounded border bg-slate-100 hover:bg-emerald-100 text-slate-500 hover:text-emerald-700 border-slate-200 hover:border-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => moveLedgerOrderItem("allowance", idx, +1)}
+                                  disabled={idx === ordered.length - 1}
+                                  title="下へ移動"
+                                  aria-label={`${def.name || "(無題)"}を下へ移動`}
+                                  className="text-[10px] leading-none px-1.5 py-0.5 rounded border bg-slate-100 hover:bg-emerald-100 text-slate-500 hover:text-emerald-700 border-slate-200 hover:border-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  ↓
+                                </button>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-bold text-slate-700 truncate">
+                                  {def.name || "(無題)"}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono truncate">
+                                  id: {def.id}
+                                </div>
+                              </div>
+                              <div className="text-[10px] text-slate-400 font-mono flex-shrink-0">
+                                {idx + 1}
+                              </div>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* 控除 並び替え */}
+                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                      <h4 className="text-sm font-black text-red-700 flex items-center gap-2 border-b border-slate-200 pb-2 mb-3">
+                        <MinusCircle size={16} /> 控除項目（表示順）
+                      </h4>
+                      <div className="space-y-2">
+                        {(() => {
+                          const ordered = getOrderedDefinitions(
+                            settings?.deductionDefinitions || [],
+                            settings?.ledgerItemOrder?.deductions || []
+                          );
+                          if (ordered.length === 0) {
+                            return (
+                              <p className="text-xs text-slate-400 text-center py-4 font-bold">
+                                並び替え対象の控除項目がありません
+                              </p>
+                            );
+                          }
+                          return ordered.map((def, idx) => (
+                            <div
+                              key={def.id}
+                              className="flex items-center gap-2 bg-white border border-slate-200 rounded px-3 py-2 hover:border-red-300 transition-colors"
+                            >
+                              <div className="flex flex-col gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => moveLedgerOrderItem("deduction", idx, -1)}
+                                  disabled={idx === 0}
+                                  title="上へ移動"
+                                  aria-label={`${def.name || "(無題)"}を上へ移動`}
+                                  className="text-[10px] leading-none px-1.5 py-0.5 rounded border bg-slate-100 hover:bg-red-100 text-slate-500 hover:text-red-700 border-slate-200 hover:border-red-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => moveLedgerOrderItem("deduction", idx, +1)}
+                                  disabled={idx === ordered.length - 1}
+                                  title="下へ移動"
+                                  aria-label={`${def.name || "(無題)"}を下へ移動`}
+                                  className="text-[10px] leading-none px-1.5 py-0.5 rounded border bg-slate-100 hover:bg-red-100 text-slate-500 hover:text-red-700 border-slate-200 hover:border-red-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  ↓
+                                </button>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-bold text-slate-700 truncate">
+                                  {def.name || "(無題)"}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono truncate">
+                                  id: {def.id}
+                                </div>
+                              </div>
+                              <div className="text-[10px] text-slate-400 font-mono flex-shrink-0">
+                                {idx + 1}
+                              </div>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                </section>
 
                 {/* 5. 部門設定 (弥生会計連携・第1弾) */}
                 <section>
@@ -23273,7 +23550,9 @@ const App = () => {
                               <td className="border border-black p-1 text-right font-black bg-gray-200">{formatCurrency(results.sums.basePay + results.bonusTotal.basePay)}</td>
                             </tr>
 
-                            {(settings?.allowanceDefinitions || []).map((def) => (
+                            {/* 賃金台帳 印刷プレビュー 手当行: 画面表示(全年ビュー)と同じ表示順 ledgerOrderedAllowances を使用 (settings.ledgerItemOrder.allowances 反映)。
+                                金額取得 (allowanceAmounts?.[def.id]) や集計 (results.sums.allowances[def.id] / results.bonusTotal.allowances[def.id]) は変更しない。 */}
+                            {ledgerOrderedAllowances.map((def) => (
                               <tr key={def.id}>
                                 <td className="border border-black p-1 font-bold">
                                   {def.name}{" "}
@@ -23343,7 +23622,9 @@ const App = () => {
                               <td className="border border-black p-1 text-right font-black bg-gray-200">{formatCurrency(results.sums.residentTax + results.bonusTotal.residentTax)}</td>
                             </tr>
 
-                            {(settings?.deductionDefinitions || []).map((def) => (
+                            {/* 賃金台帳 印刷プレビュー 控除行: 画面表示(全年ビュー)と同じ表示順 ledgerOrderedDeductions を使用 (settings.ledgerItemOrder.deductions 反映)。
+                                金額取得 (deductionAmounts?.[def.id]) や手動上書きキー (deduction_${def.id})、集計値は変更しない。 */}
+                            {ledgerOrderedDeductions.map((def) => (
                               <tr key={def.id}>
                                 <td className="border border-black p-1 font-bold">{def.name}</td>
                                 {MONTHS.map((m) => (
@@ -24256,7 +24537,9 @@ const App = () => {
                       </td>
                     </tr>
 
-                    {(settings?.allowanceDefinitions || []).map((def) => (
+                    {/* 賃金台帳 実印刷出力 手当行: 画面表示(全年ビュー)と同じ表示順 ledgerOrderedAllowances を使用。
+                        印刷時の並びを画面と一致させる。金額・集計の取得方法は変更しない。 */}
+                    {ledgerOrderedAllowances.map((def) => (
                       <tr key={def.id}>
                         <td className="border border-black p-1 font-bold">
                           {def.name}{" "}
@@ -24445,7 +24728,9 @@ const App = () => {
                       </td>
                     </tr>
 
-                    {(settings?.deductionDefinitions || []).map((def) => (
+                    {/* 賃金台帳 実印刷出力 控除行: 画面表示(全年ビュー)と同じ表示順 ledgerOrderedDeductions を使用。
+                        印刷時の並びを画面と一致させる。金額・集計・手動上書きキーは変更しない。 */}
+                    {ledgerOrderedDeductions.map((def) => (
                       <tr key={def.id}>
                         <td className="border border-black p-1 font-bold">
                           {def.name}
